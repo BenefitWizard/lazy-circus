@@ -110,20 +110,20 @@ Lazy Circus is an effect framework for Haskell built on **Church-encoded free mo
 ### Architecture (layers from bottom up)
 
 ```
-┌─────────────────────────────────────────────────┐
-│  ScenarioProgram s a                            │  Orchestration Layer
-│  (logging, errors, time, async, context)        │
-├─────────────────────────────────────────────────┤
-│  Script a                                       │  Coproduct (sum of effects)
-│  TelegramScript | MailScript | AIScript | DBScript│
-├─────────────────────────────────────────────────┤
-│  Scene-DSL  (DBLangF, TelegramScriptF, ...)     │  Effect Functors (GADT)
-│  + built-in LogLangF for logging                │
-├─────────────────────────────────────────────────┤
-│  Performer  (typeclass-interpreters)            │  Execution Layer
-│  runDB, runTelegram, runAI, runMail             │
-│  + DefaultPerformer for production              │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  ScenarioProgram s a                                 │  Orchestration Layer
+│  (logging, errors, time, async, context)             │
+├──────────────────────────────────────────────────────┤
+│  Script a                                            │  Coproduct (sum of effects)
+│  TelegramScript | MailScript | AIScript | DBScript   │
+├──────────────────────────────────────────────────────┤
+│  Scene-DSL  (DBLangF, TelegramScriptF, ...)          │  Effect Functors (GADT)
+│  + built-in LogLangF for logging                     │
+├──────────────────────────────────────────────────────┤
+│  Performer  (typeclass-interpreters)                 │  Execution Layer
+│  runDB, runTelegram, runAI, runMail                  │
+│  + DefaultPerformer for production                   │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
