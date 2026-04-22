@@ -69,7 +69,7 @@ First, add the repository to your `cabal.project` file:
 ```cabal
 source-repository-package
   type: git
-  location: https://github.com/<your-username>/lazy-circus.git
+  location: https://github.com/BenefitWizard/lazy-circus.git
   tag: <commit-hash>
 ```
 
@@ -84,7 +84,7 @@ dependencies:
 Add the library to your `extra-deps` with the repository and commit:
 ```yaml
 extra-deps:
-  - github: "<your-username>/lazy-circus"
+  - github: "BenefitWizard/lazy-circus"
     commit: "<commit-hash>"
 ```
 
