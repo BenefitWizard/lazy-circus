@@ -1,0 +1,302 @@
+cabal-version: 2.0
+
+-- This file has been generated from package.yaml by hpack version 0.38.0.
+--
+-- see: https://github.com/sol/hpack
+
+name:           lazy-circus
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/BenefitWizard/lazy-circus#readme>
+homepage:       https://github.com/BenefitWizard/lazy-circus#readme
+bug-reports:    https://github.com/BenefitWizard/lazy-circus/issues
+author:         Aleksandr Tortsev
+maintainer:     acialo@yandex.ru
+copyright:      2026 Author name here
+license:        MIT
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+    CHANGELOG.md
+
+source-repository head
+  type: git
+  location: https://github.com/BenefitWizard/lazy-circus
+
+library
+  exposed-modules:
+      LazyCircus
+      LazyCircus.AI
+      LazyCircus.AI.POML
+      LazyCircus.AI.POML.Table
+      LazyCircus.AI.POML.Types
+      LazyCircus.App
+      LazyCircus.App.Default
+      LazyCircus.App.Log
+      LazyCircus.AsyncWorker
+      LazyCircus.AsyncWorker.Types
+      LazyCircus.Base64
+      LazyCircus.DB.Class
+      LazyCircus.DB.Service
+      LazyCircus.DB.Types
+      LazyCircus.DB.Types.Embed
+      LazyCircus.DB.WithConnection
+      LazyCircus.LangCode
+      LazyCircus.Mail
+      LazyCircus.Performer
+      LazyCircus.Performer.Common
+      LazyCircus.Performer.Default
+      LazyCircus.Scenario
+      LazyCircus.Scene.AI
+      LazyCircus.Scene.AI.Class
+      LazyCircus.Scene.AI.Lang
+      LazyCircus.Scene.DB
+      LazyCircus.Scene.DB.Class
+      LazyCircus.Scene.DB.Lang
+      LazyCircus.Scene.DB.RLS
+      LazyCircus.Scene.Log
+      LazyCircus.Scene.Mail
+      LazyCircus.Scene.Mail.Class
+      LazyCircus.Scene.Mail.Lang
+      LazyCircus.Scene.Telegram
+      LazyCircus.Scene.Telegram.Class
+      LazyCircus.Scene.Telegram.Lang
+      LazyCircus.Script
+      LazyCircus.Telegram
+      LazyCircus.Telegram.Default
+      LazyCircus.Telegram.Types
+      LazyCircus.Testing.Performer
+  other-modules:
+      Paths_lazy_circus
+  autogen-modules:
+      Paths_lazy_circus
+  hs-source-dirs:
+      src
+  default-extensions:
+      MultiWayIf
+      OverloadedStrings
+      NoImplicitPrelude
+      GADTs
+      FlexibleContexts
+      FlexibleInstances
+      TypeFamilies
+      TypeApplications
+      StrictData
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , base64
+    , beam-core
+    , beam-postgres
+    , cassava
+    , crypton
+    , crypton-x509
+    , crypton-x509-store
+    , free
+    , http-client
+    , http-client-tls
+    , http-types
+    , mime-mail
+    , openai
+    , postgresql-simple
+    , rio
+    , servant
+    , servant-auth
+    , servant-auth-server
+    , servant-client
+    , smtp-mail
+    , telegram-bot-api
+    , text
+    , unordered-containers
+    , uuid
+  default-language: GHC2021
+
+library common-circus
+  exposed-modules:
+      BotApp
+      BotScenarios
+      Common
+      DemoEnv
+  other-modules:
+      Paths_lazy_circus
+  autogen-modules:
+      Paths_lazy_circus
+  hs-source-dirs:
+      common
+  default-extensions:
+      MultiWayIf
+      OverloadedStrings
+      NoImplicitPrelude
+      GADTs
+      FlexibleContexts
+      FlexibleInstances
+      TypeFamilies
+      TypeApplications
+      StrictData
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , base64
+    , beam-core
+    , beam-postgres
+    , cassava
+    , crypton
+    , crypton-x509
+    , crypton-x509-store
+    , free
+    , http-client
+    , http-client-tls
+    , http-types
+    , jose
+    , lazy-circus
+    , mime-mail
+    , openai
+    , postgresql-simple
+    , rio
+    , servant
+    , servant-auth
+    , servant-auth-server
+    , servant-client
+    , smtp-mail
+    , telegram-bot-api
+    , telegram-bot-simple
+    , text
+    , unordered-containers
+    , uuid
+  default-language: GHC2021
+
+executable bot
+  main-is: BotMain.hs
+  other-modules:
+      Paths_lazy_circus
+  autogen-modules:
+      Paths_lazy_circus
+  hs-source-dirs:
+      app/bot
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , base64
+    , beam-core
+    , beam-postgres
+    , cassava
+    , common-circus
+    , crypton
+    , crypton-x509
+    , crypton-x509-store
+    , free
+    , hashable
+    , http-client
+    , http-client-tls
+    , http-types
+    , jose
+    , lazy-circus
+    , mime-mail
+    , openai
+    , postgresql-simple
+    , rio
+    , servant
+    , servant-auth
+    , servant-auth-server
+    , servant-client
+    , smtp-mail
+    , telegram-bot-api
+    , telegram-bot-simple
+    , text
+    , unordered-containers
+    , uuid
+  default-language: GHC2021
+
+executable example
+  main-is: Example.hs
+  other-modules:
+      Example.DemoScenarios
+      Paths_lazy_circus
+  autogen-modules:
+      Paths_lazy_circus
+  hs-source-dirs:
+      app/example
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , base64
+    , beam-core
+    , beam-postgres
+    , cassava
+    , common-circus
+    , crypton
+    , crypton-x509
+    , crypton-x509-store
+    , free
+    , http-client
+    , http-client-tls
+    , http-types
+    , jose
+    , lazy-circus
+    , mime-mail
+    , openai
+    , postgresql-simple
+    , rio
+    , servant
+    , servant-auth
+    , servant-auth-server
+    , servant-client
+    , smtp-mail
+    , telegram-bot-api
+    , telegram-bot-simple
+    , text
+    , unordered-containers
+    , uuid
+  default-language: GHC2021
+
+test-suite lazy-circus-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      BotScenariosSpec
+      DBLangSpec
+      LogSpec
+      TestDbSupport
+      Paths_lazy_circus
+  autogen-modules:
+      Paths_lazy_circus
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      aeson
+    , async
+    , base >=4.7 && <5
+    , base64
+    , beam-core
+    , beam-postgres
+    , cassava
+    , common-circus
+    , crypton
+    , crypton-x509
+    , crypton-x509-store
+    , free
+    , hspec
+    , http-client
+    , http-client-tls
+    , http-types
+    , lazy-circus
+    , mime-mail
+    , openai
+    , postgresql-simple
+    , rio
+    , servant
+    , servant-auth
+    , servant-auth-server
+    , servant-client
+    , smtp-mail
+    , telegram-bot-api
+    , text
+    , unordered-containers
+    , uuid
+  default-language: GHC2021
+  build-tool-depends: hspec-discover:hspec-discover == 2.*

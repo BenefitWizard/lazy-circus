@@ -1,0 +1,143 @@
+name: lazy-circus
+version: 0.1.0.0
+language: GHC2021
+github: "BenefitWizard/lazy-circus"
+license: MIT
+author: "Aleksandr Tortsev"
+maintainer: "acialo@yandex.ru"
+copyright: "2026 Author name here"
+
+extra-source-files:
+  - README.md
+  - CHANGELOG.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of the package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description: Please see the README on GitHub at
+  <https://github.com/BenefitWizard/lazy-circus#readme>
+
+dependencies:
+  - base >= 4.7 && < 5
+  - rio
+  - text
+  - free
+  - uuid
+  - postgresql-simple
+  - beam-core
+  - beam-postgres
+  - openai
+  - aeson
+  - servant
+  - servant-client
+  - servant-auth
+  - servant-auth-server
+  - telegram-bot-api
+  - cassava
+  - smtp-mail
+  - mime-mail
+  - crypton
+  - crypton-x509
+  - crypton-x509-store
+  - base64
+  - http-client
+  - http-client-tls
+  - http-types
+  - unordered-containers
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Widentities
+  - -Wincomplete-record-updates
+  - -Wincomplete-uni-patterns
+  - -Wmissing-export-lists
+  - -Wmissing-home-modules
+  - -Wpartial-fields
+  - -Wredundant-constraints
+
+library:
+  source-dirs: src
+  default-extensions:
+    - MultiWayIf
+    - OverloadedStrings
+    - NoImplicitPrelude
+    - GADTs
+    - FlexibleContexts
+    - FlexibleInstances
+    - TypeFamilies
+    - TypeApplications
+    - StrictData
+
+executables:
+  example:
+    main: Example.hs
+    source-dirs: app/example
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - common-circus
+      - jose
+      - lazy-circus
+      - telegram-bot-api
+      - telegram-bot-simple
+
+  bot:
+    main: BotMain.hs
+    source-dirs: app/bot
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - common-circus
+      - jose
+      - lazy-circus
+      - telegram-bot-api
+      - telegram-bot-simple
+      - hashable
+      - servant-client
+
+internal-libraries:
+  common-circus:
+    source-dirs: common
+    default-extensions:
+      - MultiWayIf
+      - OverloadedStrings
+      - NoImplicitPrelude
+      - GADTs
+      - FlexibleContexts
+      - FlexibleInstances
+      - TypeFamilies
+      - TypeApplications
+      - StrictData
+    dependencies:
+      - rio
+      - beam-core
+      - beam-postgres
+      - lazy-circus
+      - jose
+      - telegram-bot-api
+      - telegram-bot-simple
+
+tests:
+  lazy-circus-test:
+    main: Spec.hs
+    source-dirs: test
+    verbatim:
+      build-tool-depends: hspec-discover:hspec-discover == 2.*
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - async
+      - lazy-circus
+      - common-circus
+      - hspec

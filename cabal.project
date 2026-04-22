@@ -1,0 +1,61 @@
+with-compiler: ghc-9.12.2
+packages:
+    ./
+
+
+source-repository-package
+    type: git
+    location: https://github.com/haskell-beam/beam.git
+    tag: eafea7b9f7972853671c286d62f0c6e1bfc2a565
+    subdir: beam-core
+            beam-migrate
+            beam-postgres
+
+
+source-repository-package
+    type: git
+    location: https://github.com/fizruk/telegram-bot-simple.git
+    tag: 494251f7cde155955add20f62e1bfc03ea98eba7
+    subdir: telegram-bot-simple
+
+source-repository-package
+    type: git
+    location: https://github.com/fizruk/telegram-bot-simple.git
+    tag: 494251f7cde155955add20f62e1bfc03ea98eba7
+    subdir: telegram-bot-api
+
+source-repository-package
+    type: git
+    location: https://github.com/Ecialo/servant-multipart.git
+    tag: edfcefbfc3ce3ed4ce7dd2c2c307383b6667ba2c
+    subdir: servant-multipart-client
+
+source-repository-package
+    type: git
+    location: https://github.com/haskell-servant/servant.git
+    tag: 0767cd8b37358d051b8405c28bb1f7ff7de5e313
+    subdir: servant-auth/servant-auth-server
+
+source-repository-package
+    type: git
+    location: https://github.com/Ecialo/morpheus-graphql.git
+    tag: d21b1d21565a1dffa80f71054c439118039baab3
+    subdir: morpheus-graphql
+
+source-repository-package
+    type: git
+    location: https://github.com/Ecialo/morpheus-graphql.git
+    tag: d21b1d21565a1dffa80f71054c439118039baab3
+    subdir: morpheus-graphql-code-gen
+
+source-repository-package
+    type: git
+    location: https://github.com/MercuryTechnologies/openai.git
+    tag: 0246105e18f52f9c509b36f0769a137a8f822a93
+
+constraints:
+  x509 ==1.7.7,
+  x509-store ==1.6.9
+
+allow-older: *
+allow-newer: *

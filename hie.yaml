@@ -1,0 +1,17 @@
+cradle:
+  cabal:
+    # stack:
+    - path: "./app/example"
+      component: "lazy-circus:exe:example"
+
+    - path: "./app/bot"
+      component: "lazy-circus:exe:bot"
+
+    - path: "./src"
+      component: "lazy-circus"
+
+    - path: "./common"
+      component: "lazy-circus:library:common-circus"
+
+    - path: "./test"
+      component: "lazy-circus:test:lazy-circus-test"
