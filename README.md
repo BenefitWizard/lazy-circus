@@ -41,9 +41,7 @@ Lazy Circus ships with a rich set of built-in capabilities ready for production 
 * **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses and implements an XML-like prompt templating language which significantly improves prompt adherence.
 * **Production & Test Interpreters:** Two distinct performers (`DefaultPerformer` and `TestInterpreter`). The test performer records all triggered effects, making it trivial to inject mocks and assert execution histories without spinning up real infrastructure.
 * **Structured Async Logging:** High-performance, asynchronous structured logging available universally across all effect types. It supports nested log contexts (e.g., automatically attaching a `user_id` or `trace_id` to all subsequent nested calls).
-* **Service Call Infrastructure:** A pluggable service library (`LazyCircus.App.Service`) for registering and calling named services via pipes and workers. Scenarios can call services through `callService` without coupling to specific implementations.
-* **POML Prompt Language:** An XML-like prompt templating language (`LazyCircus.AI.POML`) for building structured AI prompts with roles, tasks, variables, examples, CSV/Markdown tables, and code blocks.
-* **Utility Modules:** `LazyCircus.LangCode` for language code handling (`RU`, `EN`, `Default`), and `LazyCircus.Base64` for type-safe Base64 encoding/decoding.
+* **Service Call Infrastructure:** A transparent mechanism for running parallel typed workers with a standardized request/response interface. When the application needs concurrent background workers that process requests one at a time, register them through `LazyCircus.App.Service` and call from scenarios with `callService` — no coupling to concrete implementations.
 * **AI Coding Agent Skill:** A pre-configured custom AI skill instruction set located in `docs/skills/lazy-circus/` to teach GitHub Copilot (or other AI assistants) the architectural patterns and conventions of Lazy Circus.
 
 ## Using the AI Assistant Skill
