@@ -15,5 +15,5 @@ type ScheduledActions sc sl = TQueue (ScenarioProgram sc sl ())
 --     scheduledActionsL :: Lens' env (ScheduledActions sc sl)
 
 -- | Satisfies HasScheduledActions for Script by delegating to the asyncTasks field.
-class HasScheduledActions script sl env | env -> script sl where
+class HasScheduledActions script sl env | env -> sl where
     scheduledActionsL :: Lens' env (ScheduledActions script sl)

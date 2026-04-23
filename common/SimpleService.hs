@@ -1,6 +1,9 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 module SimpleService where
 
 import LazyCircus.App.Service
+import LazyCircus.App.Service.TH (makeServiceLib)
 import RIO
 
 data SimpleRequest
@@ -14,29 +17,6 @@ data AddExpressionRequest = AddExpressionRequest Text
     deriving (Show, Eq)
 
 data AddExpressionResponse = AddExpressionResult Text
-    deriving (Show, Eq)
-
-data AllServices = AllServices
-    { addService :: ServiceHandler SimpleRequest SimpleResponse
-    , addExpressionService :: ServiceHandler AddExpressionRequest AddExpressionResponse
-    }
-
-data AllServiceHandlers
-    = SimpleServiceHandler (ServiceHandler SimpleRequest SimpleResponse)
-    | AddExpressionServiceHandler (ServiceHandler AddExpressionRequest AddExpressionResponse)
-
--- instance IsServiceLib AllServices
-
-instance IsInServiceLib AllServices SimpleRequest SimpleResponse where
-    callFromServiceLib allServices request =
-        case request of
-            Add x y -> callService (addService allServices) (Add x y)
-            Subtract x y -> callService (addService allServices) (Subtract x y)
-
--- | Sum type wrapping all possible service responses for AllServices.
-data AllResponses
-    = SimpleResponseWrapper SimpleResponse
-    | AddExpressionResponseWrapper AddExpressionResponse
     deriving (Show, Eq)
 
 handleSimpleRequest :: SimpleRequest -> IO SimpleResponse
@@ -57,6 +37,7 @@ instance HasFailbackValue SimpleResponse where
 instance HasFailbackValue AddExpressionResponse where
     failbackValue = AddExpressionResult ""
 
--- | Delegates AddExpressionRequest to the addExpressionService and wraps the result.
-instance IsInServiceLib AllServices AddExpressionRequest AddExpressionResponse where
-    callFromServiceLib allServices = callService (addExpressionService allServices)
+makeServiceLib "AllServices"
+    [ (''SimpleRequest, ''SimpleResponse)
+    , (''AddExpressionRequest, ''AddExpressionResponse)
+    ]

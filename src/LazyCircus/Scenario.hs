@@ -23,6 +23,7 @@ module LazyCircus.Scenario (
   with2LogEntries,
   runAsync,
   callService,
+  KnownHowToEval (..),
 ) where
 
 import Control.Monad.Free.Church qualified as FC
@@ -247,3 +248,6 @@ callService req = FC.liftF $ CallService req id
 instance HasLogLang (Scenario script serviceLib) (ScenarioProgram script serviceLib) where
   embedLog (LogMsg cs msg next) = ScenarioLogMsg cs msg next
   embedLog (WithLogCtx values prog next) = ScenarioWithLogCtx values prog next
+
+class KnownHowToEval script m where
+  evalSubScript :: script a -> m a

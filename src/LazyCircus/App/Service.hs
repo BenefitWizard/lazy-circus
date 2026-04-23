@@ -18,6 +18,7 @@ module LazyCircus.App.Service (
     HasServiceLib (..),
     NoServiceLib (..),
     callViaServiceLib,
+    runAllWorkers,
     -- IsResponseFor (..),
 )
 where
@@ -108,3 +109,10 @@ callViaServiceLib ::
 callViaServiceLib req = do
     serviceLib <- view serviceLibL
     callFromServiceLib serviceLib req
+
+-- | Fork all worker actions as concurrent threads and return their handles.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: All workers are running asynchronously; caller is responsible
+--   for cleanup (e.g., 'mapM_ cancel' or 'mapM_ wait').
+runAllWorkers :: (MonadUnliftIO m) => [m ()] -> m [Async ()]
+runAllWorkers = mapM async

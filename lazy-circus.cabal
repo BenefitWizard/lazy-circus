@@ -34,6 +34,7 @@ library
       LazyCircus.App.Default
       LazyCircus.App.Log
       LazyCircus.App.Service
+      LazyCircus.App.Service.TH
       LazyCircus.AsyncWorker
       LazyCircus.AsyncWorker.Types
       LazyCircus.Base64
@@ -109,6 +110,7 @@ library
     , servant-client
     , smtp-mail
     , telegram-bot-api
+    , template-haskell
     , text
     , unordered-containers
     , uuid
@@ -165,6 +167,7 @@ library common-circus
     , smtp-mail
     , telegram-bot-api
     , telegram-bot-simple
+    , template-haskell
     , text
     , unordered-containers
     , uuid
@@ -208,6 +211,7 @@ executable bot
     , smtp-mail
     , telegram-bot-api
     , telegram-bot-simple
+    , template-haskell
     , text
     , unordered-containers
     , uuid
@@ -251,6 +255,7 @@ executable example
     , smtp-mail
     , telegram-bot-api
     , telegram-bot-simple
+    , template-haskell
     , text
     , unordered-containers
     , uuid
@@ -300,6 +305,7 @@ test-suite lazy-circus-test
     , servant-client
     , smtp-mail
     , telegram-bot-api
+    , template-haskell
     , text
     , unordered-containers
     , uuid

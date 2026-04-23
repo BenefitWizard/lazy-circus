@@ -4,6 +4,7 @@ Read this when:
 
 - adding a new Beam table or DB service instance
 - registering in-process services with `ServiceHandler` and `IsInServiceLib`
+- using `makeServiceLib` to generate service library boilerplate via TemplateHaskell
 - adding a new effect language or public facade
 - doing code review for cross-layer integration changes
 - checking the detailed pitfalls and final review checklist
@@ -245,7 +246,7 @@ Alternatively, from any monad with `HasServiceLib` in scope, use `callViaService
 result <- callViaServiceLib (Add 3 4)
 ```
 
-### Checklist For Service Registration
+### Checklist For Service Registration (Manual)
 
 - request and response types defined
 - `HasFailbackValue` instance for each response type
@@ -255,6 +256,103 @@ result <- callViaServiceLib (Add 3 4)
 - `createService` called at startup; workers forked
 - library record passed to `cfgServiceLib` in `DefaultAppConfig`
 - `callService` used from scenarios or `callViaServiceLib` from reader context
+
+## Service Library via TemplateHaskell
+
+The manual steps above (4–6) can be replaced by a single Template Haskell macro call.
+`makeServiceLib` generates the service library data type, a config record, `IsInServiceLib`
+instances, and a builder function — all from a list of request/response type pairs.
+
+### When To Use TH vs Manual
+
+Use TH when you have multiple service pairs and want to avoid boilerplate. Use the manual
+approach when you need custom logic in `IsInServiceLib` instances or when adding TH is not
+desirable.
+
+### Step 1. Define Request And Response Types + HasFailbackValue
+
+Same as the manual approach (steps 1–3 above).
+
+### Step 2. Call `makeServiceLib`
+
+```haskell
+{-# LANGUAGE TemplateHaskell #-}
+
+import LazyCircus.App.Service.TH (makeServiceLib)
+
+-- Must appear AFTER type definitions and HasFailbackValue instances
+makeServiceLib "AllServices"
+    [ (''SimpleRequest, ''SimpleResponse)
+    , (''AddExpressionRequest, ''AddExpressionResponse)
+    ]
+```
+
+This generates four things:
+
+1. **Service library type** — `data AllServices = AllServices { simpleRequestService :: ServiceHandler SimpleRequest SimpleResponse, ... }`
+2. **Config type** — `data AllServicesConfig m = AllServicesConfig { simpleRequest :: SimpleRequest -> m SimpleResponse, ... }`
+3. **`IsInServiceLib` instances** — one per pair, implementing `callFromServiceLib`
+4. **Builder function** — `mkAllServices :: (MonadUnliftIO m, ...) => AllServicesConfig m -> m (AllServices, [m ()])`
+
+Field names are derived from the request type name: `SimpleRequest` → `simpleRequest` (config)
+and `simpleRequestService` (service lib).
+
+### Step 3. Write Handler Functions
+
+Same as the manual approach. Handlers can be any `RequestType -> m ResponseType` function,
+including curried functions with arbitrary constraints:
+
+```haskell
+handleSimple :: (MonadIO m) => SimpleRequest -> m SimpleResponse
+handleSimple (Add x y)      = pure $ SimpleResult (x + y)
+handleSimple (Subtract x y) = pure $ SimpleResult (x - y)
+```
+
+### Step 4. Build And Start Services At Startup
+
+Fill a config record with handler functions, call `mkAllServices`, and start workers:
+
+```haskell
+import LazyCircus.App.Service (runAllWorkers)
+
+main :: IO ()
+main = do
+    let config = AllServicesConfig
+            { simpleRequest = handleSimple
+            , addExpressionRequest = handleAddExpressionRequest
+            }
+    (services, workers) <- mkAllServices config
+    _ <- runAllWorkers workers
+    app <- newDefaultApp DefaultAppConfig{ cfgServiceLib = services, ... }
+    ...
+```
+
+`runAllWorkers :: MonadUnliftIO m => [m ()] -> m [Async ()]` forks each worker via `async`
+and returns the handles. Callers can use `mapM_ cancel` for graceful shutdown or discard
+the handles if fire-and-forget is desired.
+
+### Pitfalls For TH Service Library
+
+- **`HasFailbackValue` is required** for every response type before the TH splice. If you
+  forget it, you get a compilation error about a missing instance.
+- **Types must be defined before the splice.** `''SimpleRequest` references the type, so the
+  `data SimpleRequest` declaration must appear above the `makeServiceLib` call.
+- **No duplicate request types.** Passing `(''SimpleRequest, ''A)` and `(''SimpleRequest, ''B)`
+  causes a compile-time `fail` from the macro.
+- **Redundant constraint warning.** GHC may emit `-Wredundant-constraints` for the generated
+  `mkAllServices` because `HasFailbackValue` constraints are implied by the instances. This is
+  harmless.
+
+### Checklist For TH Service Registration
+
+- request and response types defined
+- `HasFailbackValue` instance for each response type
+- handler functions written
+- `makeServiceLib` splice placed after type definitions and instances
+- config record filled with handler functions
+- `mkAllServices` called at startup
+- `runAllWorkers` called to start all workers
+- library record passed to `cfgServiceLib` in `DefaultAppConfig`
 
 ## Adding A New Effect
 
@@ -525,6 +623,28 @@ Fix:
 - use `runSafely` only around the part that should degrade gracefully
 - log and branch explicitly on the result
 
+### 12. TH Splice Before Type Definitions
+
+Problem:
+
+- `makeServiceLib` fails because `''RequestType` is not in scope
+
+Fix:
+
+- place the `makeServiceLib` splice after all request/response `data` declarations
+- place it after all `HasFailbackValue` instances
+
+### 13. Duplicate Request Types In makeServiceLib
+
+Problem:
+
+- passing `(''Req, ''A)` and `(''Req, ''B)` causes a confusing type error
+
+Fix:
+
+- `makeServiceLib` detects duplicates and calls `fail` with a clear message
+- ensure each request type appears exactly once in the pair list
+
 ## Review Checklist
 
 1. Is code placed in the right layer: scene vs scenario vs performer?
@@ -535,3 +655,5 @@ Fix:
 6. Does the interpreter preserve logging context correctly?
 7. Are async paths tested via captured scheduled scenarios?
 8. Was `hpack` run before build and test?
+9. If using `makeServiceLib`, are all `HasFailbackValue` instances defined before the splice?
+10. If using `makeServiceLib`, are there no duplicate request types in the pair list?

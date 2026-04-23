@@ -4,7 +4,7 @@ module LazyCircus.Performer.Default (
     DefaultPerformer (..),
     changeEnv,
     NoBotConfigured (..),
-    runDefaultScenario,
+    -- runDefaultScenario,
 ) where
 
 import Control.Monad.Free.Church qualified as FC
@@ -13,6 +13,7 @@ import LazyCircus.App.Default
 import LazyCircus.App.Log
 import LazyCircus.App.Service (callViaServiceLib)
 import LazyCircus.AsyncWorker (scheduleAsyncAction)
+import LazyCircus.AsyncWorker.Types (HasScheduledActions)
 import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
@@ -68,38 +69,35 @@ instance MailScriptPerformer (DefaultPerformer (DefaultApp serviceLib)) where
 instance AILangPerformer (DefaultPerformer (DefaultApp serviceLib)) where
     ask' = askAI
 
--- | Execute a scenario program against the default runtime environment and its current performer stack.
-runDefaultScenario :: forall serviceLib a. ScenarioProgram Script serviceLib a -> DefaultPerformer (DefaultApp serviceLib) a
-runDefaultScenario = FC.iterM go
-  where
-    go :: Scenario Script serviceLib (DefaultPerformer (DefaultApp serviceLib) a) -> DefaultPerformer (DefaultApp serviceLib) a
-    go (EvalScript script next) = do
-        result <- evalScriptDefault script
-        next result
-    go (Throw e next) = do
-        result <- throwIO e
-        next result
-    go (RunSafely act next) = do
-        result <- try (runDefaultScenario act)
-        next result
-    go (GetDateTime next) = do
-        now <- liftIO getCurrentTime
-        next now
-    go (ScenarioLogMsg cs msg next) = do
-        sublangLog cs "Scenario" msg
-        next
-    go (ScenarioWithLogCtx values act next) = do
-        result <- local (logContextL %~ (`putInLoggingContext` values)) (runDefaultScenario act)
-        next result
-    go (GetExtraContext next) = do
-        ctx <- view extraContextL
-        next ctx
-    go (RunAsync act next) = do
-        scheduleAsyncAction act
-        next
-    go (CallService req next) = do
-        res <- callViaServiceLib req
-        next res
+instance
+    ( KnownHowToEval script (DefaultPerformer (DefaultApp serviceLib))
+    , HasScheduledActions script serviceLib (DefaultApp serviceLib)
+    ) =>
+    ScenarioPerformer script serviceLib (DefaultPerformer (DefaultApp serviceLib))
+    where
+    onEvalScript = evalSubScript
+
+    -- onEvalScript = evalScriptDefault
+    throw' = throwIO
+    runSafely' scenario = do
+        v <- try $ run scenario
+        pure $ case v of
+            Left e -> Left e
+            Right a -> Right a
+    log' cs = sublangLog cs "Scenario"
+
+    getDateTime' = liftIO getCurrentTime
+
+    runAsync' = scheduleAsyncAction
+    getExtraContext' = view extraContextL
+
+    callService' = callViaServiceLib
+
+    withLogContext' values act =
+        local (logContextL %~ (`putInLoggingContext` values)) (run act)
+
+instance KnownHowToEval Script (DefaultPerformer (DefaultApp serviceLib)) where
+    evalSubScript = evalScriptDefault
 
 evalScriptDefault :: Script a -> DefaultPerformer (DefaultApp serviceLib) a
 evalScriptDefault (TelegramScriptDef name scr) = do
