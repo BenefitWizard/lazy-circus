@@ -12,8 +12,6 @@ module DemoEnv (
 
 import RIO
 import RIO.HashMap qualified as HM
-import RIO.Map qualified as M
-import RIO.Process (mkDefaultProcessContext)
 import Text.Read (readMaybe)
 
 import Control.Exception (AsyncException)
@@ -22,21 +20,13 @@ import Control.Exception qualified as CE
 import Database.PostgreSQL.Simple (Connection, Only (..), close, connectPostgreSQL, execute_, query_)
 import Database.PostgreSQL.Simple.Types (Query (..))
 
-import Network.HTTP.Client.TLS (newTlsManager)
-
-import LazyCircus.App.Default
+import LazyCircus.App.Default hiding (cfgAiApiKey, cfgAiBaseUrl, DefaultAppConfig)
+import LazyCircus.App.Default qualified as LAD (DefaultAppConfig (..))
 import LazyCircus.App.Log hiding (genLogFunc, logContext, logFunc, logQueue)
 import LazyCircus.AsyncWorker (runAsyncWorker)
 import LazyCircus.Performer.Default (runDefaultPerformer, runDefaultScenario)
 import LazyCircus.Scenario (ScenarioProgram)
 import LazyCircus.Script (Script)
-import LazyCircus.Telegram (makeBotEnv)
-
-import OpenAI.V1 (getClientEnv, makeMethods)
-import Telegram.Bot.API (Token (..))
-
-import Crypto.JOSE (KeyMaterialGenParam (OctGenParam), genJWK)
-import Servant.Auth.Server (defaultJWTSettings)
 
 import Common (migration)
 import LazyCircus.App.Service
@@ -120,80 +110,49 @@ readDemoConfig =
     lookupEnvToText :: String -> IO (Maybe Text)
     lookupEnvToText = fmap (maybe Nothing (\s -> if null s then Nothing else Just (fromString s))) . lookupEnv
 
-{- | Construct a full DefaultApp runtime from the given configuration and existing connection.
-PRE-CONTRACT: The connection must be live and properly configured.
-POST-CONTRACT: The returned DefaultApp shares the given connection; closing it is the caller's responsibility.
+{- | Convert a DemoConfig into a DefaultAppConfig ready for 'newDefaultApp'.
+Fields cfgTgChatId and cfgNotificationEmail are demo-specific and not passed through.
+PRE-CONTRACT: None.
+POST-CONTRACT: All shared fields are mapped; demo-only fields are discarded.
 -}
-createDemoAppWithConn :: DemoConfig -> Connection -> IO (DefaultApp NoServiceLib)
-createDemoAppWithConn cfg conn = do
-    manager <- newTlsManager
-
-    botEnvsVal <- case cfgTgToken cfg of
-        Just token -> do
-            botEnv <- makeBotEnv manager (Token token, "demo-bot")
-            pure $ M.singleton "demo-bot" botEnv
-        Nothing -> pure mempty
-
-    aiMethodsVal <- case cfgAiApiKey cfg of
-        Just apiKey -> do
-            let baseUrl = fromMaybe "https://api.deepseek.com" (cfgAiBaseUrl cfg)
-            ce <- getClientEnv baseUrl
-            pure $ makeMethods ce apiKey Nothing Nothing
-        Nothing -> do
-            ce <- getClientEnv "https://example.com"
-            pure $ makeMethods ce "dummy-key" Nothing Nothing
-
-    jwk <- genJWK (OctGenParam 256)
-    let jwtSettingsVal = defaultJWTSettings jwk
-
-    logQueueVal <- newTQueueIO
-    asyncTasksVal <- newTQueueIO
-    processCtx <- mkDefaultProcessContext
-
-    let logFuncVal = mkLogFunc $ \_cs _src _lvl msg ->
-            hPutBuilder stdout (getUtf8Builder msg)
-    let genLogFuncVal = mkGLogFunc $ \_cs msg ->
-            atomically $ writeTQueue logQueueVal msg
-
-    pure
-        App
-            { logFunc = logFuncVal
-            , genLogFunc = genLogFuncVal
-            , pgDbConnection = conn
-            , pgDbConnectionReadOnly = Nothing
-            , appMainDb = conn
-            , appProcessContext = processCtx
-            , botEnvs = botEnvsVal
-            , jwtSettings = jwtSettingsVal
-            , logQueue = logQueueVal
-            , extraContext = HM.fromList [("env", "demo"), ("circus_name", "Lazy Circus")]
-            , logContext = mempty
-            , mailCreds = MailCreds (cfgSmtpHost cfg) (cfgSmtpPort cfg) (cfgSmtpLogin cfg) (cfgSmtpPass cfg) (cfgSmtpName cfg) (cfgSmtpUseTls cfg)
-            , asyncTasks = asyncTasksVal
-            , aiMethods = aiMethodsVal
-            , sqlLogAction = putStrLn
-            , serviceLib = NoServiceLib
-            }
+demoConfigToAppConfig :: DemoConfig -> LAD.DefaultAppConfig NoServiceLib
+demoConfigToAppConfig cfg =
+    LAD.DefaultAppConfig
+        { LAD.cfgPgConnectionString = testConnectionString
+        , LAD.cfgPgConnectionStringReadOnly = Nothing
+        , LAD.cfgBotConfigs = case cfgTgToken cfg of
+            Just token -> [("demo-bot", token)]
+            Nothing -> []
+        , LAD.cfgAiApiKey = cfgAiApiKey cfg
+        , LAD.cfgAiBaseUrl = cfgAiBaseUrl cfg
+        , LAD.cfgMailCreds = MailCreds (cfgSmtpHost cfg) (cfgSmtpPort cfg) (cfgSmtpLogin cfg) (cfgSmtpPass cfg) (cfgSmtpName cfg) (cfgSmtpUseTls cfg)
+        , LAD.cfgExtraContext = HM.fromList [("env", "demo"), ("circus_name", "Lazy Circus")]
+        , LAD.cfgSqlLogAction = Just putStrLn
+        , LAD.cfgServiceLib = NoServiceLib
+        }
 
 {- | Run an action with a demo application, managing lifecycle and background workers.
-PRE-CONTRACT: PostgreSQL must be reachable.
-POST-CONTRACT: Database connection is closed and background threads are cancelled after the action.
+PRE-CONTRACT: PostgreSQL must be reachable at 127.0.0.1:5432.
+POST-CONTRACT: Background threads are cancelled and database connections are closed after the action completes.
 -}
 withDemoApp :: DemoConfig -> (DefaultApp NoServiceLib -> IO ()) -> IO ()
-withDemoApp cfg action =
-    bracketOnError setupDatabase close $ \conn -> do
-        app <- createDemoAppWithConn cfg conn
-        bracket
-            ( do
-                logThread <- async $ runRIO (logAppFromDefaultApp app) logWorker
-                asyncThread <- async $ runRIO app (runAsyncWorker (runDefaultPerformer . runDefaultScenario))
-                pure (app, logThread, asyncThread)
-            )
-            ( \(_, logThread, asyncThread) -> do
-                cancel asyncThread
-                cancel logThread
-            )
-            (action . fst3)
+withDemoApp cfg action = do
+    setupDatabase
+    let appConfig = demoConfigToAppConfig cfg
+    app <- newDefaultApp appConfig
+    bracket
+        ( do
+            logThread <- async $ runRIO (logAppFromDefaultApp app) logWorker
+            asyncThread <- async $ runRIO app (runAsyncWorker (runDefaultPerformer . runDefaultScenario))
+            pure (app, logThread, asyncThread)
+        )
+        ( \(app', logThread, asyncThread) -> do
+            cancel asyncThread
+            cancel logThread
+            close (pgDbConnection app')
+            mapM_ close (pgDbConnectionReadOnly app')
+        )
+        (action . fst3)
   where
     -- \| Extract the first element of a 3-tuple.
     fst3 (a, _, _) = a
@@ -251,11 +210,11 @@ recreateTestDatabase conn = do
     void $ execute_ conn (Query "DROP DATABASE IF EXISTS lazy_circus_test")
     void $ execute_ conn (Query "CREATE DATABASE lazy_circus_test")
 
-{- | Set up the test database: connect as admin, recreate DB, run migrations, connect as app user.
+{- | Set up the test database: connect as admin, recreate DB, run migrations.
 PRE-CONTRACT: PostgreSQL must be reachable at 127.0.0.1:5432.
-POST-CONTRACT: Returns a live connection as the lazy_circus_app user.
+POST-CONTRACT: The test database exists with the expected schema.
 -}
-setupDatabase :: IO Connection
+setupDatabase :: IO ()
 setupDatabase = do
     bracket (retryConnect adminConnectionString) close $ \adminConn -> do
         recreateTestDatabase adminConn
@@ -263,5 +222,3 @@ setupDatabase = do
     bracket (retryConnect adminTestConnectionString) close $ \bootstrapConn -> do
         void $ execute_ bootstrapConn (Query "SET client_min_messages TO warning")
         void $ execute_ bootstrapConn (Query (encodeUtf8 migration))
-
-    retryConnect testConnectionString

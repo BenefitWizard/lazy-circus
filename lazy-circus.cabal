@@ -98,6 +98,7 @@ library
     , http-client
     , http-client-tls
     , http-types
+    , jose
     , mime-mail
     , openai
     , postgresql-simple
@@ -119,6 +120,7 @@ library common-circus
       BotScenarios
       Common
       DemoEnv
+      SimpleService
   other-modules:
       Paths_lazy_circus
   autogen-modules:
@@ -285,6 +287,7 @@ test-suite lazy-circus-test
     , http-client
     , http-client-tls
     , http-types
+    , jose
     , lazy-circus
     , mime-mail
     , openai

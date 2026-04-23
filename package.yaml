@@ -43,6 +43,7 @@ dependencies:
   - crypton
   - crypton-x509
   - crypton-x509-store
+  - jose
   - base64
   - http-client
   - http-client-tls
