@@ -4,43 +4,45 @@
 {-# LANGUAGE RankNTypes #-}
 
 -- | Mock-backed interpreter utilities for tests that run current LazyCircus scripts.
-module LazyCircus.Testing.Performer
-    ( OnSendMessageRequest
-    , TgMock (..)
-    , MailMock (..)
-    , Mocks (..)
-    , EnvWithMocks (..)
-    , TestInterpreter (..)
-    , changeEnv
-    , runScript
-    , runScenarioProgram
-    , runDBWithMockLogging
-    , runTelegramWithMockLogging
-    , createTgMock
-    , createSimpleTgMock
-    , createSimpleMailMock
-    , makeMocks
-    , runInsideWithMocks
-    , runWithMocks
-    , runInsideWithDefaultMocks
-    , runWithDefaultMocks
-    , discardMocks
-    , readTgRequests
-    , readScheduledTgRequests
-    , readLog
-    , readLogWithContext
-    , readSentMails
-    , readScheduledScenarios
-    )
+module LazyCircus.Testing.Performer (
+    OnSendMessageRequest,
+    TgMock (..),
+    MailMock (..),
+    Mocks (..),
+    EnvWithMocks (..),
+    TestInterpreter (..),
+    changeEnv,
+    runScript,
+    runScenarioProgram,
+    runDBWithMockLogging,
+    runTelegramWithMockLogging,
+    createTgMock,
+    createSimpleTgMock,
+    createSimpleMailMock,
+    makeMocks,
+    runInsideWithMocks,
+    runWithMocks,
+    runInsideWithDefaultMocks,
+    runWithDefaultMocks,
+    discardMocks,
+    readTgRequests,
+    readScheduledTgRequests,
+    readLog,
+    readLogWithContext,
+    readSentMails,
+    readScheduledScenarios,
+)
 where
 
 import Control.Monad.Free.Church (iterM)
 import Database.PostgreSQL.Simple qualified as Simple
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
+import LazyCircus.App.Service (NoServiceLib)
 import LazyCircus.DB.Types (PgDB)
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
+import LazyCircus.Scenario (DbMode (..), Scenario (..), ScenarioProgram)
 import LazyCircus.Scene.AI.Lang (AILangF (..), AIScript)
 import LazyCircus.Scene.DB.Class (DBScriptPerformer (..), DbError (..))
 import LazyCircus.Scene.DB.Lang (DBLangF (..), DBScript)
@@ -49,7 +51,6 @@ import LazyCircus.Scene.Log (LogLangF (..))
 import LazyCircus.Scene.Mail.Lang (MailLangF (..), MailScript)
 import LazyCircus.Scene.Telegram.Lang (TelegramScript, TelegramScriptF (..))
 import LazyCircus.Script (Script (..))
-import LazyCircus.Scenario (DbMode (..), Scenario (..), ScenarioProgram)
 import LazyCircus.Telegram.Default qualified as TGDefault
 import LazyCircus.Telegram.Types (WithImportance (..))
 import Network.Mail.Mime (Address, Mail)
@@ -89,7 +90,7 @@ data Mocks = Mocks
     -- ^ captured log payloads with context and call site
     , mailMock :: MailMock
     -- ^ captured mail sends
-    , scheduledScenarios :: SomeRef [ScenarioProgram Script ()]
+    , scheduledScenarios :: SomeRef [ScenarioProgram Script NoServiceLib ()]
     -- ^ captured async control programs requested through 'runAsync'
     }
 
@@ -97,7 +98,7 @@ data Mocks = Mocks
 data EnvWithMocks = EnvWithMocks
     { mocks :: Mocks
     -- ^ mutable capture state for the current test run
-    , defaultApp :: App.DefaultApp
+    , defaultApp :: App.DefaultApp NoServiceLib
     -- ^ real runtime dependencies used for DB access, config, and mail construction
     }
 
@@ -126,7 +127,7 @@ runScript (AIScriptDef script) = runAIWithMockLogging script
 runScript (DBScriptDef db mode script) = runDBWithMockLogging db mode script
 
 -- | Run a 'ScenarioProgram' using current mock semantics for logging, AI, and async work.
-runScenarioProgram :: ScenarioProgram Script a -> TestInterpreter a
+runScenarioProgram :: ScenarioProgram Script NoServiceLib a -> TestInterpreter a
 runScenarioProgram = iterM go
   where
     go (EvalScript script next) = do
@@ -257,31 +258,31 @@ makeMocks = do
             }
 
 -- | Run a test action inside 'RIO DefaultApp' using a caller-supplied mock set.
-runInsideWithMocks :: Mocks -> TestInterpreter a -> RIO App.DefaultApp a
+runInsideWithMocks :: Mocks -> TestInterpreter a -> RIO (App.DefaultApp NoServiceLib) a
 runInsideWithMocks testMocks action = mapRIO (EnvWithMocks testMocks) $ runTestInterpreter action
 
 -- | Run a test action from plain 'IO' using a caller-supplied application and mock set.
-runWithMocks :: App.DefaultApp -> Mocks -> TestInterpreter a -> IO a
+runWithMocks :: App.DefaultApp NoServiceLib -> Mocks -> TestInterpreter a -> IO a
 runWithMocks app testMocks action = runRIO env $ runTestInterpreter action
   where
     env = EnvWithMocks{mocks = testMocks, defaultApp = app}
 
 -- | Run a test action inside 'RIO DefaultApp' after allocating a fresh mock set.
-runInsideWithDefaultMocks :: TestInterpreter a -> RIO App.DefaultApp (Mocks, a)
+runInsideWithDefaultMocks :: TestInterpreter a -> RIO (App.DefaultApp NoServiceLib) (Mocks, a)
 runInsideWithDefaultMocks action = do
     testMocks <- liftIO makeMocks
     result <- runInsideWithMocks testMocks action
     pure (testMocks, result)
 
 -- | Run a test action from plain 'IO' after allocating a fresh mock set.
-runWithDefaultMocks :: App.DefaultApp -> TestInterpreter a -> IO (Mocks, a)
+runWithDefaultMocks :: App.DefaultApp NoServiceLib -> TestInterpreter a -> IO (Mocks, a)
 runWithDefaultMocks app action = do
     testMocks <- makeMocks
     result <- runWithMocks app testMocks action
     pure (testMocks, result)
 
 -- | Drop the collected mocks from a combined result returned inside 'RIO DefaultApp'.
-discardMocks :: RIO App.DefaultApp (Mocks, a) -> RIO App.DefaultApp a
+discardMocks :: RIO (App.DefaultApp NoServiceLib) (Mocks, a) -> RIO (App.DefaultApp NoServiceLib) a
 discardMocks action = snd <$> action
 
 -- | Read captured immediate Telegram send requests in call order.
@@ -305,7 +306,7 @@ readSentMails :: Mocks -> IO [Mail]
 readSentMails testMocks = reverse <$> readSomeRef (sentMails $ mailMock testMocks)
 
 -- | Read captured async scenarios in request order.
-readScheduledScenarios :: Mocks -> IO [ScenarioProgram Script ()]
+readScheduledScenarios :: Mocks -> IO [ScenarioProgram Script NoServiceLib ()]
 readScheduledScenarios testMocks = reverse <$> readSomeRef (scheduledScenarios testMocks)
 
 -- | Run a mail script while capturing sends and logs into mocks.
@@ -355,7 +356,7 @@ ensureReadWrite ReadWrite = pure ()
 ensureReadWrite ReadOnly = throwIO DbReadOnlyViolation
 
 -- | Run one database action against the connection selected by the current DB mode.
-runDbAction :: DbMode -> RIO (AppWithConnection App.DefaultApp) a -> TestInterpreter a
+runDbAction :: DbMode -> RIO (AppWithConnection (App.DefaultApp NoServiceLib)) a -> TestInterpreter a
 runDbAction mode action = do
     env <- ask
     let connection = selectDbConnection mode env
@@ -434,7 +435,7 @@ getFileMock :: FileId -> TestInterpreter (Response File)
 getFileMock _ = throwString "LazyCircus.Testing.Performer: getFile is not implemented for tests"
 
 -- | Record an async scenario request without executing it.
-captureAsyncScenario :: ScenarioProgram Script () -> TestInterpreter ()
+captureAsyncScenario :: ScenarioProgram Script NoServiceLib () -> TestInterpreter ()
 captureAsyncScenario action = do
     asyncLog <- asks (scheduledScenarios . mocks)
     modifySomeRef asyncLog (action :)

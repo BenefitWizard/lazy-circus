@@ -33,6 +33,7 @@ library
       LazyCircus.App
       LazyCircus.App.Default
       LazyCircus.App.Log
+      LazyCircus.App.Service
       LazyCircus.AsyncWorker
       LazyCircus.AsyncWorker.Types
       LazyCircus.Base64

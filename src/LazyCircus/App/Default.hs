@@ -1,3 +1,5 @@
+{-# LANGUAGE FunctionalDependencies #-}
+
 {- | PURPOSE: Concrete application runtime environment (DefaultApp) for the LazyCircus backend.
 Gathers every capability required by interpreters, workers, and bot flows into a single
 RIO-reader record, then wires up all Has* lens-based class instances.
@@ -39,12 +41,18 @@ type ExtraContext = HashMap Text Text
 
 -- | SMTP credentials used by runtime mail helpers and interpreters.
 data MailCreds = MailCreds
-    { mailHost     :: String  -- ^ SMTP server hostname
-    , mailPort     :: Int     -- ^ SMTP server port number
-    , mailLogin    :: String  -- ^ SMTP authentication username
-    , mailPassword :: String  -- ^ SMTP authentication password
-    , mailName     :: String  -- ^ human-readable sender display name
-    , mailUseTls   :: Bool    -- ^ whether to enable TLS for the SMTP connection
+    { mailHost :: String
+    -- ^ SMTP server hostname
+    , mailPort :: Int
+    -- ^ SMTP server port number
+    , mailLogin :: String
+    -- ^ SMTP authentication username
+    , mailPassword :: String
+    -- ^ SMTP authentication password
+    , mailName :: String
+    -- ^ human-readable sender display name
+    , mailUseTls :: Bool
+    -- ^ whether to enable TLS for the SMTP connection
     }
     deriving (Generic, Show)
 
@@ -63,22 +71,39 @@ class HasJWTSettings env where
 Includes read-write and optional read-only database connections, and a configurable SQL logging
 action used by the DebugInterpreter to trace Beam queries during development.
 -}
-data DefaultApp = App
-    { logFunc :: LogFunc                         -- ^ RIO standard logging function
-    , genLogFunc :: GLogFunc AppLogMsgWithContext -- ^ generic structured log writer
-    , pgDbConnection :: Connection                -- ^ primary read-write PostgreSQL connection
-    , pgDbConnectionReadOnly :: Maybe Connection  -- ^ optional read-only PostgreSQL replica connection
-    , appMainDb :: PgMainDB                       -- ^ main database handle for legacy DB service layer
-    , appProcessContext :: ProcessContext          -- ^ RIO process context for subprocess management
-    , botEnvs :: BotEnvs                          -- ^ mapping of logical bot names to Telegram environments
-    , jwtSettings :: JWTSettings                  -- ^ servant-auth JWT configuration
-    , logQueue :: LogQueue                        -- ^ shared queue feeding the background log worker
-    , extraContext :: ExtraContext                 -- ^ arbitrary key-value configuration exposed to flows
-    , logContext :: LoggingContext                -- ^ structured key-value logging metadata
-    , mailCreds :: MailCreds                      -- ^ SMTP credentials for outgoing mail
-    , asyncTasks :: ScheduledActions Script       -- ^ queue of deferred scenario programs
-    , aiMethods :: Methods                        -- ^ OpenAI client methods for AI completions
-    , sqlLogAction :: String -> IO ()             -- ^ optional SQL query tracer used during development
+data DefaultApp serviceLib = App
+    { logFunc :: LogFunc
+    -- ^ RIO standard logging function
+    , genLogFunc :: GLogFunc AppLogMsgWithContext
+    -- ^ generic structured log writer
+    , pgDbConnection :: Connection
+    -- ^ primary read-write PostgreSQL connection
+    , pgDbConnectionReadOnly :: Maybe Connection
+    -- ^ optional read-only PostgreSQL replica connection
+    , appMainDb :: PgMainDB
+    -- ^ main database handle for legacy DB service layer
+    , appProcessContext :: ProcessContext
+    -- ^ RIO process context for subprocess management
+    , botEnvs :: BotEnvs
+    -- ^ mapping of logical bot names to Telegram environments
+    , jwtSettings :: JWTSettings
+    -- ^ servant-auth JWT configuration
+    , logQueue :: LogQueue
+    -- ^ shared queue feeding the background log worker
+    , extraContext :: ExtraContext
+    -- ^ arbitrary key-value configuration exposed to flows
+    , logContext :: LoggingContext
+    -- ^ structured key-value logging metadata
+    , mailCreds :: MailCreds
+    -- ^ SMTP credentials for outgoing mail
+    , asyncTasks :: ScheduledActions Script serviceLib
+    -- ^ queue of deferred scenario programs
+    , aiMethods :: Methods
+    -- ^ OpenAI client methods for AI completions
+    , sqlLogAction :: String -> IO ()
+    -- ^ optional SQL query tracer used during development
+    , serviceLib :: serviceLib
+    -- ^ collection of in-process service handlers
     }
 
 -- | Capability for accessing initialized Telegram bot environments from a reader environment.
@@ -94,71 +119,73 @@ class HasMailCreds env where
     mailCredsL :: Lens' env MailCreds
 
 -- | Satisfies HasLogFunc by delegating to the logFunc field.
-instance HasLogFunc DefaultApp where
+instance HasLogFunc (DefaultApp serviceLib) where
     logFuncL = lens logFunc (\x y -> x{logFunc = y})
 
 -- | Satisfies HasGLogFunc with AppLogMsgWithContext as the generic message type.
-instance HasGLogFunc DefaultApp where
-    type GMsg DefaultApp = AppLogMsgWithContext
+instance HasGLogFunc (DefaultApp serviceLib) where
+    type GMsg (DefaultApp serviceLib) = AppLogMsgWithContext
     gLogFuncL = lens genLogFunc (\x y -> x{genLogFunc = y})
 
 -- | Satisfies HasProcessContext by delegating to the appProcessContext field.
-instance HasProcessContext DefaultApp where
+instance HasProcessContext (DefaultApp serviceLib) where
     processContextL = lens appProcessContext (\x y -> x{appProcessContext = y})
 
 -- | Exposes the primary read-write PostgreSQL connection through the shared HasPgConnection capability.
-instance HasPgConnection DefaultApp where
+instance HasPgConnection (DefaultApp serviceLib) where
     postgresL = lens pgDbConnection (\x y -> x{pgDbConnection = y})
 
 -- | Satisfies HasDbConnection by sharing the primary PostgreSQL connection with the Scene DB layer.
-instance HasDbConnection DefaultApp where
+instance HasDbConnection (DefaultApp serviceLib) where
     dbConnectionL = lens pgDbConnection (\x y -> x{pgDbConnection = y})
 
 -- | Expose the optional read-only PostgreSQL connection through the shared HasPgConnectionReadOnly capability.
-instance HasPgConnectionReadOnly DefaultApp where
+instance HasPgConnectionReadOnly (DefaultApp serviceLib) where
     postgresReadOnlyL = lens pgDbConnectionReadOnly (\x y -> x{pgDbConnectionReadOnly = y})
 
 -- | Satisfies HasMainDb by delegating to the appMainDb field.
-instance HasMainDb DefaultApp where
+instance HasMainDb (DefaultApp serviceLib) where
     mainDbL = lens appMainDb (\x y -> x{appMainDb = y})
 
 -- | Satisfies HasJWTSettings by delegating to the jwtSettings field.
-instance HasJWTSettings DefaultApp where
+instance HasJWTSettings (DefaultApp serviceLib) where
     jwtSettingsL = lens jwtSettings (\x y -> x{jwtSettings = y})
 
 -- | Satisfies HasBotEnvs by delegating to the botEnvs field.
-instance HasBotEnvs DefaultApp where
+instance HasBotEnvs (DefaultApp serviceLib) where
     botEnvsL = lens botEnvs (\x y -> x{botEnvs = y})
 
 -- | Satisfies HasMailCreds by delegating to the mailCreds field.
-instance HasMailCreds DefaultApp where
+instance HasMailCreds (DefaultApp serviceLib) where
     mailCredsL = lens mailCreds (\x y -> x{mailCreds = y})
 
 -- | Satisfies HasExtraContext by delegating to the extraContext field.
-instance HasExtraContext DefaultApp where
+instance HasExtraContext (DefaultApp serviceLib) where
     extraContextL = lens extraContext (\x y -> x{extraContext = y})
 
 -- | Satisfies HasLogQueue by delegating to the logQueue field.
-instance HasLogQueue DefaultApp where
+instance HasLogQueue (DefaultApp serviceLib) where
     logQueueL = lens logQueue (\x y -> x{logQueue = y})
 
 -- | Satisfies HasLoggingContext by delegating to the logContext field.
-instance HasLoggingContext DefaultApp where
+instance HasLoggingContext (DefaultApp serviceLib) where
     logContextL = lens logContext (\x y -> x{logContext = y})
 
--- | Satisfies HasScheduledActions for Script by delegating to the asyncTasks field.
-instance HasScheduledActions Script DefaultApp where
+-- -- | Satisfies HasScheduledActions for Script by delegating to the asyncTasks field.
+-- class HasScheduledActions script sl env | env -> script sl where
+--     scheduledActionsL :: Lens' env (ScheduledActions script sl)
+instance HasScheduledActions Script serviceLib (DefaultApp serviceLib) where
     scheduledActionsL = lens asyncTasks (\x y -> x{asyncTasks = y})
 
 -- | Satisfies HasAIMethods by delegating to the aiMethods field.
-instance HasAIMethods DefaultApp where
+instance HasAIMethods (DefaultApp serviceLib) where
     aiMethodsL = lens aiMethods (\x y -> x{aiMethods = y})
 
 -- | Drop missing values from an association list while preserving keys for present entries.
 constructHFromMList :: [(Text, Maybe a)] -> HashMap Text a
 constructHFromMList vals' = HM.fromList $ mapMaybe attachKey vals'
   where
-    -- | Keep only entries with a present value.
+    -- \| Keep only entries with a present value.
     attachKey (k, Just v) = Just (k, v)
     attachKey _ = Nothing
 
@@ -166,7 +193,7 @@ constructHFromMList vals' = HM.fromList $ mapMaybe attachKey vals'
 constructFromMList :: [(Text, Maybe a)] -> Map Text a
 constructFromMList vals' = M.fromList $ mapMaybe attachKey vals'
   where
-    -- | Keep only entries with a present value.
+    -- \| Keep only entries with a present value.
     attachKey (k, Just v) = Just (k, v)
     attachKey _ = Nothing
 
@@ -174,12 +201,13 @@ constructFromMList vals' = M.fromList $ mapMaybe attachKey vals'
 constructTokens :: [(Text, Maybe Text)] -> Tokens
 constructTokens tokens' = constructFromMList tokens' & M.map Token
 
--- | Project the logging subset of DefaultApp needed by the shared log worker.
--- Creates a fresh GLogFunc that prints to stdout rather than copying the
--- queue-writer from DefaultApp, so that logWorker is the sole printing path.
--- POST-CONTRACT: Returned LogApp shares the same logFunc and logQueue as the input;
--- its genLogFunc writes directly to stdout.
-logAppFromDefaultApp :: DefaultApp -> LogApp
+{- | Project the logging subset of DefaultApp needed by the shared log worker.
+Creates a fresh GLogFunc that prints to stdout rather than copying the
+queue-writer from DefaultApp, so that logWorker is the sole printing path.
+POST-CONTRACT: Returned LogApp shares the same logFunc and logQueue as the input;
+its genLogFunc writes directly to stdout.
+-}
+logAppFromDefaultApp :: DefaultApp serviceLib -> LogApp
 logAppFromDefaultApp app =
     let
         logFunc' = app ^. logFuncL
@@ -189,8 +217,9 @@ logAppFromDefaultApp app =
      in
         LogApp logFunc' genLogFunc' logQueue'
 
--- | ORPHAN: MonadRandom and RIO are from separate packages.
--- LAW: getRandomBytes preserves length: n == ByteString.length (getRandomBytes n — holds by delegation to the Crypto.Random instance.
+{- | ORPHAN: MonadRandom and RIO are from separate packages.
+LAW: getRandomBytes preserves length: n == ByteString.length (getRandomBytes n — holds by delegation to the Crypto.Random instance.
+-}
 instance MonadRandom (RIO env) where
     -- TODO: switch to seeded pseudo-random generator
     getRandomBytes = liftIO . getRandomBytes

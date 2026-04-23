@@ -35,6 +35,7 @@ import LazyCircus.Performer.Default (runDefaultPerformer, runDefaultScenario)
 
 import BotScenarios (createActWithReaction, deleteAct, generateReaction, getAct, listActs)
 import Common (CircusAct, CircusActT (..))
+import LazyCircus.App.Service
 import Network.Mail.Mime (Address (..))
 
 -- | Per-chat conversation state for the multi-step /newact dialog.
@@ -64,7 +65,7 @@ data Action
 PRE-CONTRACT: The 'DefaultApp' environment must be fully initialised (DB, AI, SMTP, etc.).
 POST-CONTRACT: Returns a BotApp whose initial model is 'Idle'.
 -}
-makeBot :: DefaultApp -> Maybe Address -> BotApp Model Action
+makeBot :: DefaultApp NoServiceLib -> Maybe Address -> BotApp Model Action
 makeBot app notificationEmail =
     BotApp
         { botInitialModel = Model Idle
@@ -94,7 +95,7 @@ handleUpdate _model update = do
 PRE-CONTRACT: The 'DefaultApp' environment must be fully initialised.
 POST-CONTRACT: Model state is updated and replies are sent via Telegram.
 -}
-handleAction :: DefaultApp -> Maybe Address -> Action -> Model -> Eff Action Model
+handleAction :: DefaultApp NoServiceLib -> Maybe Address -> Action -> Model -> Eff Action Model
 handleAction app notificationEmail action model = case action of
     NoAction ->
         model <# do

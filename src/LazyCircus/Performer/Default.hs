@@ -1,3 +1,5 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module LazyCircus.Performer.Default (
     DefaultPerformer (..),
     changeEnv,
@@ -13,14 +15,14 @@ import LazyCircus.AsyncWorker (scheduleAsyncAction)
 import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
+import LazyCircus.Scenario
 import LazyCircus.Scene.AI.Class (AILangPerformer (..), runAI)
 import LazyCircus.Scene.DB.Class (runDB)
 import LazyCircus.Scene.Mail.Class (MailScriptPerformer (..), runMail)
 import LazyCircus.Scene.Telegram.Class (TelegramScriptPerformer (..), runTelegram)
 import LazyCircus.Script
-import LazyCircus.Scenario
-import LazyCircus.Telegram.Types (AppWithBotEnv (..))
 import LazyCircus.Telegram qualified as TG
+import LazyCircus.Telegram.Types (AppWithBotEnv (..))
 import RIO
 import RIO.Map qualified as M
 import RIO.Time (getCurrentTime)
@@ -48,7 +50,7 @@ newtype NoBotConfigured = NoBotConfigured Text
 
 instance Exception NoBotConfigured
 
-instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv DefaultApp)) where
+instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv (DefaultApp serviceLib))) where
     sendMessage' = TG.sendMessage
     getFile' = TG.getFile
     getBotName' = TG.getBotName
@@ -58,18 +60,18 @@ instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv DefaultApp)) w
     answerCallbackQuery' = TG.answerCallbackQuery
     editMessageText' = TG.editMessageText
 
-instance MailScriptPerformer (DefaultPerformer DefaultApp) where
+instance MailScriptPerformer (DefaultPerformer (DefaultApp serviceLib)) where
     sendMail' = Mail.sendMail
     makeMail' = Mail.makeMail
 
-instance AILangPerformer (DefaultPerformer DefaultApp) where
+instance AILangPerformer (DefaultPerformer (DefaultApp serviceLib)) where
     ask' = askAI
 
 -- | Execute a scenario program against the default runtime environment and its current performer stack.
-runDefaultScenario :: ScenarioProgram Script a -> DefaultPerformer DefaultApp a
+runDefaultScenario :: forall serviceLib a. ScenarioProgram Script serviceLib a -> DefaultPerformer (DefaultApp serviceLib) a
 runDefaultScenario = FC.iterM go
   where
-    go :: Scenario Script (DefaultPerformer DefaultApp a) -> DefaultPerformer DefaultApp a
+    go :: Scenario Script serviceLib (DefaultPerformer (DefaultApp serviceLib) a) -> DefaultPerformer (DefaultApp serviceLib) a
     go (EvalScript script next) = do
         result <- evalScriptDefault script
         next result
@@ -95,12 +97,12 @@ runDefaultScenario = FC.iterM go
         scheduleAsyncAction act
         next
 
-evalScriptDefault :: Script a -> DefaultPerformer DefaultApp a
+evalScriptDefault :: Script a -> DefaultPerformer (DefaultApp serviceLib) a
 evalScriptDefault (TelegramScriptDef name scr) = do
-        botEnvs <- view botEnvsL
-        case M.lookup name botEnvs of
-            Nothing -> throwIO $ NoBotConfigured name
-            Just botEnv -> changeEnv (AppWithBotEnv botEnv) (runTelegram scr)
+    botEnvs <- view botEnvsL
+    case M.lookup name botEnvs of
+        Nothing -> throwIO $ NoBotConfigured name
+        Just botEnv -> changeEnv (AppWithBotEnv botEnv) (runTelegram scr)
 evalScriptDefault (MailScriptDef scr) = runMail scr
 evalScriptDefault (AIScriptDef scr) = runAI scr
 evalScriptDefault (DBScriptDef db mode scr) = do

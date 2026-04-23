@@ -8,11 +8,11 @@ module LazyCircus.Performer (
 ) where
 
 import LazyCircus.App.Log
+import LazyCircus.Scenario
 import LazyCircus.Scene.AI.Class (AILangPerformer, runAI)
 import LazyCircus.Scene.DB.Class (DBScriptPerformer, runDB)
 import LazyCircus.Scene.Mail.Class (MailScriptPerformer, runMail)
 import LazyCircus.Scene.Telegram.Class (TelegramScriptPerformer, runTelegram)
-import LazyCircus.Scenario
 import LazyCircus.Script
 import RIO
 import RIO.Time (getCurrentTime)
@@ -29,16 +29,18 @@ and 'HasLoggingContext' in its reader environment.
 POST-CONTRACT: Every 'evalScript' call is routed to the correct sub-interpreter,
 and orchestration operations (throw, logging, time, async) are handled via IO.
 -}
-instance (
-    TelegramScriptPerformer m,
-    MailScriptPerformer m,
-    AILangPerformer m,
-    DBScriptPerformer m,
-    HasLogQueue env,
-    HasLoggingContext env,
-    MonadReader env m,
-    MonadUnliftIO m
-    ) => ScenarioPerformer Script m where
+instance
+    ( TelegramScriptPerformer m
+    , MailScriptPerformer m
+    , AILangPerformer m
+    , DBScriptPerformer m
+    , HasLogQueue env
+    , HasLoggingContext env
+    , MonadReader env m
+    , MonadUnliftIO m
+    ) =>
+    ScenarioPerformer Script serviceLib m
+    where
     onEvalScript (TelegramScriptDef _token scr) = runTelegram scr
     onEvalScript (MailScriptDef scr) = runMail scr
     onEvalScript (AIScriptDef scr) = runAI scr
