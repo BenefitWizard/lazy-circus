@@ -50,8 +50,8 @@ data Scenario script serviceLib a where
   GetExtraContext :: (HashMap Text Text -> a) -> Scenario script serviceLib a
   RunAsync :: ScenarioProgram script serviceLib () -> a -> Scenario script serviceLib a
   CallService ::
-    (S.IsServiceLib serviceLib, S.IsInServiceLib serviceLib request) =>
-    request -> (S.ServiceResponse serviceLib -> a) -> Scenario script serviceLib a
+    (S.IsInServiceLib serviceLib request response) =>
+    request -> (response -> a) -> Scenario script serviceLib a
 
 instance Functor (Scenario script serviceLib) where
   fmap f (EvalScript scr g) = EvalScript scr (f . g)
@@ -77,7 +77,7 @@ class (Monad m) => ScenarioPerformer script serviceLib m where
   getExtraContext' :: m (HashMap Text Text)
   withLogContext' :: [(Text, Text)] -> ScenarioProgram script serviceLib a -> m a
   runAsync' :: ScenarioProgram script serviceLib () -> m ()
-  callService' :: (S.IsServiceLib serviceLib, S.IsInServiceLib serviceLib request) => request -> m (S.ServiceResponse serviceLib)
+  callService' :: (S.IsInServiceLib serviceLib request response) => request -> m response
 
 {- | Fold a ScenarioProgram into any monad that implements ScenarioPerformer.
 PRE-CONTRACT: None
@@ -241,7 +241,7 @@ runAsync act = FC.liftF $ RunAsync act ()
 {- | Enable LogLangF smart constructors to work directly in ScenarioProgram.
 Maps LogLangF operations to the unified Scenario constructors.
 -}
-callService :: (S.IsInServiceLib serviceLib request) => request -> ScenarioProgram script serviceLib (S.ServiceResponse serviceLib)
+callService :: (S.IsInServiceLib serviceLib request response) => request -> ScenarioProgram script serviceLib response
 callService req = FC.liftF $ CallService req id
 
 instance HasLogLang (Scenario script serviceLib) (ScenarioProgram script serviceLib) where

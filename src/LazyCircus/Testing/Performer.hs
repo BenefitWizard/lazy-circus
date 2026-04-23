@@ -1,7 +1,9 @@
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | Mock-backed interpreter utilities for tests that run current LazyCircus scripts.
 module LazyCircus.Testing.Performer (
@@ -38,7 +40,7 @@ import Control.Monad.Free.Church (iterM)
 import Database.PostgreSQL.Simple qualified as Simple
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
-import LazyCircus.App.Service (NoServiceLib)
+import LazyCircus.App.Service (HasServiceLib (..), callViaServiceLib)
 import LazyCircus.DB.Types (PgDB)
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
@@ -81,7 +83,7 @@ data MailMock = MailMock
     }
 
 -- | Aggregate capture state collected while a test scenario runs.
-data Mocks = Mocks
+data Mocks serviceLib = Mocks
     { tgMock :: TgMock
     -- ^ Telegram request and response capture
     , appLog :: SomeRef [AppLogMsg]
@@ -90,44 +92,48 @@ data Mocks = Mocks
     -- ^ captured log payloads with context and call site
     , mailMock :: MailMock
     -- ^ captured mail sends
-    , scheduledScenarios :: SomeRef [ScenarioProgram Script NoServiceLib ()]
+    , scheduledScenarios :: SomeRef [ScenarioProgram Script serviceLib ()]
     -- ^ captured async control programs requested through 'runAsync'
     }
 
 -- | Test runtime environment that combines mocks with the real application environment.
-data EnvWithMocks = EnvWithMocks
-    { mocks :: Mocks
+data EnvWithMocks serviceLib = EnvWithMocks
+    { mocks :: Mocks serviceLib
     -- ^ mutable capture state for the current test run
-    , defaultApp :: App.DefaultApp NoServiceLib
+    , defaultApp :: App.DefaultApp serviceLib
     -- ^ real runtime dependencies used for DB access, config, and mail construction
     }
 
+-- | Delegates service library access to the wrapped DefaultApp.
+instance HasServiceLib (EnvWithMocks serviceLib) serviceLib where
+    serviceLibL = lens defaultApp (\env x -> env{defaultApp = x}) . serviceLibL
+
 -- | Interpreter monad used by test helpers and mock-backed runners.
-newtype TestInterpreter a = TestInterpreter
-    { runTestInterpreter :: RIO EnvWithMocks a
+newtype TestInterpreter serviceLib a = TestInterpreter
+    { runTestInterpreter :: RIO (EnvWithMocks serviceLib) a
     }
     deriving
         ( Applicative
         , Functor
         , Monad
         , MonadIO
-        , MonadReader EnvWithMocks
+        , MonadReader (EnvWithMocks serviceLib)
         , MonadUnliftIO
         )
 
 -- | Re-target a test action to an updated environment.
-changeEnv :: (EnvWithMocks -> EnvWithMocks) -> TestInterpreter a -> TestInterpreter a
+changeEnv :: (EnvWithMocks serviceLib -> EnvWithMocks serviceLib) -> TestInterpreter serviceLib a -> TestInterpreter serviceLib a
 changeEnv f (TestInterpreter action) = TestInterpreter (mapRIO f action)
 
 -- | Run one top-level 'Script' using the mock-backed test interpreter.
-runScript :: Script a -> TestInterpreter a
+runScript :: Script a -> TestInterpreter serviceLib a
 runScript (TelegramScriptDef botName script) = runTelegramWithMockLogging botName script
 runScript (MailScriptDef script) = runMailWithMockLogging script
 runScript (AIScriptDef script) = runAIWithMockLogging script
 runScript (DBScriptDef db mode script) = runDBWithMockLogging db mode script
 
 -- | Run a 'ScenarioProgram' using current mock semantics for logging, AI, and async work.
-runScenarioProgram :: ScenarioProgram Script NoServiceLib a -> TestInterpreter a
+runScenarioProgram :: ScenarioProgram Script serviceLib a -> TestInterpreter serviceLib a
 runScenarioProgram = iterM go
   where
     go (EvalScript script next) = do
@@ -154,9 +160,12 @@ runScenarioProgram = iterM go
     go (RunAsync action next) = do
         captureAsyncScenario action
         next
+    go (CallService req next) = do
+        res <- callViaServiceLib req
+        next res
 
 -- | Run a DB script while capturing its embedded logs into mocks instead of the shared log queue.
-runDBWithMockLogging :: PgDB db -> DbMode -> DBScript db a -> TestInterpreter a
+runDBWithMockLogging :: PgDB db -> DbMode -> DBScript db a -> TestInterpreter serviceLib a
 runDBWithMockLogging db mode = iterM go
   where
     go (Create tables next) = do
@@ -195,7 +204,7 @@ runDBWithMockLogging db mode = iterM go
         runLogWithMockCapture "DB" (runDBWithMockLogging db mode) (fmap next logAction)
 
 -- | Run a Telegram script while capturing sends, schedules, and logs into mocks.
-runTelegramWithMockLogging :: Text -> TelegramScript a -> TestInterpreter a
+runTelegramWithMockLogging :: Text -> TelegramScript a -> TestInterpreter serviceLib a
 runTelegramWithMockLogging botName = iterM go
   where
     go (GetFile fileId next) = do
@@ -241,7 +250,7 @@ createSimpleMailMock = do
     pure MailMock{sentMails = mailLog}
 
 -- | Allocate a fresh set of empty mocks for one test run.
-makeMocks :: IO Mocks
+makeMocks :: IO (Mocks serviceLib)
 makeMocks = do
     telegramMock <- createSimpleTgMock
     logMessages <- newSomeRef []
@@ -258,59 +267,59 @@ makeMocks = do
             }
 
 -- | Run a test action inside 'RIO DefaultApp' using a caller-supplied mock set.
-runInsideWithMocks :: Mocks -> TestInterpreter a -> RIO (App.DefaultApp NoServiceLib) a
+runInsideWithMocks :: Mocks serviceLib -> TestInterpreter serviceLib a -> RIO (App.DefaultApp serviceLib) a
 runInsideWithMocks testMocks action = mapRIO (EnvWithMocks testMocks) $ runTestInterpreter action
 
 -- | Run a test action from plain 'IO' using a caller-supplied application and mock set.
-runWithMocks :: App.DefaultApp NoServiceLib -> Mocks -> TestInterpreter a -> IO a
+runWithMocks :: App.DefaultApp serviceLib -> Mocks serviceLib -> TestInterpreter serviceLib a -> IO a
 runWithMocks app testMocks action = runRIO env $ runTestInterpreter action
   where
     env = EnvWithMocks{mocks = testMocks, defaultApp = app}
 
 -- | Run a test action inside 'RIO DefaultApp' after allocating a fresh mock set.
-runInsideWithDefaultMocks :: TestInterpreter a -> RIO (App.DefaultApp NoServiceLib) (Mocks, a)
+runInsideWithDefaultMocks :: TestInterpreter serviceLib a -> RIO (App.DefaultApp serviceLib) (Mocks serviceLib, a)
 runInsideWithDefaultMocks action = do
     testMocks <- liftIO makeMocks
     result <- runInsideWithMocks testMocks action
     pure (testMocks, result)
 
 -- | Run a test action from plain 'IO' after allocating a fresh mock set.
-runWithDefaultMocks :: App.DefaultApp NoServiceLib -> TestInterpreter a -> IO (Mocks, a)
+runWithDefaultMocks :: App.DefaultApp serviceLib -> TestInterpreter serviceLib a -> IO (Mocks serviceLib, a)
 runWithDefaultMocks app action = do
     testMocks <- makeMocks
     result <- runWithMocks app testMocks action
     pure (testMocks, result)
 
 -- | Drop the collected mocks from a combined result returned inside 'RIO DefaultApp'.
-discardMocks :: RIO (App.DefaultApp NoServiceLib) (Mocks, a) -> RIO (App.DefaultApp NoServiceLib) a
+discardMocks :: RIO (App.DefaultApp serviceLib) (Mocks serviceLib, a) -> RIO (App.DefaultApp serviceLib) a
 discardMocks action = snd <$> action
 
 -- | Read captured immediate Telegram send requests in call order.
-readTgRequests :: Mocks -> IO [WithImportance SendMessageRequest]
+readTgRequests :: Mocks serviceLib -> IO [WithImportance SendMessageRequest]
 readTgRequests testMocks = reverse <$> readSomeRef (sendMessageRequests $ tgMock testMocks)
 
 -- | Read captured scheduled Telegram requests in call order.
-readScheduledTgRequests :: Mocks -> IO [SendMessageRequest]
+readScheduledTgRequests :: Mocks serviceLib -> IO [SendMessageRequest]
 readScheduledTgRequests testMocks = reverse <$> readSomeRef (scheduledMessageRequests $ tgMock testMocks)
 
 -- | Read captured log payloads in emission order.
-readLog :: Mocks -> IO [AppLogMsg]
+readLog :: Mocks serviceLib -> IO [AppLogMsg]
 readLog testMocks = reverse <$> readSomeRef (appLog testMocks)
 
 -- | Read captured log payloads with their context and call site in emission order.
-readLogWithContext :: Mocks -> IO [AppLogMsgWithContext]
+readLogWithContext :: Mocks serviceLib -> IO [AppLogMsgWithContext]
 readLogWithContext testMocks = reverse <$> readSomeRef (appLogWithContext testMocks)
 
 -- | Read captured outgoing mails in send order.
-readSentMails :: Mocks -> IO [Mail]
+readSentMails :: Mocks serviceLib -> IO [Mail]
 readSentMails testMocks = reverse <$> readSomeRef (sentMails $ mailMock testMocks)
 
 -- | Read captured async scenarios in request order.
-readScheduledScenarios :: Mocks -> IO [ScenarioProgram Script NoServiceLib ()]
+readScheduledScenarios :: Mocks serviceLib -> IO [ScenarioProgram Script serviceLib ()]
 readScheduledScenarios testMocks = reverse <$> readSomeRef (scheduledScenarios testMocks)
 
 -- | Run a mail script while capturing sends and logs into mocks.
-runMailWithMockLogging :: MailScript a -> TestInterpreter a
+runMailWithMockLogging :: MailScript a -> TestInterpreter serviceLib a
 runMailWithMockLogging = iterM go
   where
     go (SendMail mail next) = do
@@ -323,7 +332,7 @@ runMailWithMockLogging = iterM go
         runLogWithMockCapture "Mail" runMailWithMockLogging (fmap next logAction)
 
 -- | Run an AI script while returning no decoded answers and capturing logs into mocks.
-runAIWithMockLogging :: AIScript a -> TestInterpreter a
+runAIWithMockLogging :: AIScript a -> TestInterpreter serviceLib a
 runAIWithMockLogging = iterM go
   where
     go (Ask _request next) = next Nothing
@@ -333,9 +342,9 @@ runAIWithMockLogging = iterM go
 -- | Capture one logging instruction for any sub-language and preserve nested log context.
 runLogWithMockCapture ::
     Text ->
-    (forall x. prog x -> TestInterpreter x) ->
-    LogLangF prog (TestInterpreter a) ->
-    TestInterpreter a
+    (forall x. prog x -> TestInterpreter serviceLib x) ->
+    LogLangF prog (TestInterpreter serviceLib a) ->
+    TestInterpreter serviceLib a
 runLogWithMockCapture langTag runProg = \case
     LogMsg cs msg next -> do
         captureLogMessage langTag cs msg
@@ -345,18 +354,18 @@ runLogWithMockCapture langTag runProg = \case
         next result
 
 -- | Build a mail value using the SMTP credentials from the current test environment.
-buildMail :: Address -> Text -> Text -> TestInterpreter Mail
+buildMail :: Address -> Text -> Text -> TestInterpreter serviceLib Mail
 buildMail recipient subject body = do
     creds <- asks (App.mailCreds . defaultApp)
     pure $ Mail.makeMail' creds recipient subject body
 
 -- | Reject writes when the DB script is running in read-only mode.
-ensureReadWrite :: DbMode -> TestInterpreter ()
+ensureReadWrite :: DbMode -> TestInterpreter serviceLib ()
 ensureReadWrite ReadWrite = pure ()
 ensureReadWrite ReadOnly = throwIO DbReadOnlyViolation
 
 -- | Run one database action against the connection selected by the current DB mode.
-runDbAction :: DbMode -> RIO (AppWithConnection (App.DefaultApp NoServiceLib)) a -> TestInterpreter a
+runDbAction :: DbMode -> RIO (AppWithConnection (App.DefaultApp serviceLib)) a -> TestInterpreter serviceLib a
 runDbAction mode action = do
     env <- ask
     let connection = selectDbConnection mode env
@@ -364,7 +373,7 @@ runDbAction mode action = do
     liftIO $ runRIO dbEnv action
 
 -- | Run one transactional database action using the selected connection and current test environment.
-runDbTransaction :: DbMode -> Maybe RLSContext -> TestInterpreter a -> TestInterpreter a
+runDbTransaction :: DbMode -> Maybe RLSContext -> TestInterpreter serviceLib a -> TestInterpreter serviceLib a
 runDbTransaction mode mCtx action = do
     env <- ask
     let connection = selectDbConnection mode env
@@ -373,7 +382,7 @@ runDbTransaction mode mCtx action = do
         runRIO env $ runTestInterpreter action
 
 -- | Select the same database connection that production script dispatch would choose for the given mode.
-selectDbConnection :: DbMode -> EnvWithMocks -> Simple.Connection
+selectDbConnection :: DbMode -> EnvWithMocks serviceLib -> Simple.Connection
 selectDbConnection ReadWrite env = App.pgDbConnection $ defaultApp env
 selectDbConnection ReadOnly env = fromMaybe primary maybeReadOnly
   where
@@ -382,7 +391,7 @@ selectDbConnection ReadOnly env = fromMaybe primary maybeReadOnly
     maybeReadOnly = App.pgDbConnectionReadOnly app
 
 -- | Capture one application log message together with the current logging context and language tag.
-captureLogMessage :: Text -> CallStack -> AppLogMsg -> TestInterpreter ()
+captureLogMessage :: Text -> CallStack -> AppLogMsg -> TestInterpreter serviceLib ()
 captureLogMessage langTag cs msg = do
     env <- ask
     let
@@ -393,7 +402,7 @@ captureLogMessage langTag cs msg = do
     modifySomeRef (appLogWithContext testMocks) (contextualMsg :)
 
 -- | Run a test action with additional logging context entries layered on top of the current context.
-withExtendedLogContext :: [(Text, Text)] -> TestInterpreter a -> TestInterpreter a
+withExtendedLogContext :: [(Text, Text)] -> TestInterpreter serviceLib a -> TestInterpreter serviceLib a
 withExtendedLogContext values = changeEnv updateEnv
   where
     updateEnv env = env{defaultApp = app{App.logContext = updatedContext}}
@@ -402,25 +411,25 @@ withExtendedLogContext values = changeEnv updateEnv
         updatedContext = putInLoggingContext (App.logContext app) values
 
 -- | Append immediate Telegram requests to the mock log while preserving external read order.
-logTgRequests :: [WithImportance SendMessageRequest] -> TestInterpreter ()
+logTgRequests :: [WithImportance SendMessageRequest] -> TestInterpreter serviceLib ()
 logTgRequests requests = do
     telegramMock <- asks (tgMock . mocks)
     modifySomeRef (sendMessageRequests telegramMock) (reverse requests <>)
 
 -- | Append scheduled Telegram requests to the mock log while preserving external read order.
-logScheduledTgRequests :: [SendMessageRequest] -> TestInterpreter ()
+logScheduledTgRequests :: [SendMessageRequest] -> TestInterpreter serviceLib ()
 logScheduledTgRequests requests = do
     telegramMock <- asks (tgMock . mocks)
     modifySomeRef (scheduledMessageRequests telegramMock) (reverse requests <>)
 
 -- | Append one outgoing mail to the mock log.
-logMailSend :: Mail -> TestInterpreter ()
+logMailSend :: Mail -> TestInterpreter serviceLib ()
 logMailSend mail = do
     mockMail <- asks (mailMock . mocks)
     modifySomeRef (sentMails mockMail) (mail :)
 
 -- | Return the next queued Telegram response or fall back to the default response.
-dequeueTgResponse :: WithImportance SendMessageRequest -> TestInterpreter (Response Message)
+dequeueTgResponse :: WithImportance SendMessageRequest -> TestInterpreter serviceLib (Response Message)
 dequeueTgResponse request = do
     telegramMock <- asks (tgMock . mocks)
     queuedResponses <- readSomeRef $ sendMessageResponses telegramMock
@@ -431,11 +440,11 @@ dequeueTgResponse request = do
         [] -> pure $ defaultResponse telegramMock
 
 -- | Fail fast when a test uses Telegram file loading without providing a dedicated mock path.
-getFileMock :: FileId -> TestInterpreter (Response File)
+getFileMock :: FileId -> TestInterpreter serviceLib (Response File)
 getFileMock _ = throwString "LazyCircus.Testing.Performer: getFile is not implemented for tests"
 
 -- | Record an async scenario request without executing it.
-captureAsyncScenario :: ScenarioProgram Script NoServiceLib () -> TestInterpreter ()
+captureAsyncScenario :: ScenarioProgram Script serviceLib () -> TestInterpreter serviceLib ()
 captureAsyncScenario action = do
     asyncLog <- asks (scheduledScenarios . mocks)
     modifySomeRef asyncLog (action :)

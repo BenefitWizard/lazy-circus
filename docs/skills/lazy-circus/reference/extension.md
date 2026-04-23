@@ -3,6 +3,7 @@
 Read this when:
 
 - adding a new Beam table or DB service instance
+- registering in-process services with `ServiceHandler` and `IsInServiceLib`
 - adding a new effect language or public facade
 - doing code review for cross-layer integration changes
 - checking the detailed pitfalls and final review checklist
@@ -109,6 +110,151 @@ The default method uses `generateFiltration`, so an empty instance is enough in 
 evalScript $ DBScriptDef myDb ReadWrite $ create row
 evalScript $ DBScriptDef myDb ReadOnly $ find key
 ```
+
+## Service Registration
+
+Services are in-process workers that accept typed requests and return typed responses through
+serialized channels. They are useful when you need a long-lived background worker that handles
+requests one at a time — for example, a rate-limited external API client or a single-threaded
+file writer.
+
+### How It Works
+
+Each service is a pair of `MVar` channels (a `Pipe`) guarded by a `QSem` semaphore. The caller
+sends a request into the pipe and blocks until the worker posts a response. Because the
+semaphore is set to 1, at most one request is in flight at any time.
+
+### Step 1. Define Request And Response Types
+
+```haskell
+data SimpleRequest
+    = Add Int Int
+    | Subtract Int Int
+
+data SimpleResponse = SimpleResult Int
+    deriving (Show, Eq)
+```
+
+### Step 2. Provide A Failback Value
+
+Every response type must implement `HasFailbackValue`. The failback value is returned to the
+caller when the worker throws an exception.
+
+```haskell
+instance HasFailbackValue SimpleResponse where
+    failbackValue = SimpleResult 0
+```
+
+### Step 3. Write The Handler Function
+
+A plain function from request to `IO` response:
+
+```haskell
+handleSimpleRequest :: SimpleRequest -> IO SimpleResponse
+handleSimpleRequest req =
+    case req of
+        Add x y      -> pure $ SimpleResult (x + y)
+        Subtract x y -> pure $ SimpleResult (x - y)
+```
+
+### Step 4. Build A Service Library Type
+
+Group all service handlers into a single record. This record is the `serviceLib` type parameter
+of `DefaultApp`.
+
+```haskell
+data AllServices = AllServices
+    { addService           :: ServiceHandler SimpleRequest SimpleResponse
+    , addExpressionService :: ServiceHandler AddExpressionRequest AddExpressionResponse
+    }
+```
+
+### Step 5. Implement `IsInServiceLib` Instances
+
+For each request/response pair, implement `IsInServiceLib` so that `callService` can dispatch
+to the correct handler:
+
+```haskell
+instance IsInServiceLib AllServices SimpleRequest SimpleResponse where
+    callFromServiceLib allServices request =
+        case request of
+            Add x y      -> callService (addService allServices) (Add x y)
+            Subtract x y -> callService (addService allServices) (Subtract x y)
+
+instance IsInServiceLib AllServices AddExpressionRequest AddExpressionResponse where
+    callFromServiceLib allServices = callService (addExpressionService allServices)
+```
+
+### Step 6. Create Handlers And Start Workers At Startup
+
+`createService` returns a `(ServiceHandler, IO ())` pair — the handler and the worker action.
+Create all handlers, build the library record, and fork the workers.
+
+```haskell
+import LazyCircus.App.Service
+import Control.Concurrent (forkIO)
+
+createAllServices :: IO AllServices
+createAllServices = do
+    (simpleHandler, simpleWorker) <- createService handleSimpleRequest
+    (exprHandler, exprWorker) <- createService handleAddExpressionRequest
+    _ <- forkIO simpleWorker
+    _ <- forkIO exprWorker
+    pure AllServices
+        { addService = simpleHandler
+        , addExpressionService = exprHandler
+        }
+```
+
+### Step 7. Wire Into `DefaultAppConfig`
+
+Pass the service library through `cfgServiceLib`:
+
+```haskell
+allServices <- createAllServices
+let appConfig = DefaultAppConfig
+        { cfgServiceLib = allServices
+        , ...
+        }
+app <- newDefaultApp appConfig
+```
+
+When your application does not need services, use `NoServiceLib`:
+
+```haskell
+let appConfig = DefaultAppConfig
+        { cfgServiceLib = NoServiceLib
+        , ...
+        }
+```
+
+### Step 8. Call From Scenarios
+
+Inside a `ScenarioProgram`, use `callService` to dispatch to the correct worker:
+
+```haskell
+myScenario :: ScenarioProgram script AllServices ()
+myScenario = do
+    result <- callService (Add 3 4)
+    logInfo $ "Got: " <> displayShow result
+```
+
+Alternatively, from any monad with `HasServiceLib` in scope, use `callViaServiceLib`:
+
+```haskell
+result <- callViaServiceLib (Add 3 4)
+```
+
+### Checklist For Service Registration
+
+- request and response types defined
+- `HasFailbackValue` instance for each response type
+- handler function `request -> IO response`
+- service library record holding `ServiceHandler` fields
+- `IsInServiceLib` instance for each request/response pair
+- `createService` called at startup; workers forked
+- library record passed to `cfgServiceLib` in `DefaultAppConfig`
+- `callService` used from scenarios or `callViaServiceLib` from reader context
 
 ## Adding A New Effect
 

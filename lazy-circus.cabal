@@ -263,6 +263,7 @@ test-suite lazy-circus-test
       BotScenariosSpec
       DBLangSpec
       LogSpec
+      ServiceCallSpec
       TestDbSupport
       Paths_lazy_circus
   autogen-modules:

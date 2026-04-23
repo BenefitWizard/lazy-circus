@@ -17,8 +17,8 @@ module LazyCircus.App.Service (
     IsInServiceLib (..),
     HasServiceLib (..),
     NoServiceLib (..),
-    IsServiceLib (..),
     callViaServiceLib,
+    -- IsResponseFor (..),
 )
 where
 
@@ -81,27 +81,30 @@ callService h a = do
         putMVar request a
         takeMVar response
 
-class IsServiceLib serviceLib where
-    type ServiceResponse serviceLib
+-- class IsServiceLib serviceLib
 
-class (IsServiceLib serviceLib) => IsInServiceLib serviceLib request where
-    callFromServiceLib :: (MonadUnliftIO m) => serviceLib -> request -> m (ServiceResponse serviceLib)
+-- type ServiceResponse serviceLib
+
+class IsInServiceLib serviceLib request response where
+    callFromServiceLib :: (MonadUnliftIO m) => serviceLib -> request -> m response
+
+-- class IsResponseFor request response | response -> request
 
 class HasServiceLib env serviceLib | env -> serviceLib where
-    -- getServiceLib :: env -> serviceLib
     serviceLibL :: Lens' env serviceLib
 
 data NoServiceLib = NoServiceLib
-instance IsServiceLib NoServiceLib where
-    type ServiceResponse NoServiceLib = ()
+
+-- type ServiceResponse NoServiceLib = ()
 
 callViaServiceLib ::
     ( MonadUnliftIO m
-    , IsInServiceLib serviceLib request
+    , IsInServiceLib serviceLib request response
     , HasServiceLib env serviceLib
-    , MonadReader env m
+    , -- , IsResponseFor request response
+      MonadReader env m
     ) =>
-    request -> m (ServiceResponse serviceLib)
+    request -> m response
 callViaServiceLib req = do
     serviceLib <- view serviceLibL
     callFromServiceLib serviceLib req

@@ -8,6 +8,8 @@ module DemoEnv (
     readDemoConfig,
     withDemoApp,
     runDemoScenario,
+    setupDatabase,
+    testConnectionString,
 ) where
 
 import RIO
