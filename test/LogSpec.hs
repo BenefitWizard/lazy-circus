@@ -128,6 +128,7 @@ spec = do
                     , asyncTasks = unsafeCoerce ()
                     , aiMethods = unsafeCoerce ()
                     , sqlLogAction = unsafeCoerce ()
+                    , serviceLib = unsafeCoerce ()
                     }
             let logApp = logAppFromDefaultApp dummyApp
             -- Calling the LogApp's genLogFunc should NOT write to the queue

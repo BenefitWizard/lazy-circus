@@ -21,6 +21,7 @@ import LazyCircus.Testing.Performer
     , runScenarioProgram
     )
 import LazyCircus.App.Default (DefaultApp)
+import LazyCircus.App.Service (NoServiceLib)
 import Network.Mail.Mime (Address(..))
 import RIO
 import Data.Text qualified as T
@@ -46,7 +47,7 @@ testConfig = DemoConfig
 
 -- | Run a scenario action with a DefaultApp obtained from withDemoApp.
 -- Uses aroundAll so the database is set up once for all tests.
-withTestApp :: (DefaultApp -> IO ()) -> IO ()
+withTestApp :: (DefaultApp NoServiceLib -> IO ()) -> IO ()
 withTestApp action = withDemoApp testConfig $ \app -> action app
 
 spec :: Spec

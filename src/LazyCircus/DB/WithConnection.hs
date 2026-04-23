@@ -78,7 +78,7 @@ instance (HasLogQueue app) => HasLogQueue (AppWithConnection app) where
 instance (HasLoggingContext app) => HasLoggingContext (AppWithConnection app) where
     logContextL = underlyingApp . logContextL
 
-instance (HasScheduledActions Script app) => HasScheduledActions Script (AppWithConnection app) where
+instance (HasScheduledActions Script sl app) => HasScheduledActions Script sl (AppWithConnection app) where
     scheduledActionsL = underlyingApp . scheduledActionsL
 
 instance (HasAIMethods app) => HasAIMethods (AppWithConnection app) where

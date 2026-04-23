@@ -23,7 +23,7 @@ flowchart TB
     end
 
     subgraph ScenarioLayer[Scenario Layer]
-        SCEN[ScenarioProgram Script a\nevalScript\nrunSafely\ngetDateTime\nwithLogContext\nrunAsync]
+        SCEN[ScenarioProgram Script a\nevalScript\nrunSafely\ngetDateTime\nwithLogContext\nrunAsync\ncallService]
     end
 
     subgraph Runtime[Runtime Layer]
@@ -76,10 +76,11 @@ multiple effects and control concerns.
 | `throw` | raise an exception through the interpreter |
 | `runSafely` | catch typed exceptions and return `Either` |
 | `getDateTime` | get current UTC time |
-| `logInfo` / `logWarn` / `logError` / `logSensitive` | scenario-level logging |
+| `log` / `logInfo` / `logWarn` / `logError` / `logSensitive` | scenario-level logging |
 | `withLogContext` / `withLogEntry` / `with2LogEntries` | enrich logging context |
 | `getExtraContext` / `readFromExtraContext` / `getFeatureFlag` | read runtime config |
 | `runAsync` | schedule async work |
+| `callService` | call a registered service via the service library |
 
 ### Rule Of Thumb
 

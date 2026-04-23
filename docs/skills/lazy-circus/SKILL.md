@@ -44,7 +44,7 @@ Default routing:
 | `ScenarioProgram`, `evalScript`, `runSafely`, `runAsync`, scenario logging, extra context, or the architecture map | [reference/scenarios.md](reference/scenarios.md) |
 | DB/Telegram/AI/Mail DSL operations, smart constructors, scene-level logging, or top-level wrappers like `tgScript` / `mailScript` / `aiScript` | [reference/effects.md](reference/effects.md) |
 | `DefaultPerformer`, `runDefaultScenario`, environment projection, async queue behavior, test interpreter behavior, mocks, or DB test setup | [reference/runtime-testing.md](reference/runtime-testing.md) |
-| DB service instances, adding a new public effect, integration checklists, or the detailed pitfalls/review checklist | [reference/extension.md](reference/extension.md) |
+| DB service instances, service registration, adding a new public effect, integration checklists, or the detailed pitfalls/review checklist | [reference/extension.md](reference/extension.md) |
 
 Read more than one reference file when a task crosses layers.
 
@@ -57,6 +57,7 @@ Read more than one reference file when a task crosses layers.
   - Mail -> `mailScript ...`
   - AI -> `aiScript ...`
   - DB -> `DBScriptDef db mode ...`
+- Use `callService` to invoke registered services from `ScenarioProgram`.
 - `create` and `createAsIs` return `Maybe row`.
 - `ReadOnly` forbids write operations.
 - Tests in this repository use a real PostgreSQL database.
@@ -74,6 +75,7 @@ Read more than one reference file when a task crosses layers.
 - the relevant `src/LazyCircus/Scene/*` module for the domain you are touching
 - `src/LazyCircus/Testing/Performer.hs` for tests
 - `src/LazyCircus/DB/Service.hs` plus the concrete table module for DB integration work
+- `src/LazyCircus/App/Service.hs` for service registration
 
 Prefer LSP navigation for Haskell modules when possible.
 
