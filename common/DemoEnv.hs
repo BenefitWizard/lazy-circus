@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
 -- | Constructs a DefaultApp runtime environment for the Lazy Circus demo application.
@@ -26,7 +27,9 @@ import LazyCircus.App.Default hiding (cfgAiApiKey, cfgAiBaseUrl, DefaultAppConfi
 import LazyCircus.App.Default qualified as LAD (DefaultAppConfig (..))
 import LazyCircus.App.Log hiding (genLogFunc, logContext, logFunc, logQueue)
 import LazyCircus.AsyncWorker (runAsyncWorker)
-import LazyCircus.Performer.Default (runDefaultPerformer, runDefaultScenario)
+import LazyCircus.Performer.Default (runDefaultPerformer)
+import LazyCircus.Scenario (run)
+import LazyCircus.Script (Script)
 import LazyCircus.Scenario (ScenarioProgram)
 import LazyCircus.Script (Script)
 
@@ -145,7 +148,7 @@ withDemoApp cfg action = do
     bracket
         ( do
             logThread <- async $ runRIO (logAppFromDefaultApp app) logWorker
-            asyncThread <- async $ runRIO app (runAsyncWorker (runDefaultPerformer . runDefaultScenario))
+            asyncThread <- async $ runRIO app (runAsyncWorker (runDefaultPerformer . run @Script @NoServiceLib))
             pure (app, logThread, asyncThread)
         )
         ( \(app', logThread, asyncThread) -> do
@@ -164,7 +167,7 @@ PRE-CONTRACT: The DefaultApp must have a live database connection.
 POST-CONTRACT: Returns the scenario result.
 -}
 runDemoScenario :: DefaultApp NoServiceLib -> ScenarioProgram Script NoServiceLib a -> IO a
-runDemoScenario app scenario = runRIO app $ runDefaultPerformer $ runDefaultScenario scenario
+runDemoScenario app scenario = runRIO app $ runDefaultPerformer $ run @Script @NoServiceLib scenario
 
 ------------------------------------------------------------------------
 -- Database helpers

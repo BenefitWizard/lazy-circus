@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
 {- | Telegram bot application definition for Lazy Circus.
@@ -31,7 +32,9 @@ import Telegram.Bot.Simple (
 import Telegram.Bot.Simple.UpdateParser ()
 
 import LazyCircus.App.Default (DefaultApp)
-import LazyCircus.Performer.Default (runDefaultPerformer, runDefaultScenario)
+import LazyCircus.Scenario (run)
+import LazyCircus.Performer.Default (runDefaultPerformer)
+import LazyCircus.Script (Script)
 
 import BotScenarios (createActWithReaction, deleteAct, generateReaction, getAct, listActs)
 import Common (CircusAct, CircusActT (..))
@@ -117,7 +120,7 @@ handleAction app notificationEmail action model = case action of
             return ()
     HandleList ->
         model <# do
-            result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ runDefaultScenario listActs
+            result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ run @Script @NoServiceLib listActs
             case result of
                 Left err -> do
                     liftIO $ hPutStrLn stderr $ "Bot error (list): " ++ show err
@@ -127,7 +130,7 @@ handleAction app notificationEmail action model = case action of
             return ()
     HandleViewAct actId ->
         model <# do
-            result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ runDefaultScenario (getAct actId)
+            result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ run @Script @NoServiceLib (getAct actId)
             case result of
                 Left err -> do
                     liftIO $ hPutStrLn stderr $ "Bot error (view): " ++ show err
@@ -138,7 +141,7 @@ handleAction app notificationEmail action model = case action of
     HandleReactAct actId ->
         model <# do
             replyText "⏳ Generating reaction..."
-            result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ runDefaultScenario (generateReaction actId)
+            result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ run @Script @NoServiceLib (generateReaction actId)
             case result of
                 Left err -> do
                     liftIO $ hPutStrLn stderr $ "Bot error (react): " ++ show err
@@ -148,7 +151,7 @@ handleAction app notificationEmail action model = case action of
             return ()
     HandleDeleteAct actId ->
         model <# do
-            result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ runDefaultScenario (deleteAct actId)
+            result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ run @Script @NoServiceLib (deleteAct actId)
             case result of
                 Left err -> do
                     liftIO $ hPutStrLn stderr $ "Bot error (delete): " ++ show err
@@ -168,7 +171,7 @@ handleAction app notificationEmail action model = case action of
             Model Idle <# do
                 replyText "⏳ Creating act..."
                 let email = fromMaybe (Address Nothing "noreply@lazy-circus.example") notificationEmail
-                result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ runDefaultScenario $ createActWithReaction name txt email
+                result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ run @Script @NoServiceLib $ createActWithReaction name txt email
                 case result of
                     Left err -> do
                         liftIO $ hPutStrLn stderr $ "Bot error (create): " ++ show err
