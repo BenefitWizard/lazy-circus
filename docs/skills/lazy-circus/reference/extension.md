@@ -3,6 +3,8 @@
 Read this when:
 
 - adding a new Beam table or DB service instance
+- registering in-process services with `ServiceHandler` and `IsInServiceLib`
+- using `makeServiceLib` to generate service library boilerplate via TemplateHaskell
 - adding a new effect language or public facade
 - doing code review for cross-layer integration changes
 - checking the detailed pitfalls and final review checklist
@@ -109,6 +111,248 @@ The default method uses `generateFiltration`, so an empty instance is enough in 
 evalScript $ DBScriptDef myDb ReadWrite $ create row
 evalScript $ DBScriptDef myDb ReadOnly $ find key
 ```
+
+## Service Registration
+
+Services are in-process workers that accept typed requests and return typed responses through
+serialized channels. They are useful when you need a long-lived background worker that handles
+requests one at a time — for example, a rate-limited external API client or a single-threaded
+file writer.
+
+### How It Works
+
+Each service is a pair of `MVar` channels (a `Pipe`) guarded by a `QSem` semaphore. The caller
+sends a request into the pipe and blocks until the worker posts a response. Because the
+semaphore is set to 1, at most one request is in flight at any time.
+
+### Step 1. Define Request And Response Types
+
+```haskell
+data SimpleRequest
+    = Add Int Int
+    | Subtract Int Int
+
+data SimpleResponse = SimpleResult Int
+    deriving (Show, Eq)
+```
+
+### Step 2. Provide A Failback Value
+
+Every response type must implement `HasFailbackValue`. The failback value is returned to the
+caller when the worker throws an exception.
+
+```haskell
+instance HasFailbackValue SimpleResponse where
+    failbackValue = SimpleResult 0
+```
+
+### Step 3. Write The Handler Function
+
+A plain function from request to `IO` response:
+
+```haskell
+handleSimpleRequest :: SimpleRequest -> IO SimpleResponse
+handleSimpleRequest req =
+    case req of
+        Add x y      -> pure $ SimpleResult (x + y)
+        Subtract x y -> pure $ SimpleResult (x - y)
+```
+
+### Step 4. Build A Service Library Type
+
+Group all service handlers into a single record. This record is the `serviceLib` type parameter
+of `DefaultApp`.
+
+```haskell
+data AllServices = AllServices
+    { addService           :: ServiceHandler SimpleRequest SimpleResponse
+    , addExpressionService :: ServiceHandler AddExpressionRequest AddExpressionResponse
+    }
+```
+
+### Step 5. Implement `IsInServiceLib` Instances
+
+For each request/response pair, implement `IsInServiceLib` so that `callService` can dispatch
+to the correct handler:
+
+```haskell
+instance IsInServiceLib AllServices SimpleRequest SimpleResponse where
+    callFromServiceLib allServices request =
+        case request of
+            Add x y      -> callService (addService allServices) (Add x y)
+            Subtract x y -> callService (addService allServices) (Subtract x y)
+
+instance IsInServiceLib AllServices AddExpressionRequest AddExpressionResponse where
+    callFromServiceLib allServices = callService (addExpressionService allServices)
+```
+
+### Step 6. Create Handlers And Start Workers At Startup
+
+`createService` returns a `(ServiceHandler, IO ())` pair — the handler and the worker action.
+Create all handlers, build the library record, and fork the workers.
+
+```haskell
+import LazyCircus.App.Service
+import Control.Concurrent (forkIO)
+
+createAllServices :: IO AllServices
+createAllServices = do
+    (simpleHandler, simpleWorker) <- createService handleSimpleRequest
+    (exprHandler, exprWorker) <- createService handleAddExpressionRequest
+    _ <- forkIO simpleWorker
+    _ <- forkIO exprWorker
+    pure AllServices
+        { addService = simpleHandler
+        , addExpressionService = exprHandler
+        }
+```
+
+### Step 7. Wire Into `DefaultAppConfig`
+
+Pass the service library through `cfgServiceLib`:
+
+```haskell
+allServices <- createAllServices
+let appConfig = DefaultAppConfig
+        { cfgServiceLib = allServices
+        , ...
+        }
+app <- newDefaultApp appConfig
+```
+
+When your application does not need services, use `NoServiceLib`:
+
+```haskell
+let appConfig = DefaultAppConfig
+        { cfgServiceLib = NoServiceLib
+        , ...
+        }
+```
+
+### Step 8. Call From Scenarios
+
+Inside a `ScenarioProgram`, use `callService` to dispatch to the correct worker:
+
+```haskell
+myScenario :: ScenarioProgram script AllServices ()
+myScenario = do
+    result <- callService (Add 3 4)
+    logInfo $ "Got: " <> displayShow result
+```
+
+Alternatively, from any monad with `HasServiceLib` in scope, use `callViaServiceLib`:
+
+```haskell
+result <- callViaServiceLib (Add 3 4)
+```
+
+### Checklist For Service Registration (Manual)
+
+- request and response types defined
+- `HasFailbackValue` instance for each response type
+- handler function `request -> IO response`
+- service library record holding `ServiceHandler` fields
+- `IsInServiceLib` instance for each request/response pair
+- `createService` called at startup; workers forked
+- library record passed to `cfgServiceLib` in `DefaultAppConfig`
+- `callService` used from scenarios or `callViaServiceLib` from reader context
+
+## Service Library via TemplateHaskell
+
+The manual steps above (4–6) can be replaced by a single Template Haskell macro call.
+`makeServiceLib` generates the service library data type, a config record, `IsInServiceLib`
+instances, and a builder function — all from a list of request/response type pairs.
+
+### When To Use TH vs Manual
+
+Use TH when you have multiple service pairs and want to avoid boilerplate. Use the manual
+approach when you need custom logic in `IsInServiceLib` instances or when adding TH is not
+desirable.
+
+### Step 1. Define Request And Response Types + HasFailbackValue
+
+Same as the manual approach (steps 1–3 above).
+
+### Step 2. Call `makeServiceLib`
+
+```haskell
+{-# LANGUAGE TemplateHaskell #-}
+
+import LazyCircus.App.Service.TH (makeServiceLib)
+
+-- Must appear AFTER type definitions and HasFailbackValue instances
+makeServiceLib "AllServices"
+    [ (''SimpleRequest, ''SimpleResponse)
+    , (''AddExpressionRequest, ''AddExpressionResponse)
+    ]
+```
+
+This generates four things:
+
+1. **Service library type** — `data AllServices = AllServices { simpleRequestService :: ServiceHandler SimpleRequest SimpleResponse, ... }`
+2. **Config type** — `data AllServicesConfig m = AllServicesConfig { simpleRequest :: SimpleRequest -> m SimpleResponse, ... }`
+3. **`IsInServiceLib` instances** — one per pair, implementing `callFromServiceLib`
+4. **Builder function** — `mkAllServices :: (MonadUnliftIO m, ...) => AllServicesConfig m -> m (AllServices, [m ()])`
+
+Field names are derived from the request type name: `SimpleRequest` → `simpleRequest` (config)
+and `simpleRequestService` (service lib).
+
+### Step 3. Write Handler Functions
+
+Same as the manual approach. Handlers can be any `RequestType -> m ResponseType` function,
+including curried functions with arbitrary constraints:
+
+```haskell
+handleSimple :: (MonadIO m) => SimpleRequest -> m SimpleResponse
+handleSimple (Add x y)      = pure $ SimpleResult (x + y)
+handleSimple (Subtract x y) = pure $ SimpleResult (x - y)
+```
+
+### Step 4. Build And Start Services At Startup
+
+Fill a config record with handler functions, call `mkAllServices`, and start workers:
+
+```haskell
+import LazyCircus.App.Service (runAllWorkers)
+
+main :: IO ()
+main = do
+    let config = AllServicesConfig
+            { simpleRequest = handleSimple
+            , addExpressionRequest = handleAddExpressionRequest
+            }
+    (services, workers) <- mkAllServices config
+    _ <- runAllWorkers workers
+    app <- newDefaultApp DefaultAppConfig{ cfgServiceLib = services, ... }
+    ...
+```
+
+`runAllWorkers :: MonadUnliftIO m => [m ()] -> m [Async ()]` forks each worker via `async`
+and returns the handles. Callers can use `mapM_ cancel` for graceful shutdown or discard
+the handles if fire-and-forget is desired.
+
+### Pitfalls For TH Service Library
+
+- **`HasFailbackValue` is required** for every response type before the TH splice. If you
+  forget it, you get a compilation error about a missing instance.
+- **Types must be defined before the splice.** `''SimpleRequest` references the type, so the
+  `data SimpleRequest` declaration must appear above the `makeServiceLib` call.
+- **No duplicate request types.** Passing `(''SimpleRequest, ''A)` and `(''SimpleRequest, ''B)`
+  causes a compile-time `fail` from the macro.
+- **Redundant constraint warning.** GHC may emit `-Wredundant-constraints` for the generated
+  `mkAllServices` because `HasFailbackValue` constraints are implied by the instances. This is
+  harmless.
+
+### Checklist For TH Service Registration
+
+- request and response types defined
+- `HasFailbackValue` instance for each response type
+- handler functions written
+- `makeServiceLib` splice placed after type definitions and instances
+- config record filled with handler functions
+- `mkAllServices` called at startup
+- `runAllWorkers` called to start all workers
+- library record passed to `cfgServiceLib` in `DefaultAppConfig`
 
 ## Adding A New Effect
 
@@ -379,6 +623,28 @@ Fix:
 - use `runSafely` only around the part that should degrade gracefully
 - log and branch explicitly on the result
 
+### 12. TH Splice Before Type Definitions
+
+Problem:
+
+- `makeServiceLib` fails because `''RequestType` is not in scope
+
+Fix:
+
+- place the `makeServiceLib` splice after all request/response `data` declarations
+- place it after all `HasFailbackValue` instances
+
+### 13. Duplicate Request Types In makeServiceLib
+
+Problem:
+
+- passing `(''Req, ''A)` and `(''Req, ''B)` causes a confusing type error
+
+Fix:
+
+- `makeServiceLib` detects duplicates and calls `fail` with a clear message
+- ensure each request type appears exactly once in the pair list
+
 ## Review Checklist
 
 1. Is code placed in the right layer: scene vs scenario vs performer?
@@ -389,3 +655,5 @@ Fix:
 6. Does the interpreter preserve logging context correctly?
 7. Are async paths tested via captured scheduled scenarios?
 8. Was `hpack` run before build and test?
+9. If using `makeServiceLib`, are all `HasFailbackValue` instances defined before the splice?
+10. If using `makeServiceLib`, are there no duplicate request types in the pair list?

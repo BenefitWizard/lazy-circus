@@ -41,6 +41,7 @@ Lazy Circus ships with a rich set of built-in capabilities ready for production 
 * **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses and implements an XML-like prompt templating language which significantly improves prompt adherence.
 * **Production & Test Interpreters:** Two distinct performers (`DefaultPerformer` and `TestInterpreter`). The test performer records all triggered effects, making it trivial to inject mocks and assert execution histories without spinning up real infrastructure.
 * **Structured Async Logging:** High-performance, asynchronous structured logging available universally across all effect types. It supports nested log contexts (e.g., automatically attaching a `user_id` or `trace_id` to all subsequent nested calls).
+* **Service Call Infrastructure:** A transparent mechanism for running parallel typed workers with a standardized request/response interface. When the application needs concurrent background workers that process requests one at a time, register them through `LazyCircus.App.Service` and call from scenarios with `callService` — no coupling to concrete implementations.
 * **AI Coding Agent Skill:** A pre-configured custom AI skill instruction set located in `docs/skills/lazy-circus/` to teach GitHub Copilot (or other AI assistants) the architectural patterns and conventions of Lazy Circus.
 
 ## Using the AI Assistant Skill
@@ -148,7 +149,7 @@ Each effect is described as a GADT functor. Church-encoding (`F`) transforms it 
 import LazyCircus.Scene.DB
 
 -- Create a record
-createAct :: CircusActT Maybe -> DBScript SimpleDb CircusAct
+createAct :: CircusActT Maybe -> DBScript SimpleDb (Maybe CircusAct)
 createAct act = create act
 
 -- Find by ID
@@ -167,8 +168,8 @@ deleteAct actId = delete (CircusActId actId)
 -- Transaction
 transactionalAct :: DBScript SimpleDb ()
 transactionalAct = withTransaction $ do
-    act <- createAct myAct
-    _ <- updateDesc "New desc" (circusActId act)
+    mAct <- createAct myAct
+    _ <- forM mAct $ \act -> updateDesc "New desc" (circusActId act)
     pure ()
 ```
 
@@ -249,10 +250,11 @@ DBScriptDef myDb ReadWrite myDbScript :: Script b
 - `evalScript` — execute a nested `Script`
 - `throw` / `runSafely` — error handling
 - `getDateTime` — get current time
-- `logInfo`, `logWarn`, `logError`, `logSensitive` — scenario-level logging
+- `log` / `logInfo`, `logWarn`, `logError`, `logSensitive` — scenario-level logging
 - `withLogContext`, `withLogEntry`, `with2LogEntries` — logging context
 - `getExtraContext`, `readFromExtraContext`, `getFeatureFlag` — configuration
 - `runAsync` — asynchronous execution
+- `callService` — call a registered service via the service library
 
 ### Example: Full Scenario
 

@@ -125,7 +125,7 @@ demoSystemPrompt =
     ]
 
 -- | Basic CRUD scenario: create, find, update, findAll, delete.
-dbCrudScenario :: ScenarioProgram Script ()
+dbCrudScenario :: ScenarioProgram Script serviceLib ()
 dbCrudScenario = do
     logInfo "DB CRUD: starting"
     -- Create a demo act (using CircusActT Maybe — all optional fields)
@@ -161,7 +161,7 @@ dbCrudScenario = do
             logInfo "DB CRUD: done"
 
 -- | Advanced DB scenario: createMany, withTransaction, rawQuery, withTransactionRLS.
-dbAdvancedScenario :: ScenarioProgram Script ()
+dbAdvancedScenario :: ScenarioProgram Script serviceLib ()
 dbAdvancedScenario = do
     logInfo "DB Advanced: starting"
     -- CreateMany
@@ -190,7 +190,7 @@ dbAdvancedScenario = do
 
 -- | Telegram scenario: demonstrates bot-name lookup and message operations.
 -- Takes a 'Maybe Text' chat ID; when Nothing, logs a warning and skips sending.
-telegramScenario :: Maybe Text -> ScenarioProgram Script ()
+telegramScenario :: Maybe Text -> ScenarioProgram Script serviceLib ()
 telegramScenario mChatId = do
     logInfo "Telegram: starting"
     case mChatId of
@@ -235,7 +235,7 @@ telegramScenario mChatId = do
                 logInfo "Telegram: scenario complete"
 
 -- | Mail scenario: create and send a demo email.
-mailScenario :: ScenarioProgram Script ()
+mailScenario :: ScenarioProgram Script serviceLib ()
 mailScenario = do
     logInfo "Mail: starting"
     let toAddr = Address Nothing "demo@example.com"
@@ -246,7 +246,7 @@ mailScenario = do
     logInfo "Mail: sent successfully"
 
 -- | AI scenario: send a typed request and decode the structured response.
-aiScenario :: ScenarioProgram Script ()
+aiScenario :: ScenarioProgram Script serviceLib ()
 aiScenario = do
     logInfo "AI: starting"
     let request = AIRequest
@@ -261,7 +261,7 @@ aiScenario = do
     logInfo "AI: done"
 
 -- | Logging scenario: exercises all four log levels, context enrichment, and sub-language logging.
-loggingScenario :: ScenarioProgram Script ()
+loggingScenario :: ScenarioProgram Script serviceLib ()
 loggingScenario = do
     logInfo "Logging: starting"
     logInfo "This is an info message"
@@ -283,7 +283,7 @@ loggingScenario = do
     logInfo "Logging: done"
 
 -- | Orchestration scenario: getDateTime, extra context, feature flags, throw/runSafely, runAsync.
-orchestrationScenario :: ScenarioProgram Script ()
+orchestrationScenario :: ScenarioProgram Script serviceLib ()
 orchestrationScenario = do
     logInfo "Orchestration: starting"
     -- getDateTime
@@ -311,7 +311,7 @@ orchestrationScenario = do
     logInfo "Orchestration: done (async action may still be running)"
 
 -- | Full lifecycle scenario: combines DB, orchestration, logging, mail, and async operations.
-fullCircusLifecycleScenario :: ScenarioProgram Script ()
+fullCircusLifecycleScenario :: ScenarioProgram Script serviceLib ()
 fullCircusLifecycleScenario = do
     logInfo "Full Lifecycle: starting"
     -- 1. DB: Create in transaction

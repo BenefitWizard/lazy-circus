@@ -120,7 +120,7 @@ mkReactionRequest name desc =
 PRE-CONTRACT: A valid SMTP and AI configuration must be available at runtime.
 POST-CONTRACT: Returns the created act with the AI-generated audience reaction when successful.
 -}
-createActWithReaction :: Text -> Text -> Address -> ScenarioProgram Script CircusAct
+createActWithReaction :: Text -> Text -> Address -> ScenarioProgram Script serviceLib CircusAct
 createActWithReaction name desc notificationEmail = do
     withLogContext [("act_name", name)] $ do
         logInfo "Creating act"
@@ -175,7 +175,7 @@ createActWithReaction name desc notificationEmail = do
 PRE-CONTRACT: The circus_acts table must exist.
 POST-CONTRACT: Returns all acts in id order.
 -}
-listActs :: ScenarioProgram Script [CircusAct]
+listActs :: ScenarioProgram Script serviceLib [CircusAct]
 listActs = do
     evalScript
         $ DBScriptDef simpleDb ReadOnly
@@ -185,7 +185,7 @@ listActs = do
 PRE-CONTRACT: None.
 POST-CONTRACT: Returns Just the act when found, Nothing otherwise.
 -}
-getAct :: Int32 -> ScenarioProgram Script (Maybe CircusAct)
+getAct :: Int32 -> ScenarioProgram Script serviceLib (Maybe CircusAct)
 getAct actId = do
     evalScript $ DBScriptDef simpleDb ReadOnly $ find (CircusActId actId :: CircusActId)
 
@@ -193,7 +193,7 @@ getAct actId = do
 PRE-CONTRACT: The act with the given id must exist.
 POST-CONTRACT: Returns Just the reaction text when successful, Nothing otherwise.
 -}
-generateReaction :: Int32 -> ScenarioProgram Script (Maybe Text)
+generateReaction :: Int32 -> ScenarioProgram Script serviceLib (Maybe Text)
 generateReaction actId = do
     mAct <- evalScript $ DBScriptDef simpleDb ReadOnly $ find (CircusActId actId :: CircusActId)
     case mAct of
@@ -226,6 +226,6 @@ generateReaction actId = do
 PRE-CONTRACT: None.
 POST-CONTRACT: The act is removed from the database.
 -}
-deleteAct :: Int32 -> ScenarioProgram Script ()
+deleteAct :: Int32 -> ScenarioProgram Script serviceLib ()
 deleteAct actId = do
     evalScript $ DBScriptDef simpleDb ReadWrite $ delete (CircusActId actId :: CircusActId)

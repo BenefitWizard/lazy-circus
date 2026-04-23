@@ -95,6 +95,17 @@ Module: `LazyCircus.Testing.Performer`
 Use the testing performer when you want to run scenarios with mocked logging, Telegram,
 mail, AI, and async scheduling.
 
+### Key Types
+
+| Type | Purpose |
+|---|---|
+| `Mocks` | collected mock state (Tg requests, mails, logs, async tasks) |
+| `TgMock` | Telegram mock with configurable response queue |
+| `MailMock` | Mail mock for capturing sent mails |
+| `EnvWithMocks` | environment extended with mock state |
+| `TestInterpreter` | the test-performer monad |
+| `OnSendMessageRequest` | callback type for custom Telegram send handling |
+
 ### Main Helpers
 
 | Function | Purpose |
@@ -116,6 +127,41 @@ Also useful for custom harnesses:
 - `runInsideWithMocks` and `runInsideWithDefaultMocks` run tests inside `RIO DefaultApp`
 - `discardMocks` drops the collected capture state when only the result matters
 - `createTgMock`, `createSimpleTgMock`, and `createSimpleMailMock` help build custom mock setups
+
+### Mocked Sub-Language Runners
+
+These run one sub-language in isolation with mock logging:
+
+| Function | Scope |
+|---|---|
+| `runDBWithMockLogging` | DB script with captured logs |
+| `runTelegramWithMockLogging` | Telegram script with captured logs |
+| `runMailWithMockLogging` | Mail script with captured logs |
+| `runAIWithMockLogging` | AI script with captured logs |
+| `runLogWithMockCapture` | captures log output without other effects |
+
+### Assertion Helpers
+
+| Function | Purpose |
+|---|---|
+| `captureLogMessage` | capture a single log message |
+| `captureAsyncScenario` | capture a scheduled async scenario |
+| `withExtendedLogContext` | run with extra log context in tests |
+| `dequeueTgResponse` | pop a canned response from the Tg mock queue |
+| `getFileMock` | get the file-handling mock |
+| `logTgRequests` | log captured Telegram requests |
+| `logScheduledTgRequests` | log captured scheduled Telegram requests |
+| `logMailSend` | log captured mail sends |
+| `buildMail` | build a `Mail` value from env credentials |
+
+### DB Test Helpers
+
+| Function | Purpose |
+|---|---|
+| `runDbAction` | run a single DB action in the test env |
+| `runDbTransaction` | run a DB transaction in the test env |
+| `selectDbConnection` | select read-write or read-only connection |
+| `ensureReadWrite` | assert the connection is read-write |
 
 ### Mock Behavior Summary
 
