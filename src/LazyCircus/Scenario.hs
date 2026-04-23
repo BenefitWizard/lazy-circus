@@ -22,12 +22,14 @@ module LazyCircus.Scenario (
   withLogEntry,
   with2LogEntries,
   runAsync,
+  callService,
 ) where
 
 import Control.Monad.Free.Church qualified as FC
 import Data.HashMap.Strict qualified as HM
 import GHC.Stack (CallStack, HasCallStack, callStack)
 import LazyCircus.App.Log
+import LazyCircus.App.Service qualified as S
 import LazyCircus.Scene.Log
 import RIO hiding (log, logError, logInfo, logWarn)
 import RIO.Time (UTCTime)
@@ -47,6 +49,9 @@ data Scenario script serviceLib a where
   ScenarioWithLogCtx :: [(Text, Text)] -> ScenarioProgram script serviceLib b -> (b -> a) -> Scenario script serviceLib a
   GetExtraContext :: (HashMap Text Text -> a) -> Scenario script serviceLib a
   RunAsync :: ScenarioProgram script serviceLib () -> a -> Scenario script serviceLib a
+  CallService ::
+    (S.IsServiceLib serviceLib, S.IsInServiceLib serviceLib request) =>
+    request -> (S.ServiceResponse serviceLib -> a) -> Scenario script serviceLib a
 
 instance Functor (Scenario script serviceLib) where
   fmap f (EvalScript scr g) = EvalScript scr (f . g)
@@ -57,6 +62,7 @@ instance Functor (Scenario script serviceLib) where
   fmap f (GetExtraContext g) = GetExtraContext (f . g)
   fmap f (ScenarioWithLogCtx values act g) = ScenarioWithLogCtx values act (f . g)
   fmap f (RunAsync act g) = RunAsync act (f g)
+  fmap f (CallService req g) = CallService req (f . g)
 
 -- | Church-encoded free program over the Scenario instruction set.
 type ScenarioProgram script serviceLib = FC.F (Scenario script serviceLib)
@@ -71,6 +77,7 @@ class (Monad m) => ScenarioPerformer script serviceLib m where
   getExtraContext' :: m (HashMap Text Text)
   withLogContext' :: [(Text, Text)] -> ScenarioProgram script serviceLib a -> m a
   runAsync' :: ScenarioProgram script serviceLib () -> m ()
+  callService' :: (S.IsServiceLib serviceLib, S.IsInServiceLib serviceLib request) => request -> m (S.ServiceResponse serviceLib)
 
 {- | Fold a ScenarioProgram into any monad that implements ScenarioPerformer.
 PRE-CONTRACT: None
@@ -104,6 +111,9 @@ run = FC.iterM go
   go (RunAsync act next) = do
     runAsync' act
     next
+  go (CallService req next) = do
+    res <- callService' @script @serviceLib req
+    next res
 
 {- | Lift an embedded Script instruction into the ScenarioProgram layer.
 PRE-CONTRACT: None
@@ -231,6 +241,9 @@ runAsync act = FC.liftF $ RunAsync act ()
 {- | Enable LogLangF smart constructors to work directly in ScenarioProgram.
 Maps LogLangF operations to the unified Scenario constructors.
 -}
+callService :: (S.IsInServiceLib serviceLib request) => request -> ScenarioProgram script serviceLib (S.ServiceResponse serviceLib)
+callService req = FC.liftF $ CallService req id
+
 instance HasLogLang (Scenario script serviceLib) (ScenarioProgram script serviceLib) where
   embedLog (LogMsg cs msg next) = ScenarioLogMsg cs msg next
   embedLog (WithLogCtx values prog next) = ScenarioWithLogCtx values prog next

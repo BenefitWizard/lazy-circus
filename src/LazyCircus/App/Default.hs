@@ -13,6 +13,7 @@ import Crypto.Random
 import Database.PostgreSQL.Simple (Connection)
 import LazyCircus.AI (HasAIMethods (..))
 import LazyCircus.App.Log hiding (genLogFunc, logContext, logFunc, logQueue)
+import LazyCircus.App.Service
 import LazyCircus.AsyncWorker.Types (HasScheduledActions (..), ScheduledActions)
 import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.Scene.DB.Class (HasDbConnection (..))
@@ -180,6 +181,9 @@ instance HasScheduledActions Script serviceLib (DefaultApp serviceLib) where
 -- | Satisfies HasAIMethods by delegating to the aiMethods field.
 instance HasAIMethods (DefaultApp serviceLib) where
     aiMethodsL = lens aiMethods (\x y -> x{aiMethods = y})
+
+instance HasServiceLib (DefaultApp serviceLib) serviceLib where
+    serviceLibL = lens serviceLib (\x y -> x{serviceLib = y})
 
 -- | Drop missing values from an association list while preserving keys for present entries.
 constructHFromMList :: [(Text, Maybe a)] -> HashMap Text a

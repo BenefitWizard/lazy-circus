@@ -11,6 +11,7 @@ import Control.Monad.Free.Church qualified as FC
 import LazyCircus.AI (askAI)
 import LazyCircus.App.Default
 import LazyCircus.App.Log
+import LazyCircus.App.Service (callViaServiceLib)
 import LazyCircus.AsyncWorker (scheduleAsyncAction)
 import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
@@ -96,6 +97,9 @@ runDefaultScenario = FC.iterM go
     go (RunAsync act next) = do
         scheduleAsyncAction act
         next
+    go (CallService req next) = do
+        res <- callViaServiceLib req
+        next res
 
 evalScriptDefault :: Script a -> DefaultPerformer (DefaultApp serviceLib) a
 evalScriptDefault (TelegramScriptDef name scr) = do
