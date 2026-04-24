@@ -95,6 +95,27 @@ Module: `LazyCircus.Testing.Performer`
 Use the testing performer when you want to run scenarios with mocked logging, Telegram,
 mail, AI, and async scheduling.
 
+### Shared-Runner Architecture
+
+The test runtime is not a separate reimplementation of scenario semantics. It keeps the same
+shared-runner architecture as production:
+
+- `ScenarioProgram` still runs through the normal scenario interpreter machinery
+- top-level `Script` dispatch still chooses DB, Telegram, Mail, and AI branches the same way
+- environment projection still happens through wrappers like `AppWithConnection` and `AppWithBotEnv`
+
+The main difference is the capability layer behind that runner:
+
+- DB capability uses the real configured connection
+- Telegram capability is replaced with capture-oriented mocks
+- Mail capability reuses real mail construction but captures sends
+- AI capability returns mock values (`Nothing` by default)
+- async capability captures scheduled scenarios instead of executing them
+- logging capability captures structured entries instead of draining the production queue
+
+This means tests exercise the same orchestration path as production while swapping effectful
+capabilities at the edges.
+
 ### Key Types
 
 | Type | Purpose |
@@ -136,32 +157,6 @@ These run one sub-language in isolation with mock logging:
 |---|---|
 | `runDBWithMockLogging` | DB script with captured logs |
 | `runTelegramWithMockLogging` | Telegram script with captured logs |
-| `runMailWithMockLogging` | Mail script with captured logs |
-| `runAIWithMockLogging` | AI script with captured logs |
-| `runLogWithMockCapture` | captures log output without other effects |
-
-### Assertion Helpers
-
-| Function | Purpose |
-|---|---|
-| `captureLogMessage` | capture a single log message |
-| `captureAsyncScenario` | capture a scheduled async scenario |
-| `withExtendedLogContext` | run with extra log context in tests |
-| `dequeueTgResponse` | pop a canned response from the Tg mock queue |
-| `getFileMock` | get the file-handling mock |
-| `logTgRequests` | log captured Telegram requests |
-| `logScheduledTgRequests` | log captured scheduled Telegram requests |
-| `logMailSend` | log captured mail sends |
-| `buildMail` | build a `Mail` value from env credentials |
-
-### DB Test Helpers
-
-| Function | Purpose |
-|---|---|
-| `runDbAction` | run a single DB action in the test env |
-| `runDbTransaction` | run a DB transaction in the test env |
-| `selectDbConnection` | select read-write or read-only connection |
-| `ensureReadWrite` | assert the connection is read-write |
 
 ### Mock Behavior Summary
 
@@ -169,6 +164,7 @@ These run one sub-language in isolation with mock logging:
 |---|---|
 | Telegram `sendMessage` | captures `WithImportance SendMessageRequest` values and returns canned/default response |
 | Telegram scheduled sends | captured in a separate list |
+| Telegram missing bot | throws `NoBotConfigured` exactly like production dispatch |
 | Telegram `getBotName` | returns the supplied bot name |
 | Telegram file loading | not implemented and throws |
 | Telegram `editMessageText` | always returns `Nothing` |
@@ -221,6 +217,27 @@ it "schedules background cleanup" $ do
     length asyncs `shouldBe` 1
 ```
 
+If you want to verify the deferred effect itself, explicitly run the captured scenario later with
+the same test runtime and then inspect the corresponding capture buffer.
+
 ### Verifying Log Context
 
 Use `readLogWithContext` when the test cares about tags, call-site data, or enriched entries.
+
+Typical checks include:
+
+- scenario logs carrying `lang = "Scenario"`
+- custom keys added via `withLogContext`
+- sub-language logs preserving the outer context and adding their own language tag
+- non-empty call-site metadata when emitted through standard logging helpers
+
+### Verifying Telegram Capture
+
+When a bot is configured in the app env:
+
+- use `readTgRequests` for immediate `sendMessage` capture
+- use `readScheduledTgRequests` for deferred Telegram queue capture
+- use `getBotName` to verify dispatch selected the expected bot environment
+
+When no bot is configured for a requested name, tests should assert `NoBotConfigured` rather than
+expecting a silent no-op.

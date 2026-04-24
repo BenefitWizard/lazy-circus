@@ -8,12 +8,14 @@ module ServiceCallSpec (spec) where
 import Control.Exception (SomeException)
 import Database.PostgreSQL.Simple (close)
 import DemoEnv (setupDatabase, testConnectionString)
+import LazyCircus.App.Log (AppLogMsgWithContext(..), LoggingContext(..))
 import LazyCircus.App.Default (DefaultApp (..), DefaultAppConfig (..), MailCreds (..), newDefaultApp)
 import LazyCircus.App.Service (runAllWorkers)
-import LazyCircus.Scenario (callService, runSafely)
+import LazyCircus.Scenario (callService, runSafely, withLogContext)
 import LazyCircus.Scenario qualified as LC (logInfo)
-import LazyCircus.Testing.Performer (readLog, runScenarioProgram, runWithDefaultMocks)
+import LazyCircus.Testing.Performer (readLog, readLogWithContext, runScenarioProgram, runWithDefaultMocks)
 import RIO
+import RIO.Map qualified as M
 import SimpleService
     ( AddExpressionRequest (..),
       AddExpressionResponse (..),
@@ -97,3 +99,21 @@ spec = aroundAll withServiceTestApp $ do
             result `shouldBe` SimpleResult 3
             logs <- readLog mocks
             length logs `shouldBe` 2
+
+        it "preserves surrounding log context across service calls" $ \app -> do
+            (mocks, result) <- runWithDefaultMocks app $ do
+                runScenarioProgram $
+                    withLogContext [("request_id", "svc-42"), ("feature", "service-call")] $ do
+                        LC.logInfo "Before contextual service call"
+                        callService (Add 2 8)
+
+            result `shouldBe` SimpleResult 10
+
+            contextualLogs <- readLogWithContext mocks
+            case contextualLogs of
+                [AppLogMsgWithContext _ (LogContext ctx) mCallSite] -> do
+                    M.lookup "lang" ctx `shouldBe` Just "Scenario"
+                    M.lookup "request_id" ctx `shouldBe` Just "svc-42"
+                    M.lookup "feature" ctx `shouldBe` Just "service-call"
+                    mCallSite `shouldSatisfy` isJust
+                _ -> expectationFailure "Expected exactly one contextual log entry"
