@@ -1,189 +1,252 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | Integration tests for all BotScenarios scenario functions.
 module BotScenariosSpec (spec) where
 
 import BotScenarios
     ( createActWithReaction
-    , listActs
-    , getAct
-    , generateReaction
     , deleteAct
+    , generateReaction
+    , getAct
+    , listActs
     )
 import Common
-import DemoEnv (DemoConfig(..), withDemoApp)
-import LazyCircus.App.Log (AppLogMsg(..))
+import Control.Exception qualified as E
+import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
+import LazyCircus (tgScript)
+import LazyCircus.App.Log (AppLogMsg(..), AppLogMsgWithContext(..), LoggingContext(..))
 import LazyCircus.Testing.Performer
-    ( runWithDefaultMocks
-    , readLog
+    ( readLog
+    , readLogWithContext
     , readScheduledScenarios
+    , readScheduledTgRequests
+    , readSentMails
+    , readTgRequests
     , runScenarioProgram
+    , runWithDefaultMocks
+    , runWithMocks
     )
 import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.App.Service (NoServiceLib)
+import LazyCircus.Performer.Default (NoBotConfigured(..))
+import LazyCircus.Scenario (evalScript)
+import LazyCircus.Scene.Telegram.Lang (getBotName, scheduleMessage, sendMessage)
+import LazyCircus.Telegram.Types (WithImportance(..))
 import Network.Mail.Mime (Address(..))
 import RIO
+import RIO.List (find)
+import RIO.Map qualified as M
 import Data.Text qualified as T
 import Test.Hspec
+import Telegram.Bot.API (ChatId(..), SomeChatId(..), defSendMessage)
 
 -- | Minimal configuration sufficient for running scenario tests without Telegram or AI.
 -- PRE-CONTRACT: PostgreSQL must be reachable at 127.0.0.1:5432.
 -- POST-CONTRACT: withDemoApp will produce a usable DefaultApp.
 testConfig :: DemoConfig
-testConfig = DemoConfig
-    { cfgTgToken = Nothing
-    , cfgTgChatId = Nothing
-    , cfgAiApiKey = Nothing
-    , cfgAiBaseUrl = Nothing
-    , cfgSmtpHost = "127.0.0.1"
-    , cfgSmtpPort = 1025
-    , cfgSmtpLogin = "test@example.com"
-    , cfgSmtpPass = ""
-    , cfgSmtpName = "Test"
-    , cfgSmtpUseTls = False
-    , cfgNotificationEmail = Nothing
-    }
+testConfig =
+    defaultDemoConfig
+        { cfgSmtpLogin = "test@example.com"
+        , cfgSmtpName = "Test"
+        }
+
+-- | Demo configuration that also provides one Telegram bot for test capture.
+botTestConfig :: DemoConfig
+botTestConfig =
+    testConfig
+        { cfgTgToken = Just "123456:test-token"
+        }
 
 -- | Run a scenario action with a DefaultApp obtained from withDemoApp.
 -- Uses aroundAll so the database is set up once for all tests.
 withTestApp :: (DefaultApp NoServiceLib -> IO ()) -> IO ()
 withTestApp action = withDemoApp testConfig $ \app -> action app
 
+-- | Run a scenario action with a DefaultApp that has one configured Telegram bot.
+withBotTestApp :: (DefaultApp NoServiceLib -> IO ()) -> IO ()
+withBotTestApp action = withDemoApp botTestConfig $ \app -> action app
+
 spec :: Spec
-spec = aroundAll withTestApp $ do
-    describe "createActWithReaction" $ do
-        it "creates an act in DB and returns it with correct fields" $ \app -> do
-            (mocks, act) <- runWithDefaultMocks app $ do
-                runScenarioProgram $
-                    createActWithReaction "Fire Breathing" "Breathes fire"
-                        (Address Nothing "test@example.com")
+spec = do
+    aroundAll withTestApp $ do
+        describe "createActWithReaction" $ do
+            it "creates an act in DB and returns it with correct fields" $ \app -> do
+                (_, act) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        createActWithReaction "Fire Breathing" "Breathes fire"
+                            (Address Nothing "test@example.com")
 
-            circusActName act `shouldBe` "Fire Breathing"
-            circusActDescription act `shouldBe` "Breathes fire"
-            circusId act `shouldBe` 1
-            -- AI returns Nothing in tests, so no audience reaction is set
-            circusActAudienceReaction act `shouldBe` Nothing
+                circusActName act `shouldBe` "Fire Breathing"
+                circusActDescription act `shouldBe` "Breathes fire"
+                circusId act `shouldBe` 1
+                circusActAudienceReaction act `shouldBe` Nothing
 
-        it "schedules an email notification via runAsync" $ \app -> do
-            (mocks, _act) <- runWithDefaultMocks app $ do
-                runScenarioProgram $
-                    createActWithReaction "Juggling" "Juggling balls"
-                        (Address Nothing "notify@example.com")
+            it "captures async mail work instead of executing it immediately" $ \app -> do
+                (mocks, _act) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        createActWithReaction "Juggling" "Juggling balls"
+                            (Address Nothing "notify@example.com")
 
-            scheduled <- readScheduledScenarios mocks
-            length scheduled `shouldSatisfy` (> 0)
+                sentBefore <- readSentMails mocks
+                sentBefore `shouldSatisfy` null
 
-        it "logs expected messages during creation" $ \app -> do
-            (mocks, _act) <- runWithDefaultMocks app $ do
-                runScenarioProgram $
-                    createActWithReaction "Clowns" "Funny clowns"
-                        (Address Nothing "test@example.com")
+                scheduled <- readScheduledScenarios mocks
+                length scheduled `shouldBe` 1
 
-            logs <- readLog mocks
-            any (isLogContaining "Creating act") logs `shouldBe` True
-            any (isLogContaining "AI returned no response") logs `shouldBe` True
+                mapM_ (\scenario -> void $ runWithMocks app mocks $ runScenarioProgram scenario) scheduled
 
-    describe "listActs" $ do
-        it "returns acts from the database" $ \app -> do
-            (_, acts) <- runWithDefaultMocks app $ do
-                runScenarioProgram listActs
-            -- The shared test DB may already contain acts from other tests
-            acts `shouldSatisfy` (not . null)
-            all (\a -> circusActId a > 0 && circusActName a /= "") acts `shouldBe` True
+                sentAfter <- readSentMails mocks
+                length sentAfter `shouldBe` 1
 
-        it "returns acts after creating some" $ \app -> do
-            -- Create an act first
-            _ <- runWithDefaultMocks app $ do
-                runScenarioProgram $
-                    createActWithReaction "Lions" "Taming lions"
-                        (Address Nothing "test@example.com")
+            it "captures scenario log context during creation" $ \app -> do
+                (mocks, _act) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        createActWithReaction "Clowns" "Funny clowns"
+                            (Address Nothing "test@example.com")
 
-            (_, acts) <- runWithDefaultMocks app $ do
-                runScenarioProgram listActs
+                logs <- readLog mocks
+                any (isLogContaining "Creating act") logs `shouldBe` True
+                any (isLogContaining "AI returned no response") logs `shouldBe` True
 
-            acts `shouldSatisfy` (not . null)
-            any ((== "Lions") . circusActName) acts `shouldBe` True
+                contextualLogs <- readLogWithContext mocks
+                case find (isLogContaining "Creating act" . logMsg) contextualLogs of
+                    Nothing -> expectationFailure "Expected contextual log entry for act creation"
+                    Just (AppLogMsgWithContext _ (LogContext ctx) mCallSite) -> do
+                        M.lookup "lang" ctx `shouldBe` Just "Scenario"
+                        M.lookup "act_name" ctx `shouldBe` Just "Clowns"
+                        mCallSite `shouldSatisfy` isJust
 
-    describe "getAct" $ do
-        it "returns Nothing for a non-existent id" $ \app -> do
-            (_, result) <- runWithDefaultMocks app $ do
-                runScenarioProgram $ getAct 99999
-            result `shouldBe` Nothing
+        describe "listActs" $ do
+            it "returns acts from the database" $ \app -> do
+                (_, acts) <- runWithDefaultMocks app $ do
+                    runScenarioProgram listActs
+                acts `shouldSatisfy` (not . null)
+                all (\a -> circusActId a > 0 && circusActName a /= "") acts `shouldBe` True
 
-        it "returns Just act for an existing id" $ \app -> do
-            -- Create an act to get a valid id
-            (_, created) <- runWithDefaultMocks app $ do
-                runScenarioProgram $
-                    createActWithReaction "Trapeze" "High wire act"
-                        (Address Nothing "test@example.com")
+            it "returns acts after creating some" $ \app -> do
+                _ <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        createActWithReaction "Lions" "Taming lions"
+                            (Address Nothing "test@example.com")
 
-            let actId = circusActId created
+                (_, acts) <- runWithDefaultMocks app $ do
+                    runScenarioProgram listActs
 
-            (_, found) <- runWithDefaultMocks app $ do
-                runScenarioProgram $ getAct actId
-            found `shouldBe` Just created
+                acts `shouldSatisfy` (not . null)
+                any ((== "Lions") . circusActName) acts `shouldBe` True
 
-    describe "generateReaction" $ do
-        it "returns Nothing for a non-existent act" $ \app -> do
-            (_, result) <- runWithDefaultMocks app $ do
-                runScenarioProgram $ generateReaction 99999
-            result `shouldBe` Nothing
+        describe "getAct" $ do
+            it "returns Nothing for a non-existent id" $ \app -> do
+                (_, result) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ getAct 99999
+                result `shouldBe` Nothing
 
-        it "returns Nothing when AI returns Nothing (test environment)" $ \app -> do
-            (_, created) <- runWithDefaultMocks app $ do
-                runScenarioProgram $
-                    createActWithReaction "Magic" "Magic tricks"
-                        (Address Nothing "test@example.com")
+            it "returns Just act for an existing id" $ \app -> do
+                (_, created) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        createActWithReaction "Trapeze" "High wire act"
+                            (Address Nothing "test@example.com")
 
-            let actId = circusActId created
+                let actId = circusActId created
 
-            (_, result) <- runWithDefaultMocks app $ do
-                runScenarioProgram $ generateReaction actId
-            result `shouldBe` Nothing
+                (_, found) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ getAct actId
+                found `shouldBe` Just created
 
-        it "logs a warning when act is not found" $ \app -> do
-            (mocks, _) <- runWithDefaultMocks app $ do
-                runScenarioProgram $ generateReaction 99999
-            logs <- readLog mocks
-            any (isLogContaining "Act not found") logs `shouldBe` True
+        describe "generateReaction" $ do
+            it "returns Nothing for a non-existent act" $ \app -> do
+                (_, result) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ generateReaction 99999
+                result `shouldBe` Nothing
 
-        it "logs a warning when AI returns no response" $ \app -> do
-            (_, created) <- runWithDefaultMocks app $ do
-                runScenarioProgram $
-                    createActWithReaction "Piano" "Piano performance"
-                        (Address Nothing "test@example.com")
+            it "returns Nothing when AI returns Nothing (test environment)" $ \app -> do
+                (_, created) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        createActWithReaction "Magic" "Magic tricks"
+                            (Address Nothing "test@example.com")
 
-            let actId = circusActId created
+                let actId = circusActId created
 
-            (mocks, _) <- runWithDefaultMocks app $ do
-                runScenarioProgram $ generateReaction actId
-            logs <- readLog mocks
-            any (isLogContaining "AI returned no response") logs `shouldBe` True
+                (_, result) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ generateReaction actId
+                result `shouldBe` Nothing
 
-    describe "deleteAct" $ do
-        it "removes an existing act" $ \app -> do
-            -- Create an act
-            (_, created) <- runWithDefaultMocks app $ do
-                runScenarioProgram $
-                    createActWithReaction "Elephants" "Elephant parade"
-                        (Address Nothing "test@example.com")
+            it "logs a warning when act is not found" $ \app -> do
+                (mocks, _) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ generateReaction 99999
+                logs <- readLog mocks
+                any (isLogContaining "Act not found") logs `shouldBe` True
 
-            let actId = circusActId created
+            it "logs a warning when AI returns no response" $ \app -> do
+                (_, created) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        createActWithReaction "Piano" "Piano performance"
+                            (Address Nothing "test@example.com")
 
-            -- Verify it exists
-            (_, before) <- runWithDefaultMocks app $ do
-                runScenarioProgram $ getAct actId
-            before `shouldSatisfy` isJust
+                let actId = circusActId created
 
-            -- Delete it
-            _ <- runWithDefaultMocks app $ do
-                runScenarioProgram $ deleteAct actId
+                (mocks, _) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ generateReaction actId
+                logs <- readLog mocks
+                any (isLogContaining "AI returned no response") logs `shouldBe` True
 
-            -- Verify it's gone
-            (_, after) <- runWithDefaultMocks app $ do
-                runScenarioProgram $ getAct actId
-            after `shouldBe` Nothing
+        describe "deleteAct" $ do
+            it "removes an existing act" $ \app -> do
+                (_, created) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        createActWithReaction "Elephants" "Elephant parade"
+                            (Address Nothing "test@example.com")
+
+                let actId = circusActId created
+
+                (_, before) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ getAct actId
+                before `shouldSatisfy` isJust
+
+                _ <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ deleteAct actId
+
+                (_, after) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ getAct actId
+                after `shouldBe` Nothing
+
+        describe "Telegram bot configuration" $ do
+            it "throws NoBotConfigured when a scenario references an absent bot" $ \app -> do
+                result <-
+                    E.try @NoBotConfigured $
+                        runWithDefaultMocks app $
+                            runScenarioProgram $
+                                evalScript $ tgScript "missing-bot" getBotName
+
+                case result of
+                    Left (NoBotConfigured botName) -> botName `shouldBe` "missing-bot"
+                    Right _ -> expectationFailure "Expected NoBotConfigured"
+
+    aroundAll withBotTestApp $ do
+        describe "Telegram capture" $ do
+            it "captures immediate and scheduled Telegram requests for configured bots" $ \app -> do
+                let immediateRequest = defSendMessage (SomeChatId $ ChatId 777) "Hello from tests"
+                    scheduledRequest = defSendMessage (SomeChatId $ ChatId 777) "Later from tests"
+
+                (mocks, botName) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ do
+                        resolvedBotName <- evalScript $ tgScript "demo-bot" getBotName
+                        _ <- evalScript $ tgScript "demo-bot" $ sendMessage immediateRequest
+                        evalScript $ tgScript "demo-bot" $ scheduleMessage scheduledRequest
+                        pure resolvedBotName
+
+                botName `shouldBe` "demo-bot"
+
+                tgRequests <- readTgRequests mocks
+                case tgRequests of
+                    [Regular _request] -> pure ()
+                    [_] -> expectationFailure "Expected captured request with Regular importance"
+                    _ -> expectationFailure "Expected exactly one immediate Telegram request"
+
+                scheduledRequests <- readScheduledTgRequests mocks
+                length scheduledRequests `shouldBe` 1
 
 -- | Check whether a log message contains the given substring.
 -- PRE-CONTRACT: None.

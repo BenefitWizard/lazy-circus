@@ -15,25 +15,34 @@ import LazyCircus.App.Log
     , putInLoggingContext
     , sublangLog
     )
+import LazyCircus.Testing.Performer
+    ( readLogWithContext
+    , runScenarioProgram
+    , runWithDefaultMocks
+    )
 import LazyCircus.App.Log qualified as Log
-import RIO
+import RIO hiding (logInfo)
 import RIO.Map qualified as M
 import Test.Hspec
-import Unsafe.Coerce (unsafeCoerce)
+import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
+import LazyCircus.App.Service (NoServiceLib)
+import LazyCircus.Scenario (logInfo, withLogContext)
 
 -- | A no-op LogFunc for tests that do not need RIO's standard logging.
 noopLogFunc :: LogFunc
 noopLogFunc = mkLogFunc $ \_cs _src _lvl _msg -> pure ()
 
--- | Test environment with a log queue and logging context, no GLogFunc.
+-- | Test environment carrying only the capabilities needed by logging unit tests.
 data TestLogEnv = TestLogEnv
     { testLogQueue :: LogQueue
     , testLogContext :: LoggingContext
     }
 
+-- | Provides access to the shared test log queue.
 instance HasLogQueue TestLogEnv where
     logQueueL = lens testLogQueue (\env queue -> env{testLogQueue = queue})
 
+-- | Provides access to the structured logging context used by tests.
 instance HasLoggingContext TestLogEnv where
     logContextL = lens testLogContext (\env ctx -> env{testLogContext = ctx})
 
@@ -44,6 +53,16 @@ mkEnv = do
 
 readSingleLog :: LogQueue -> IO AppLogMsgWithContext
 readSingleLog queue = atomically $ readTQueue queue
+
+-- | Run a test action with a DefaultApp used for logging-runtime assertions.
+withLogApp :: (DefaultApp NoServiceLib -> IO ()) -> IO ()
+withLogApp action =
+    withDemoApp
+        defaultDemoConfig
+            { cfgSmtpLogin = "test@example.com"
+            , cfgSmtpName = "Test"
+            }
+        action
 
 spec :: Spec
 spec = do
@@ -109,31 +128,25 @@ spec = do
                     _ -> expectationFailure "logWorker captured wrong message"
 
     describe "logAppFromDefaultApp" $ do
-        it "creates a LogApp with a fresh stdout-printing GLogFunc" $ do
-            queue <- newTQueueIO
-            let genLogFuncVal = mkGLogFunc $ \_cs msg -> atomically $ writeTQueue queue msg
-                dummyApp = App
-                    { logFunc = noopLogFunc
-                    , genLogFunc = genLogFuncVal
-                    , pgDbConnection = unsafeCoerce ()
-                    , pgDbConnectionReadOnly = Nothing
-                    , appMainDb = unsafeCoerce ()
-                    , appProcessContext = unsafeCoerce ()
-                    , botEnvs = mempty
-                    , jwtSettings = unsafeCoerce ()
-                    , logQueue = queue
-                    , extraContext = mempty
-                    , logContext = (mempty :: LoggingContext)
-                    , mailCreds = unsafeCoerce ()
-                    , asyncTasks = unsafeCoerce ()
-                    , aiMethods = unsafeCoerce ()
-                    , sqlLogAction = unsafeCoerce ()
-                    , serviceLib = unsafeCoerce ()
-                    }
-            let logApp = logAppFromDefaultApp dummyApp
-            -- Calling the LogApp's genLogFunc should NOT write to the queue
-            -- (it prints to stdout instead)
-            let testMsg = AppLogMsgWithContext (AppLogMsg "stdout-msg") mempty Nothing
+        it "creates a LogApp with a fresh stdout-printing GLogFunc" $ withLogApp $ \app -> do
+            let logApp = logAppFromDefaultApp app
+                testMsg = AppLogMsgWithContext (AppLogMsg "stdout-msg") mempty Nothing
             runRIO logApp $ glog testMsg
-            isEmpty <- atomically $ isEmptyTQueue queue
+            isEmpty <- atomically $ isEmptyTQueue (logQueue app)
             isEmpty `shouldBe` True
+
+    aroundAll withLogApp $ do
+        describe "test runtime log capture" $ do
+            it "captures merged scenario log context and call-site metadata" $ \app -> do
+                (mocks, ()) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ withLogContext [("request_id", "log-123"), ("user_id", "42")] $ do
+                        logInfo "contextual scenario log"
+
+                captured <- readLogWithContext mocks
+                case captured of
+                    [AppLogMsgWithContext (AppLogMsg "contextual scenario log") (LogContext ctx) mCallSite] -> do
+                        M.lookup "lang" ctx `shouldBe` Just "Scenario"
+                        M.lookup "request_id" ctx `shouldBe` Just "log-123"
+                        M.lookup "user_id" ctx `shouldBe` Just "42"
+                        mCallSite `shouldSatisfy` isJust
+                    _ -> expectationFailure "Expected one contextual scenario log"

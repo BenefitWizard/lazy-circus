@@ -6,6 +6,7 @@
 -- | Constructs a DefaultApp runtime environment for the Lazy Circus demo application.
 module DemoEnv (
     DemoConfig (..),
+    defaultDemoConfig,
     readDemoConfig,
     withDemoApp,
     runDemoScenario,
@@ -91,24 +92,44 @@ instance Show DemoConfig where
             <> show cfgNotificationEmail
             <> " }"
 
+{- | Default demo/test configuration with local SMTP and all optional capabilities disabled.
+PRE-CONTRACT: None.
+POST-CONTRACT: Produces a configuration that can be selectively overridden for tests or local runs.
+-}
+defaultDemoConfig :: DemoConfig
+defaultDemoConfig =
+    DemoConfig
+        { cfgTgToken = Nothing
+        , cfgTgChatId = Nothing
+        , cfgAiApiKey = Nothing
+        , cfgAiBaseUrl = Nothing
+        , cfgSmtpHost = "127.0.0.1"
+        , cfgSmtpPort = 1025
+        , cfgSmtpLogin = ""
+        , cfgSmtpPass = ""
+        , cfgSmtpName = ""
+        , cfgSmtpUseTls = False
+        , cfgNotificationEmail = Nothing
+        }
+
 {- | Read demo configuration from environment variables.
 PRE-CONTRACT: None.
 POST-CONTRACT: SMTP fields use defaults when their env vars are unset; optional fields (Telegram, AI, notification email) are Nothing when unset.
 -}
 readDemoConfig :: IO DemoConfig
-readDemoConfig =
-    DemoConfig
-        <$> lookupEnvToText "TG_TOKEN"
-        <*> lookupEnvToText "TG_CHAT_ID"
-        <*> lookupEnvToText "AI_API_KEY"
-        <*> lookupEnvToText "AI_BASE_URL"
-        <*> fmap (fromMaybe "127.0.0.1") (lookupEnv "SMTP_HOST")
-        <*> fmap (fromMaybe 1025 . (>>= readMaybe)) (lookupEnv "SMTP_PORT")
-        <*> fmap (fromMaybe "") (lookupEnv "SMTP_LOGIN")
-        <*> fmap (fromMaybe "") (lookupEnv "SMTP_PASSWORD")
-        <*> fmap (fromMaybe "") (lookupEnv "SMTP_NAME")
-        <*> fmap (fromMaybe False . (>>= readMaybe)) (lookupEnv "SMTP_USE_TLS")
-        <*> lookupEnv "NOTIFICATION_EMAIL"
+readDemoConfig = do
+    cfgTgToken <- lookupEnvToText "TG_TOKEN"
+    cfgTgChatId <- lookupEnvToText "TG_CHAT_ID"
+    cfgAiApiKey <- lookupEnvToText "AI_API_KEY"
+    cfgAiBaseUrl <- lookupEnvToText "AI_BASE_URL"
+    cfgSmtpHost <- fmap (fromMaybe $ cfgSmtpHost defaultDemoConfig) (lookupEnv "SMTP_HOST")
+    cfgSmtpPort <- fmap (fromMaybe (cfgSmtpPort defaultDemoConfig) . (>>= readMaybe)) (lookupEnv "SMTP_PORT")
+    cfgSmtpLogin <- fmap (fromMaybe $ cfgSmtpLogin defaultDemoConfig) (lookupEnv "SMTP_LOGIN")
+    cfgSmtpPass <- fmap (fromMaybe $ cfgSmtpPass defaultDemoConfig) (lookupEnv "SMTP_PASSWORD")
+    cfgSmtpName <- fmap (fromMaybe $ cfgSmtpName defaultDemoConfig) (lookupEnv "SMTP_NAME")
+    cfgSmtpUseTls <- fmap (fromMaybe (cfgSmtpUseTls defaultDemoConfig) . (>>= readMaybe)) (lookupEnv "SMTP_USE_TLS")
+    cfgNotificationEmail <- lookupEnv "NOTIFICATION_EMAIL"
+    pure DemoConfig{..}
   where
     -- \| Look up an environment variable and convert the result to Text.
     -- Empty strings are treated as unset.

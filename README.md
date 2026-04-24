@@ -39,7 +39,7 @@ Lazy Circus ships with a rich set of built-in capabilities ready for production 
 * **Telegram Bot Integration:** A ready-to-use effect for sending messages and reactions. It natively supports running multiple bots from a single application seamlessly.
 * **Mail Integration:** A robust email effect for composing and sending transactional emails.
 * **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses and implements an XML-like prompt templating language which significantly improves prompt adherence.
-* **Production & Test Interpreters:** Two distinct performers (`DefaultPerformer` and `TestInterpreter`). The test performer records all triggered effects, making it trivial to inject mocks and assert execution histories without spinning up real infrastructure.
+* **Production & Test Interpreters:** Two distinct performers (`DefaultPerformer` and `TestInterpreter`). The test runtime keeps the same shared-runner architecture as production, but swaps capabilities at the edges: DB can stay real, while Telegram, mail, AI, logging, and async work are captured through mocks in the capability layer.
 * **Structured Async Logging:** High-performance, asynchronous structured logging available universally across all effect types. It supports nested log contexts (e.g., automatically attaching a `user_id` or `trace_id` to all subsequent nested calls).
 * **Service Call Infrastructure:** A transparent mechanism for running parallel typed workers with a standardized request/response interface. When the application needs concurrent background workers that process requests one at a time, register them through `LazyCircus.App.Service` and call from scenarios with `callService` — no coupling to concrete implementations.
 * **AI Coding Agent Skill:** A pre-configured custom AI skill instruction set located in `docs/skills/lazy-circus/` to teach GitHub Copilot (or other AI assistants) the architectural patterns and conventions of Lazy Circus.
@@ -390,6 +390,26 @@ withTransactionRLS (rlsCircusId 42) $ do
 
 The `LazyCircus.Testing.Performer` module provides a mock interpreter for tests:
 
+### Test Runtime Architecture
+
+Tests reuse the same high-level runner structure as production:
+
+- `ScenarioProgram` is interpreted through the normal scenario machinery
+- `Script` dispatch still routes into DB / Telegram / Mail / AI branches
+- environment projection still happens through wrapper envs such as `AppWithConnection` and `AppWithBotEnv`
+
+What changes is the capability layer underneath that runner:
+
+- DB typically uses a real PostgreSQL connection
+- Telegram uses capture mocks for immediate and scheduled sends
+- Mail uses real mail building but mocked send capture
+- AI returns mock answers (`Nothing` by default)
+- `runAsync` records deferred scenarios instead of executing them
+- logging is captured as structured messages with context and call-site metadata
+
+This shared-runner design lets tests validate orchestration behavior very close to production while
+still giving precise observability over side effects.
+
 ### Running Scenario with Mocks
 
 ```haskell
@@ -433,6 +453,7 @@ tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
 |--------|-------------------|
 | Telegram `sendMessage` | Capture requests, returns canned responses |
 | Telegram `scheduleMessages` | Captured in a separate list |
+| Missing Telegram bot | Throws `NoBotConfigured` during script dispatch |
 | Telegram others | no-op / default |
 | Mail `sendMail` | Capture Mail values |
 | Mail `makeMail` | Actual creation via SMTP credentials from env |
@@ -440,6 +461,14 @@ tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
 | DB | Real execution against DB (requires test database) |
 | Logging | Capture in ref-lists (no production queue writes) |
 | `runAsync` | Capture ScenarioProgram without execution |
+
+### Common Assertions
+
+- use `readTgRequests` to inspect immediate Telegram sends
+- use `readScheduledTgRequests` to inspect deferred Telegram sends
+- use `readScheduledScenarios` to inspect `runAsync` capture
+- use `readLogWithContext` when you need to assert `withLogContext`, `lang`, or call-site metadata
+- if needed, rerun a captured async scenario in the same test runtime to verify its downstream effects
 
 ---
 
