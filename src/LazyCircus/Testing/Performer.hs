@@ -46,7 +46,7 @@ import Database.PostgreSQL.Simple qualified as Simple
 import LazyCircus.AI (HasAIMethods (..))
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
-import LazyCircus.App.Service (HasServiceLib (..), callViaServiceLib)
+import LazyCircus.App.Service (HasServiceLib (..), HasToolDescriptions (..), callViaServiceLib)
 import LazyCircus.AsyncWorker.Types (HasScheduledActions (..))
 import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.DB.Types (PgDB)
@@ -213,6 +213,10 @@ instance HasAIMethods (EnvWithMocks serviceLib) where
 instance HasServiceLib (EnvWithMocks serviceLib) serviceLib where
     serviceLibL = lens defaultApp (\env app -> env{defaultApp = app}) . serviceLibL
 
+-- | Delegates tool-description access to the wrapped DefaultApp.
+instance HasToolDescriptions (EnvWithMocks serviceLib) where
+    toolDescriptionsL = lens defaultApp (\env app -> env{defaultApp = app}) . toolDescriptionsL
+
 -- | Re-target a test action to an outer environment via a pure projection.
 changeEnv :: (outer -> inner) -> TestPerformer inner a -> TestPerformer outer a
 changeEnv f (TestPerformer action) = TestPerformer (mapRIO f action)
@@ -261,7 +265,7 @@ instance ScenarioPerformer Script serviceLib (TestPerformer (EnvWithMocks servic
 runScript :: Script a -> TestInterpreter serviceLib a
 runScript (TelegramScriptDef botName script) = runTelegramWithMockLogging botName script
 runScript (MailScriptDef script) = runMail script
-runScript (AIScriptDef script) = runAI script
+runScript (AIScriptDef descs script) = local (toolDescriptionsL .~ descs) $ runAI script
 runScript (DBScriptDef db mode script) = runDBWithMockLogging db mode script
 
 -- | Run a 'ScenarioProgram' using production-style dispatch and test async semantics.

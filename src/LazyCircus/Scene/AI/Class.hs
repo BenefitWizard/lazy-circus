@@ -12,6 +12,7 @@ import Data.Aeson (FromJSON)
 
 import LazyCircus.AI (AIRequest)
 import LazyCircus.App.Log (HasLogQueue, HasLoggingContext)
+import LazyCircus.App.Service (HasToolDescriptions (..))
 import LazyCircus.Scene.AI.Lang
 import LazyCircus.Scene.Log (handleLogLang)
 import RIO
@@ -23,10 +24,10 @@ class (Monad m) => AILangPerformer m where
 
 {- | Interprets an 'AIScript' by folding each algebra instruction into the provided 'AILangPerformer'.
 PRE-CONTRACT: The target monad must provide an 'AILangPerformer' instance that handles every 'AILangF' constructor,
-and must also provide 'HasLogQueue' and 'HasLoggingContext' for logging support.
+and the environment must provide 'HasLogQueue', 'HasLoggingContext', and 'HasToolDescriptions'.
 POST-CONTRACT: Executes the scripted AI requests in order and returns the final script result in the target monad.
 -}
-runAI :: (AILangPerformer m, HasLogQueue env, HasLoggingContext env, MonadReader env m, MonadIO m) => AIScript a -> m a
+runAI :: (AILangPerformer m, HasLogQueue env, HasLoggingContext env, HasToolDescriptions env, MonadReader env m, MonadIO m) => AIScript a -> m a
 runAI = iterM go
  where
   -- | Pattern-match each AILangF constructor and delegate to the performer or log handler.

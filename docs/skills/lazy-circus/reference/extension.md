@@ -261,7 +261,8 @@ result <- callViaServiceLib (Add 3 4)
 
 The manual steps above (4–6) can be replaced by a single Template Haskell macro call.
 `makeServiceLib` generates the service library data type, a config record, `IsInServiceLib`
-instances, and a builder function — all from a list of request/response type pairs.
+instances, a builder function, and optional tool-call plumbing for AI integration — all from
+a list of request/response/tool-spec triples.
 
 ### When To Use TH vs Manual
 
@@ -273,6 +274,10 @@ desirable.
 
 Same as the manual approach (steps 1–3 above).
 
+When tool specs will be provided, also add `FromJSON` for request types and `ToJSON` for
+response types (required by the generated `FromJSON ToolCall` instance and
+`encodeToolResponse` function).
+
 ### Step 2. Call `makeServiceLib`
 
 ```haskell
@@ -280,22 +285,38 @@ Same as the manual approach (steps 1–3 above).
 
 import LazyCircus.App.Service.TH (makeServiceLib)
 
--- Must appear AFTER type definitions and HasFailbackValue instances
+-- Must appear AFTER type definitions, HasFailbackValue, FromJSON, and ToJSON instances
 makeServiceLib "AllServices"
-    [ (''SimpleRequest, ''SimpleResponse)
-    , (''AddExpressionRequest, ''AddExpressionResponse)
+    [ (''SimpleRequest, ''SimpleResponse,
+        [('Add, "add_numbers", "Adds two numbers together")
+        ,('Subtract, "subtract_numbers", "Subtracts two numbers")
+        ])
+    , (''AddExpressionRequest, ''AddExpressionResponse,
+        [('AddExpressionRequest, "add_expression", "Add an expression")
+        ])
     ]
 ```
 
-This generates four things:
+Each entry is a triple `(''RequestType, ''ResponseType, toolSpecs)` where `toolSpecs` is a
+list of `(ConstructorName, "tool_name_string", "human-readable description")`. Pass `[]` for
+services that do not need tool-call plumbing.
+
+This generates up to fourteen things:
 
 1. **Service library type** — `data AllServices = AllServices { simpleRequestService :: ServiceHandler SimpleRequest SimpleResponse, ... }`
 2. **Config type** — `data AllServicesConfig m = AllServicesConfig { simpleRequest :: SimpleRequest -> m SimpleResponse, ... }`
 3. **`IsInServiceLib` instances** — one per pair, implementing `callFromServiceLib`
 4. **Builder function** — `mkAllServices :: (MonadUnliftIO m, ...) => AllServicesConfig m -> m (AllServices, [m ()])`
-
-Field names are derived from the request type name: `SimpleRequest` → `simpleRequest` (config)
-and `simpleRequestService` (service lib).
+5. **Tool enumeration type** — `data AllServicesTool = AddTool | SubtractTool | ... deriving (Enum, Bounded, ...)` (empty type when no specs)
+6. **`toolInfo` function** — maps enum values to `ToolDescription`
+7. **`allToolDescriptions`** — `[ToolDescription]` collecting all tools
+8. **`ToolCall` sum type** — `data AllServicesToolCall = SimpleRequestToolCall Text SimpleRequest | ...` (when specs present)
+9. **`ToolResponse` sum type** — `data AllServicesToolResponse = SimpleResponseToolResponse SimpleResponse | ...` (when specs present)
+10. **`FromJSON` instance for `ToolCall`** — dispatches on `"tool_name"` field (when specs present)
+11. **`executeToolCall` function** — dispatches a tool call to the correct service handler (when specs present)
+12. **`toolCallName` function** — extracts the tool name from a `ToolCall` (when specs present)
+13. **`encodeToolResponse` function** — encodes a `ToolResponse` as JSON with tool name (when specs present)
+14. **Smart constructors** `aiScriptWithAll` and `aiScriptWith` — wrap AI scripts with tool descriptions (when specs present)
 
 ### Step 3. Write Handler Functions
 
@@ -313,7 +334,7 @@ handleSimple (Subtract x y) = pure $ SimpleResult (x - y)
 Fill a config record with handler functions, call `mkAllServices`, and start workers:
 
 ```haskell
-import LazyCircus.App.Service (runAllWorkers)
+import LazyCircus.App.Service (runAllWorkers, NoServiceLib(..))
 
 main :: IO ()
 main = do
@@ -331,14 +352,35 @@ main = do
 and returns the handles. Callers can use `mapM_ cancel` for graceful shutdown or discard
 the handles if fire-and-forget is desired.
 
+### Using Tool-Aware AI Scripts
+
+When tool specs are provided, the TH macro generates `aiScriptWithAll` and `aiScriptWith`:
+
+```haskell
+-- Pass all registered tools to the AI
+evalScript $ aiScriptWithAll $ ask myRequest
+
+-- Pass a subset of tools
+evalScript $ aiScriptWith [AddTool, SubtractTool] $ ask myRequest
+```
+
 ### Pitfalls For TH Service Library
 
 - **`HasFailbackValue` is required** for every response type before the TH splice. If you
   forget it, you get a compilation error about a missing instance.
+- **`FromJSON`/`ToJSON` are required** for request/response types when tool specs are provided.
+  The generated `FromJSON ToolCall` instance needs `FromJSON` on the request type, and
+  `encodeToolResponse` needs `ToJSON` on the response type.
 - **Types must be defined before the splice.** `''SimpleRequest` references the type, so the
   `data SimpleRequest` declaration must appear above the `makeServiceLib` call.
-- **No duplicate request types.** Passing `(''SimpleRequest, ''A)` and `(''SimpleRequest, ''B)`
+- **No duplicate request types.** Passing `(''SimpleRequest, ''A, _)` and `(''SimpleRequest, ''B, _)`
   causes a compile-time `fail` from the macro.
+- **No duplicate enum constructor names.** Constructor names in tool specs must be unique across
+  all request types to avoid collisions in the generated tool enum.
+- **No duplicate tool-name strings.** Tool name strings must be unique across all specs.
+- **Separate module for TH splice recommended.** Import only type names (no constructors) into
+  the TH module to avoid name clashes between request constructors and generated enum constructors.
+  See `SimpleServiceLib.hs` in the `common/` directory for the canonical pattern.
 - **Redundant constraint warning.** GHC may emit `-Wredundant-constraints` for the generated
   `mkAllServices` because `HasFailbackValue` constraints are implied by the instances. This is
   harmless.
@@ -347,12 +389,14 @@ the handles if fire-and-forget is desired.
 
 - request and response types defined
 - `HasFailbackValue` instance for each response type
+- `FromJSON` for request types and `ToJSON` for response types (when tool specs are provided)
 - handler functions written
-- `makeServiceLib` splice placed after type definitions and instances
+- `makeServiceLib` splice placed after type definitions, instances, and in a separate module to avoid constructor name clashes
 - config record filled with handler functions
 - `mkAllServices` called at startup
 - `runAllWorkers` called to start all workers
 - library record passed to `cfgServiceLib` in `DefaultAppConfig`
+- tool specs use unique constructor names and unique tool-name strings
 
 ## Adding A New Effect
 
@@ -435,7 +479,7 @@ data Script b where
 Update `LazyCircus.Performer` dispatch:
 
 ```haskell
-instance (...) => ScenarioPerformer Script m where
+instance (...) => ScenarioPerformer script serviceLib m where
     onEvalScript (MyEffectDef scr) = runMyEffect scr
     ...
 ```
@@ -479,7 +523,7 @@ only when the public API genuinely benefits from it.
 - performer typeclass exists
 - runner via `iterM` exists
 - `Script` constructor added
-- `ScenarioPerformer Script` dispatch updated
+- `ScenarioPerformer script serviceLib` dispatch updated
 - stable `LazyCircus.Scene.MyEffect` facade added when the effect is public
 - optional top-level smart constructor added only when the effect should mirror `tgScript`, `mailScript`, or `aiScript`
 - default and test runtimes updated as needed
@@ -638,12 +682,46 @@ Fix:
 
 Problem:
 
-- passing `(''Req, ''A)` and `(''Req, ''B)` causes a confusing type error
+- passing `(''Req, ''A, _)` and `(''Req, ''B, _)` causes a confusing type error
 
 Fix:
 
 - `makeServiceLib` detects duplicates and calls `fail` with a clear message
-- ensure each request type appears exactly once in the pair list
+- ensure each request type appears exactly once in the triple list
+
+### 14. Duplicate Enum Constructor Names In Tool Specs
+
+Problem:
+
+- two tool specs across different request types using the same constructor name (e.g., `('Add, ...)` in two places) causes a compile error
+
+Fix:
+
+- `makeServiceLib` detects duplicate enum constructor names and fails with a clear message
+- ensure each constructor name in tool specs is unique across all request types
+
+### 15. Missing FromJSON/ToJSON When Using Tool Specs
+
+Problem:
+
+- `makeServiceLib` with non-empty tool specs generates a `FromJSON ToolCall` instance that requires `FromJSON` on the request type
+- `encodeToolResponse` requires `ToJSON` on the response type
+
+Fix:
+
+- add `FromJSON` instance for each request type that has tool specs
+- add `ToJSON` instance for each response type that has tool specs
+
+### 16. Constructor Name Clashes Between Request And Tool Enum
+
+Problem:
+
+- tool spec constructor names are used as enum constructors in the generated `{Lib}Tool` type, which can clash with the original request constructors if both are in scope
+
+Fix:
+
+- place the `makeServiceLib` splice in a separate module that imports only type names (no constructors) from the request/response module
+- see `SimpleServiceLib.hs` for the canonical pattern
 
 ## Review Checklist
 
@@ -656,4 +734,7 @@ Fix:
 7. Are async paths tested via captured scheduled scenarios?
 8. Was `hpack` run before build and test?
 9. If using `makeServiceLib`, are all `HasFailbackValue` instances defined before the splice?
-10. If using `makeServiceLib`, are there no duplicate request types in the pair list?
+10. If using `makeServiceLib`, are there no duplicate request types in the triple list?
+11. If using `makeServiceLib` with tool specs, are `FromJSON`/`ToJSON` instances provided?
+12. If using `makeServiceLib` with tool specs, are constructor names and tool-name strings unique?
+13. Is the TH splice in a separate module to avoid constructor name clashes?

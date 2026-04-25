@@ -2,4 +2,4 @@
 dist-newstyle/
 *~
 .env
-.worktrees/
+.worktrees/.worktrees/

@@ -34,14 +34,14 @@ Balancing these concerns often leads to messy codebases. As developers, we actua
 
 Lazy Circus ships with a rich set of built-in capabilities ready for production use:
 
-* **Orchestration Framework:** A robust control layer (`ScenarioProgram`) for executing sub-scenarios, spawning asynchronous background tasks, managing environment state, and handling errors gracefully. You can orchestrate the built-in effects or plug in your own.
+* **Orchestration Framework:** A robust control layer (`ScenarioProgram`) for executing sub-scenarios, spawning asynchronous background tasks, managing environment state, handling errors gracefully, and calling registered services. You can orchestrate the built-in effects or plug in your own.
 * **Database Effect DSL (via `beam`):** A comprehensive database language supporting both typed CRUD operations and raw queries. Advanced features like separate Read-Only connections, Row-Level Security (RLS), and transaction management are supported out-of-the-box.
 * **Telegram Bot Integration:** A ready-to-use effect for sending messages and reactions. It natively supports running multiple bots from a single application seamlessly.
 * **Mail Integration:** A robust email effect for composing and sending transactional emails.
 * **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses and implements an XML-like prompt templating language which significantly improves prompt adherence.
 * **Production & Test Interpreters:** Two distinct performers (`DefaultPerformer` and `TestInterpreter`). The test runtime keeps the same shared-runner architecture as production, but swaps capabilities at the edges: DB can stay real, while Telegram, mail, AI, logging, and async work are captured through mocks in the capability layer.
 * **Structured Async Logging:** High-performance, asynchronous structured logging available universally across all effect types. It supports nested log contexts (e.g., automatically attaching a `user_id` or `trace_id` to all subsequent nested calls).
-* **Service Call Infrastructure:** A transparent mechanism for running parallel typed workers with a standardized request/response interface. When the application needs concurrent background workers that process requests one at a time, register them through `LazyCircus.App.Service` and call from scenarios with `callService` — no coupling to concrete implementations.
+* **Service Call Infrastructure:** A transparent mechanism for running parallel typed workers with a standardized request/response interface. When the application needs concurrent background workers that process requests one at a time, register them through `LazyCircus.App.Service` and call from scenarios with `callService` — no coupling to concrete implementations. The `makeServiceLib` Template Haskell macro generates the service library data type, config, dispatch instances, builder function, and optional tool-call plumbing for AI integration from a list of request/response/tool-spec triples.
 * **AI Coding Agent Skill:** A pre-configured custom AI skill instruction set located in `docs/skills/lazy-circus/` to teach GitHub Copilot (or other AI assistants) the architectural patterns and conventions of Lazy Circus.
 
 ## Using the AI Assistant Skill
@@ -112,8 +112,8 @@ Lazy Circus is an effect framework for Haskell built on **Church-encoded free mo
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  ScenarioProgram s a                                 │  Orchestration Layer
-│  (logging, errors, time, async, context)             │
+│  ScenarioProgram s sl a                              │  Orchestration Layer
+│  (logging, errors, time, async, context, services)   │
 ├──────────────────────────────────────────────────────┤
 │  Script a                                            │  Coproduct (sum of effects)
 │  TelegramScript | MailScript | AIScript | DBScript   │
@@ -235,6 +235,8 @@ mailScript               myMailScript      :: Script b
 aiScript                 myAIScript        :: Script b
 ```
 
+`aiScript` wraps with an empty tool-description list. For tool-aware AI scripts, use `AIScriptDef` directly or the TH-generated `aiScriptWithAll` / `aiScriptWith` smart constructors (see [Section 8](#8-adding-a-new-effect)).
+
 For DB scripts, use the `DBScriptDef` constructor directly:
 
 ```haskell
@@ -245,7 +247,7 @@ DBScriptDef myDb ReadWrite myDbScript :: Script b
 
 ## 3. ScenarioProgram — Orchestration Layer
 
-`ScenarioProgram s a` is the main type for writing business scenarios. It adds:
+`ScenarioProgram s sl a` is the main type for writing business scenarios. It adds:
 
 - `evalScript` — execute a nested `Script`
 - `throw` / `runSafely` — error handling
@@ -261,8 +263,9 @@ DBScriptDef myDb ReadWrite myDbScript :: Script b
 ```haskell
 import LazyCircus.Scenario
 import LazyCircus (tgScript, aiScript)
+import LazyCircus.App.Service (NoServiceLib)
 
-myScenario :: ScenarioProgram Script ()
+myScenario :: ScenarioProgram Script NoServiceLib ()
 myScenario = do
     logInfo "Starting scenario"
 
@@ -299,7 +302,7 @@ Each sub-language has its own typeclass interpreter:
 | `TelegramScriptPerformer m` | `runTelegram :: TelegramScript a -> m a` |
 | `AILangPerformer m` | `runAI :: AIScript a -> m a` |
 | `MailScriptPerformer m` | `runMail :: MailScript a -> m a` |
-| `ScenarioPerformer sc m` | `run :: ScenarioProgram sc a -> m a` |
+| `ScenarioPerformer script serviceLib m` | `run :: ScenarioProgram script serviceLib a -> m a` |
 
 Interpretation occurs via `iterM` — folding the Church-encoded free monad into the target monadic context.
 
@@ -320,13 +323,13 @@ The `LazyCircus.Performer.Default` module provides a ready-to-use production int
 ```haskell
 import LazyCircus.Performer.Default
 
--- Run scenario in production environment
-runDefaultScenario :: ScenarioProgram Script a -> DefaultPerformer DefaultApp a
+-- Run scenario in production environment via the generic 'run' function
+runRIO app $ runDefaultPerformer $ run @Script @serviceLib myScenario
 ```
 
-### Requirements for `DefaultApp` Environment
+### Requirements for `DefaultApp serviceLib` Environment
 
-`DefaultApp` contains:
+`DefaultApp serviceLib` contains:
 - `Connection` — main PostgreSQL connection
 - `Maybe Connection` — optional read-only connection
 - `BotEnvs` — `Map Text BotEnv` for Telegram bots
@@ -336,6 +339,8 @@ runDefaultScenario :: ScenarioProgram Script a -> DefaultPerformer DefaultApp a
 - `JWTSettings` — authorization
 - `ExtraContext` — arbitrary configuration (`HashMap Text Text`)
 - `ScheduledActions` — queue of async tasks
+- `serviceLib` — in-process service handlers (or `NoServiceLib`)
+- `appToolDescriptions` — tool descriptions available to AI interpreters
 
 ---
 
@@ -414,8 +419,9 @@ still giving precise observability over side effects.
 
 ```haskell
 import LazyCircus.Testing.Performer
+import LazyCircus.App.Service (NoServiceLib)
 
-myTest :: DefaultApp -> IO ()
+myTest :: DefaultApp NoServiceLib -> IO ()
 myTest app = do
     (mocks, result) <- runWithDefaultMocks app $ do
         runScenarioProgram myScenario

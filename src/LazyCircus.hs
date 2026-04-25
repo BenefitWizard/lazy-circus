@@ -1,3 +1,8 @@
+--   PURPOSE: Provide a top-level facade that re-exports the Script coproduct and
+--   smart constructors for wrapping domain-specific scripts into the unified
+--   interpreter dispatch used by ScenarioProgram.
+--   SCOPE: Script coproduct re-export and smart constructors (tgScript, mailScript, aiScript).
+--   DEPENDS: LazyCircus.Script, LazyCircus.Scene.AI.Lang, LazyCircus.Scene.Mail.Lang, LazyCircus.Scene.Telegram.Lang
 module LazyCircus (
     -- * Script coproduct
     Script (..),
@@ -14,22 +19,20 @@ import LazyCircus.Script (Script (..))
 import RIO
 
 {- | Wrap a Telegram script together with the bot name it should run against.
-PRE-CONTRACT: None
 POST-CONTRACT: Produces a Script value tagged for the Telegram interpreter and bot selection.
 -}
 tgScript :: Text -> TelegramScript b -> Script b
 tgScript = TelegramScriptDef
 
 {- | Wrap a mail script so it can be evaluated by ScenarioProgram.
-PRE-CONTRACT: None
 POST-CONTRACT: Produces a Script value tagged for the mail interpreter.
 -}
 mailScript :: MailScript b -> Script b
 mailScript = MailScriptDef
 
 {- | Wrap an AI script so it can be evaluated by ScenarioProgram.
-PRE-CONTRACT: None
-POST-CONTRACT: Produces a Script value tagged for the AI interpreter.
+Uses an empty tool list for backward compatibility.
+POST-CONTRACT: Produces a Script value tagged for the AI interpreter with no tools registered.
 -}
 aiScript :: AIScript b -> Script b
-aiScript = AIScriptDef
+aiScript = AIScriptDef []

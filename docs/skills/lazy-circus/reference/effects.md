@@ -168,6 +168,21 @@ Production AI behavior:
 
 Wrap AI scripts with `aiScript`.
 
+### Tool-Aware AI Scripts
+
+The `AIScriptDef` constructor accepts a list of `ToolDescription` values:
+
+```haskell
+AIScriptDef :: [ToolDescription] -> AIScript b -> Script b
+```
+
+`aiScript` passes an empty list (`[]`). When services are registered via `makeServiceLib` with tool specs, TH generates:
+
+- `aiScriptWithAll :: AIScript b -> Script b` — passes all registered tool descriptions
+- `aiScriptWith :: [LibTool] -> AIScript b -> Script b` — passes a subset
+
+This lets the AI runtime know which tools (services) it can call.
+
 ## Mail
 
 Module: `LazyCircus.Scene.Mail.Lang`

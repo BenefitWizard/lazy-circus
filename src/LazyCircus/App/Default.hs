@@ -166,6 +166,8 @@ data DefaultApp serviceLib = App
     -- ^ optional SQL query tracer used during development
     , serviceLib :: serviceLib
     -- ^ collection of in-process service handlers
+    , appToolDescriptions :: [ToolDescription]
+    -- ^ tool descriptions available to AI interpreters
     }
 
 {- | Construct a fully initialized DefaultApp from raw configuration values.
@@ -228,6 +230,7 @@ newDefaultApp config = do
             , aiMethods = aiMethodsVal
             , sqlLogAction = sqlLog
             , serviceLib = cfgServiceLib config
+            , appToolDescriptions = []
             }
 
 -- | Capability for accessing initialized Telegram bot environments from a reader environment.
@@ -309,11 +312,15 @@ instance HasAIMethods (DefaultApp serviceLib) where
 instance HasServiceLib (DefaultApp serviceLib) serviceLib where
     serviceLibL = lens serviceLib (\x y -> x{serviceLib = y})
 
+-- | Satisfies HasToolDescriptions by delegating to the appToolDescriptions field.
+instance HasToolDescriptions (DefaultApp serviceLib) where
+    toolDescriptionsL = lens appToolDescriptions (\x y -> x{appToolDescriptions = y})
+
 -- | Drop missing values from an association list while preserving keys for present entries.
 constructHFromMList :: [(Text, Maybe a)] -> HashMap Text a
 constructHFromMList vals' = HM.fromList $ mapMaybe attachKey vals'
   where
-    -- \| Keep only entries with a present value.
+    -- | Keep only entries with a present value.
     attachKey (k, Just v) = Just (k, v)
     attachKey _ = Nothing
 
@@ -321,7 +328,7 @@ constructHFromMList vals' = HM.fromList $ mapMaybe attachKey vals'
 constructFromMList :: [(Text, Maybe a)] -> Map Text a
 constructFromMList vals' = M.fromList $ mapMaybe attachKey vals'
   where
-    -- \| Keep only entries with a present value.
+    -- | Keep only entries with a present value.
     attachKey (k, Just v) = Just (k, v)
     attachKey _ = Nothing
 
@@ -345,9 +352,8 @@ logAppFromDefaultApp app =
      in
         LogApp logFunc' genLogFunc' logQueue'
 
-{- | ORPHAN: MonadRandom and RIO are from separate packages.
-LAW: getRandomBytes preserves length: n == ByteString.length (getRandomBytes n — holds by delegation to the Crypto.Random instance.
--}
+-- | ORPHAN: MonadRandom and RIO are from separate packages.
+-- LAW: getRandomBytes preserves length: holds — n == ByteString.length (getRandomBytes n) by delegation to the Crypto.Random instance.
 instance MonadRandom (RIO env) where
     -- TODO: switch to seeded pseudo-random generator
     getRandomBytes = liftIO . getRandomBytes

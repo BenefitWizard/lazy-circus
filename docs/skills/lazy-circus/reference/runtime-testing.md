@@ -3,7 +3,7 @@
 Read this when:
 
 - debugging interpreter behavior
-- working with `DefaultPerformer`, `runDefaultScenario`, or environment projection
+- working with `DefaultPerformer`, `evalScriptDefault`, or environment projection
 - reasoning about async execution, extra context, bot lookup, or test semantics
 
 ## Runtimes And Environments
@@ -19,9 +19,12 @@ newtype DefaultPerformer env a = DefaultPerformer
     { runDefaultPerformer :: RIO env a }
 ```
 
-`runDefaultScenario :: ScenarioProgram Script a -> DefaultPerformer DefaultApp a`
+`runDefaultScenario :: ScenarioProgram Script serviceLib a -> DefaultPerformer (DefaultApp serviceLib) a`
 
-`DefaultApp` contains:
+Note: `runDefaultScenario` is not currently exported. Production scenarios are run via the generic `run` function:
+`runRIO app $ runDefaultPerformer $ run @Script @serviceLib myScenario`
+
+`DefaultApp serviceLib` contains:
 
 - primary PostgreSQL connection
 - optional read-only PostgreSQL connection
@@ -32,6 +35,8 @@ newtype DefaultPerformer env a = DefaultPerformer
 - extra context map
 - scheduled async action queue
 - JWT settings, process context, and a SQL log hook
+- service library (or `NoServiceLib`)
+- tool descriptions available to AI interpreters
 
 ### Wrapper Environments
 
@@ -67,17 +72,18 @@ This is not a lens update. It is a pure projection from outer environment to inn
 
 There are two important execution entry points:
 
-1. `run` from `LazyCircus.Scenario` together with the generic `ScenarioPerformer Script`
+1. `run` from `LazyCircus.Scenario` together with the generic `ScenarioPerformer Script serviceLib`
    instance in `LazyCircus.Performer`
-2. `runDefaultScenario` from `LazyCircus.Performer.Default`
+2. `evalScriptDefault` from `LazyCircus.Performer.Default` — the production dispatch that
+   pattern-matches on `Script` variants
 
-The generic `ScenarioPerformer Script` instance:
+The generic `ScenarioPerformer Script serviceLib` instance:
 
 - dispatches `Script` by calling `runTelegram`, `runMail`, `runAI`, and `runDB`
 - uses `async` directly for `runAsync`
 - returns `mempty` from `getExtraContext'`
 
-`runDefaultScenario` is the production-specific path. It pattern matches on `Script` itself and:
+The default performer's `evalScriptDefault` is the production-specific dispatch. It:
 
 - looks up the requested Telegram bot name and throws `NoBotConfigured` when absent
 - projects into `AppWithBotEnv` before running `runTelegram`
@@ -120,11 +126,11 @@ capabilities at the edges.
 
 | Type | Purpose |
 |---|---|
-| `Mocks` | collected mock state (Tg requests, mails, logs, async tasks) |
+| `Mocks serviceLib` | collected mock state (Tg requests, mails, logs, async tasks) |
 | `TgMock` | Telegram mock with configurable response queue |
 | `MailMock` | Mail mock for capturing sent mails |
-| `EnvWithMocks` | environment extended with mock state |
-| `TestInterpreter` | the test-performer monad |
+| `EnvWithMocks serviceLib` | environment extended with mock state |
+| `TestInterpreter serviceLib a` | the test-performer monad |
 | `OnSendMessageRequest` | callback type for custom Telegram send handling |
 
 ### Main Helpers
@@ -189,6 +195,14 @@ spec = do
 
         logs <- readLog mocks
         logs `shouldSatisfy` elem (AppLogMsg "Scenario completed")
+```
+
+When no services are needed, use `NoServiceLib`:
+
+```haskell
+import LazyCircus.App.Service (NoServiceLib)
+
+app :: DefaultApp NoServiceLib
 ```
 
 ### DB Integration Tests

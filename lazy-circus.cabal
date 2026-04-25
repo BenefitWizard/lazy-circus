@@ -123,6 +123,7 @@ library common-circus
       Common
       DemoEnv
       SimpleService
+      SimpleServiceLib
   other-modules:
       Paths_lazy_circus
   autogen-modules:
