@@ -50,6 +50,7 @@ dependencies:
   - http-types
   - unordered-containers
   - template-haskell
+  - openapi3
 
 ghc-options:
   - -Wall
