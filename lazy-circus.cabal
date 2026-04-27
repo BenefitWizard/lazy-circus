@@ -266,6 +266,7 @@ test-suite lazy-circus-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      AIAgentSpec
       BotScenariosSpec
       DBLangSpec
       LogSpec

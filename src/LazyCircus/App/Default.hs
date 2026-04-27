@@ -168,6 +168,8 @@ data DefaultApp serviceLib = App
     -- ^ collection of in-process service handlers
     , appToolDescriptions :: [ToolDescription]
     -- ^ tool descriptions available to AI interpreters
+    , toolCallExec :: ToolCallExec
+    -- ^ closure that dispatches named tool calls with JSON arguments
     }
 
 {- | Construct a fully initialized DefaultApp from raw configuration values.
@@ -231,6 +233,7 @@ newDefaultApp config = do
             , sqlLogAction = sqlLog
             , serviceLib = cfgServiceLib config
             , appToolDescriptions = []
+            , toolCallExec = ToolCallExec $ \_ _ -> fail "ToolCallExec not initialized: set via toolCallExecL after newDefaultApp"
             }
 
 -- | Capability for accessing initialized Telegram bot environments from a reader environment.
@@ -315,6 +318,10 @@ instance HasServiceLib (DefaultApp serviceLib) serviceLib where
 -- | Satisfies HasToolDescriptions by delegating to the appToolDescriptions field.
 instance HasToolDescriptions (DefaultApp serviceLib) where
     toolDescriptionsL = lens appToolDescriptions (\x y -> x{appToolDescriptions = y})
+
+-- | Satisfies HasToolCallExec by delegating to the toolCallExec field.
+instance HasToolCallExec (DefaultApp serviceLib) where
+    toolCallExecL = lens toolCallExec (\x y -> x{toolCallExec = y})
 
 -- | Drop missing values from an association list while preserving keys for present entries.
 constructHFromMList :: [(Text, Maybe a)] -> HashMap Text a

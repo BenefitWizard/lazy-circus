@@ -46,7 +46,7 @@ import Database.PostgreSQL.Simple qualified as Simple
 import LazyCircus.AI (HasAIMethods (..))
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
-import LazyCircus.App.Service (HasServiceLib (..), HasToolDescriptions (..), callViaServiceLib)
+import LazyCircus.App.Service (HasServiceLib (..), HasToolCallExec (..), HasToolDescriptions (..), callViaServiceLib)
 import LazyCircus.AsyncWorker.Types (HasScheduledActions (..))
 import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.DB.Types (PgDB)
@@ -216,6 +216,10 @@ instance HasServiceLib (EnvWithMocks serviceLib) serviceLib where
 -- | Delegates tool-description access to the wrapped DefaultApp.
 instance HasToolDescriptions (EnvWithMocks serviceLib) where
     toolDescriptionsL = lens defaultApp (\env app -> env{defaultApp = app}) . toolDescriptionsL
+
+-- | Delegates tool-call execution access to the wrapped DefaultApp.
+instance HasToolCallExec (EnvWithMocks serviceLib) where
+    toolCallExecL = lens defaultApp (\env app -> env{defaultApp = app}) . toolCallExecL
 
 -- | Re-target a test action to an outer environment via a pure projection.
 changeEnv :: (outer -> inner) -> TestPerformer inner a -> TestPerformer outer a

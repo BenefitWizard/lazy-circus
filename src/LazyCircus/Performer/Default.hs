@@ -17,7 +17,7 @@ module LazyCircus.Performer.Default (
 ) where
 
 import Control.Monad.Free.Church qualified as FC
-import LazyCircus.AI (askAI)
+import LazyCircus.AI (askAI, solveWithAgentLoop)
 import LazyCircus.App.Default
 import LazyCircus.App.Log
 import LazyCircus.App.Service (HasToolDescriptions (..), callViaServiceLib)
@@ -82,6 +82,7 @@ instance MailScriptPerformer (DefaultPerformer (DefaultApp serviceLib)) where
 -- | Routes AI requests through the configured OpenAI client.
 instance AILangPerformer (DefaultPerformer (DefaultApp serviceLib)) where
     ask' = askAI
+    solveWithAgent' = solveWithAgentLoop
 
 -- | Full ScenarioPerformer instance for the DefaultPerformer.
 -- Wires orchestration primitives (logging, async, service calls, datetime,

@@ -28,9 +28,12 @@ module LazyCircus.App.Service (
     -- * Tool descriptions
     ToolDescription (..),
     HasToolDescriptions (..),
+    ToolCallExec (..),
+    HasToolCallExec (..),
 )
 where
 
+import Data.Aeson (Value)
 import RIO
 
 -- | Request channel used to deliver one service input to the worker.
@@ -145,8 +148,9 @@ runAllWorkers = mapM async
 -- Used by TH-generated code to build tool lists and by the performer
 -- to thread tool descriptions into the AI runtime environment.
 data ToolDescription = ToolDescription
-    { toolDescName        :: Text  -- ^ machine-readable tool identifier used in JSON dispatch
-    , toolDescDescription :: Text  -- ^ human-readable description of what the tool does
+    { toolDescName        :: Text        -- ^ machine-readable tool identifier used in JSON dispatch
+    , toolDescDescription :: Text        -- ^ human-readable description of what the tool does
+    , toolDescParameters  :: Maybe Value -- ^ JSON Schema describing the tool's input parameters
     }
     deriving (Show, Eq)
 
@@ -154,3 +158,12 @@ data ToolDescription = ToolDescription
 -- to the AI interpreter.
 class HasToolDescriptions env where
     toolDescriptionsL :: Lens' env [ToolDescription]
+
+-- | Closure that dispatches a named tool call with JSON arguments.
+newtype ToolCallExec = ToolCallExec
+    { runToolCallExec :: Text -> Value -> IO Value
+    }
+
+-- | Environment capability for tool execution.
+class HasToolCallExec env where
+    toolCallExecL :: Lens' env ToolCallExec

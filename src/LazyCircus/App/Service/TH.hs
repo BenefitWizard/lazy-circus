@@ -20,9 +20,9 @@ module LazyCircus.App.Service.TH (
 import Data.Text qualified as Text (unpack)
 import RIO
 
-import Data.Aeson (FromJSON, ToJSON, Value, object, toJSON, withObject, (.:), (.=))
+import Data.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, object, toJSON, withObject, (.:), (.=))
 import Data.Char (toLower)
-import Data.List (nub, (\\))
+import Data.List (nub, unzip, (\\))
 
 import Language.Haskell.TH
 
@@ -30,6 +30,7 @@ import LazyCircus.App.Service (
     HasFailbackValue (..),
     IsInServiceLib (..),
     ServiceHandler (..),
+    ToolCallExec (..),
     ToolDescription (..),
     callService,
     createService,
@@ -50,6 +51,38 @@ typeToFieldName name =
 -- | Shared no-unpacking, no-strictness record field annotation.
 recordBang :: Bang
 recordBang = Bang NoSourceUnpackedness NoSourceStrictness
+
+{- | Maps a Haskell Type to a JSON Schema type expression, if possible.
+Returns 'Nothing' for unsupported types.
+-}
+typeToJsonSchemaType :: Type -> Maybe Exp
+typeToJsonSchemaType (ConT t)
+    | t == ''Int    = Just $ schemaTypeE "integer"
+    | t == ''Text   = Just $ schemaTypeE "string"
+    | t == ''Double = Just $ schemaTypeE "number"
+    | t == ''Bool   = Just $ schemaTypeE "boolean"
+typeToJsonSchemaType (AppT (ConT t) inner)
+    | t == ''Maybe = typeToJsonSchemaType inner
+typeToJsonSchemaType (AppT ListT inner) =
+    case typeToJsonSchemaType inner of
+        Nothing   -> Nothing
+        Just item -> Just $ AppE (VarE 'object) $ ListE
+            [ kvE "type" (textE "array")
+            , AppE (AppE (VarE '(.=)) (LitE (StringL "items"))) item
+            ]
+typeToJsonSchemaType _ = Nothing
+
+-- | Build @object ["type" .= ("xxx" :: Text)]@.
+schemaTypeE :: String -> Exp
+schemaTypeE t = AppE (VarE 'object) $ ListE [kvE "type" (textE t)]
+
+-- | Build @(key .= (value :: Text))@.
+kvE :: String -> Exp -> Exp
+kvE key val = AppE (AppE (VarE '(.=)) (LitE (StringL key))) val
+
+-- | Build a Text-typed string literal: @("xxx" :: Text)@
+textE :: String -> Exp
+textE s = SigE (LitE (StringL s)) (ConT ''Text)
 
 {- | Internal representation of a service pair with optional tool specifications.
   (fieldName, requestType, responseType, toolSpecs).
@@ -357,13 +390,15 @@ genToolInfo libName toolSpecs = do
     pure [SigD funName sigType, FunD funName clauses]
   where
     mkClause (conName, toolName, desc) =
-        pure $
+        let enumCon = mkName $ nameBase conName <> "Tool"
+        in pure $
             Clause
-                [ConP (mkName $ nameBase conName <> "Tool") [] []]
+                [ConP enumCon [] []]
                 ( NormalB $
                     ConE 'ToolDescription
                         `AppE` LitE (StringL toolName)
                         `AppE` LitE (StringL desc)
+                        `AppE` AppE (VarE (mkName "toolSchema")) (ConE enumCon)
                 )
                 []
 
@@ -391,6 +426,99 @@ genAllToolDescriptions _libName _toolSpecs = do
             NormalB $
                 AppE (AppE (VarE (mkName "map")) (VarE (mkName "toolInfo"))) enumRange
     pure [SigD funName sigType, FunD funName [Clause [] body []]]
+
+-- ── JSON Schema generation ───────────────────────────────────────────────
+
+{- | Generates the @toolSchema@ function that maps each tool enum constructor to a
+'Just' JSON Schema for record constructors or 'Nothing' for non-record constructors.
+PRE-CONTRACT: libName is a valid Haskell identifier.
+POST-CONTRACT: Returns a 'SigD' and a 'FunD'. For empty specs, returns [].
+-}
+genToolSchema :: String -> [(Name, Name, [(Name, String, String)])] -> Q [Dec]
+genToolSchema _libName [] = pure []
+genToolSchema libName rawPairs = do
+    let funName = mkName "toolSchema"
+        typeName = mkName $ libName <> "Tool"
+        sigType = AppT (AppT ArrowT (ConT typeName)) (AppT (ConT ''Maybe) (ConT ''Value))
+        allToolSpecs = concatMap (\(_, _, specs) -> specs) rawPairs
+    clauses <- mapM (mkSchemaClause rawPairs) allToolSpecs
+    pure [SigD funName sigType, FunD funName clauses]
+
+{- | Generate one clause of the @toolSchema@ function for a single tool spec.
+PRE-CONTRACT: rawPairs contains the parent request type for the given constructor.
+POST-CONTRACT: Returns a Clause that matches the tool enum constructor.
+-}
+mkSchemaClause :: [(Name, Name, [(Name, String, String)])] -> (Name, String, String) -> Q Clause
+mkSchemaClause rawPairs (conName, _, _) = do
+    let enumCon = mkName $ nameBase conName <> "Tool"
+        -- Find the parent request type for this constructor
+        parentReqs = [reqName | (reqName, _, specs) <- rawPairs, (cn, _, _) <- specs, cn == conName]
+    parentReq <- case parentReqs of
+        [req] -> pure req
+        []    -> fail $ "mkSchemaClause: no parent request type for constructor " <> nameBase conName
+        _     -> fail $ "mkSchemaClause: ambiguous parent for constructor " <> nameBase conName
+    mSchema <- genSchemaForConstructor parentReq conName
+    let body = case mSchema of
+            Nothing  -> ConE 'Nothing
+            Just sch -> AppE (ConE 'Just) sch
+    pure $ Clause [ConP enumCon [] []] (NormalB body) []
+
+{- | Attempt to generate a JSON Schema expression for a constructor.
+Returns 'Nothing' if the constructor is not a record or has unmappable field types.
+PRE-CONTRACT: reqName resolves to a 'DataD' or 'NewtypeD' via 'reify'.
+POST-CONTRACT: Returns 'Just' schema expression for record constructors with mappable types.
+-}
+genSchemaForConstructor :: Name -> Name -> Q (Maybe Exp)
+genSchemaForConstructor reqName conName = do
+    info <- reify reqName
+    constructors <- case info of
+        TyConI (DataD _ _ _ _ cons _) -> pure cons
+        TyConI (NewtypeD _ _ _ _ con _) -> pure [con]
+        _ -> pure []
+    case findCon conName constructors of
+        Just (RecC _ fields) ->
+            case mapFields fields of
+                Nothing -> pure Nothing
+                Just (propExprs, requiredExprs) ->
+                    let schemaExpr = AppE (VarE 'object) $ ListE
+                            [ kvE "type" (textE "object")
+                            , AppE (AppE (VarE '(.=)) (LitE (StringL "properties")))
+                                  (AppE (VarE 'object) $ ListE propExprs)
+                            , AppE (AppE (VarE '(.=)) (LitE (StringL "required")))
+                                  (ListE requiredExprs)
+                            ]
+                    in pure $ Just schemaExpr
+        _ -> pure Nothing
+  where
+    -- | Map record fields to JSON Schema property expressions.
+    -- Returns Nothing if any field type is unmappable.
+    mapFields :: [(Name, Bang, Type)] -> Maybe ([Exp], [Exp])
+    mapFields fields = do
+        results <- mapM mapField fields
+        let (propExprs, reqExprs) = unzip results
+        pure (propExprs, reqExprs)
+
+    -- | Map one field to (property expression, required name expression).
+    mapField :: (Name, Bang, Type) -> Maybe (Exp, Exp)
+    mapField (fieldName, _, fieldType) = do
+        schemaExp <- typeToJsonSchemaType fieldType
+        let propExpr = AppE (AppE (VarE '(.=)) (LitE (StringL (nameBase fieldName)))) schemaExp
+            reqExpr = LitE (StringL (nameBase fieldName))
+        pure (propExpr, reqExpr)
+
+    -- | Find a constructor by Name.
+    findCon :: Name -> [Con] -> Maybe Con
+    findCon target = listToMaybe . filter (\c -> conNameOf c == target)
+
+    -- | Extract constructor name.
+    conNameOf :: Con -> Name
+    conNameOf (NormalC n _)   = n
+    conNameOf (RecC n _)      = n
+    conNameOf (InfixC _ n _)  = n
+    conNameOf (ForallC _ _ c) = conNameOf c
+    conNameOf (GadtC (n:_) _ _) = n
+    conNameOf (RecGadtC (n:_) _ _) = n
+    conNameOf _ = error "conNameOf: unsupported"
 
 -- ── New generators: ToolCall, ToolResponse, FromJSON, execute, etc. ──────
 
@@ -723,6 +851,56 @@ genSmartConstructors libName _toolSpecs = do
                 ]
             ]
 
+-- ── mkToolCallExec generator ─────────────────────────────────────────────
+
+{- | Generates the @mkToolCallExec@ function that creates a 'ToolCallExec' closure
+from a service library. The closure dispatches tool calls by parsing JSON, executing
+the tool, and encoding the response.
+PRE-CONTRACT: libName is a valid Haskell identifier; tool specs are non-empty.
+POST-CONTRACT: Returns a 'SigD' and a 'FunD'. For empty specs, returns [].
+-}
+genMkToolCallExec :: String -> [(Name, String, String)] -> Q [Dec]
+genMkToolCallExec _libName [] = pure []
+genMkToolCallExec libName _toolSpecs = do
+    let funName = mkName "mkToolCallExec"
+        libType = mkName libName
+        slVar      = mkName "sl"
+        toolNameV  = mkName "toolName"
+        argsValV   = mkName "argsValue"
+        djVar      = mkName "dispatchJson"
+        tcVar      = mkName "tc"
+        respVar    = mkName "resp"
+        errVar     = mkName "err"
+        sigType = AppT (AppT ArrowT (ConT libType)) (ConT ''ToolCallExec)
+        -- inner lambda: \toolName argsValue -> do { ... }
+        innerBody = DoE Nothing
+            [ LetS [ValD (VarP djVar)
+                (NormalB $ AppE (VarE 'object) $ ListE
+                    [ AppE (AppE (VarE '(.=)) (LitE (StringL "tool_name"))) (VarE toolNameV)
+                    , AppE (AppE (VarE '(.=)) (LitE (StringL "arguments"))) (VarE argsValV)
+                    ])
+                []]
+            , NoBindS $ CaseE (AppE (VarE 'fromJSON) (VarE djVar))
+                [ Match (ConP 'Success [] [VarP tcVar])
+                    (NormalB $ DoE Nothing
+                        [ BindS (VarP respVar)
+                            (AppE (AppE (VarE (mkName "executeToolCall")) (VarE slVar)) (VarE tcVar))
+                        , NoBindS $ AppE (VarE 'pure)
+                            (AppE (AppE (VarE (mkName "encodeToolResponse"))
+                                (AppE (VarE (mkName "toolCallName")) (VarE tcVar)))
+                                (VarE respVar))
+                        ])
+                    []
+                , Match (ConP 'Error [] [VarP errVar])
+                    (NormalB $ AppE (VarE (mkName "fail")) (VarE errVar))
+                    []
+                ]
+            ]
+        innerLambda = LamE [VarP toolNameV, VarP argsValV] innerBody
+        -- outer: mkToolCallExec sl = ToolCallExec $ \toolName argsValue -> ...
+        body = NormalB $ AppE (ConE 'ToolCallExec) innerLambda
+    pure [SigD funName sigType, FunD funName [Clause [VarP slVar] body []]]
+
 -- ── Main entry point ─────────────────────────────────────────────────────
 
 {- | Template Haskell macro that generates a complete service library.
@@ -744,6 +922,8 @@ triples, generates:
 12. A @toolCallName@ function (when tool specs are present).
 13. An @encodeToolResponse@ function (when tool specs are present).
 14. Smart constructors @aiScriptWithAll@ and @aiScriptWith@ (when tool specs are present).
+15. A @toolSchema@ function (when tool specs are present).
+16. A @mkToolCallExec@ function that creates a 'ToolCallExec' closure (when tool specs are present).
 
 === Example
 
@@ -785,6 +965,8 @@ makeServiceLib libName rawPairs = do
     mkDecls <- genMkFunction libName configConName fieldPairs
     -- Tool enum / info / descriptions (always generated)
     toolEnumDec <- genToolEnumType libName allToolSpecs
+    -- JSON Schema must come before toolInfo since toolInfo references toolSchema
+    toolSchemaDecs <- genToolSchema libName rawPairs
     toolInfoDecs <- genToolInfo libName allToolSpecs
     allToolDescsDecs <- genAllToolDescriptions libName allToolSpecs
     -- T2b generators (only when at least one spec exists)
@@ -798,11 +980,13 @@ makeServiceLib libName rawPairs = do
                 et <- genExecuteToolCall libName rawPairs
                 tn <- genToolCallName libName rawPairs
                 er <- genEncodeToolResponse libName rawPairs
-                pure $ [tc, tr, fj] <> et <> tn <> er
+                mkTCE <- genMkToolCallExec libName allToolSpecs
+                pure $ [tc, tr, fj] <> et <> tn <> er <> mkTCE
             else pure []
     smartCtorDecs <- genSmartConstructors libName allToolSpecs
     pure $
         [serviceLibType, configType, toolEnumDec]
+            <> toolSchemaDecs
             <> toolInfoDecs
             <> allToolDescsDecs
             <> instances

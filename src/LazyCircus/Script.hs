@@ -20,6 +20,11 @@ import RIO
 -- | Coproduct of all supported script types.
 -- Each constructor tags a domain-specific script for its corresponding
 -- interpreter within 'ScenarioProgram'.
+--
+-- NOTE: The [ToolDescription] in AIScriptDef and the ToolCallExec in the
+-- environment must correspond to the same tool set. A mismatch (tools
+-- described to the model but not executable, or vice versa) is not caught
+-- at compile time.
 data Script b where
     TelegramScriptDef :: Text -> TelegramScript b -> Script b  -- ^ Telegram script with bot name
     MailScriptDef :: MailScript b -> Script b                  -- ^ Mail script
