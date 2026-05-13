@@ -5,6 +5,20 @@
 
 packages:
 - completed:
+    hackage: openapi3-3.2.4@sha256:7309864a9a59b4654b21ef477444fb26bf8d393eba795dd8de089b368ea74c2a,4982
+    pantry-tree:
+      sha256: 1ac8db74ee9753398df1b87f2556c83cce42994c3a2c80faa13169ddba250ab0
+      size: 2263
+  original:
+    hackage: openapi3-3.2.4@sha256:7309864a9a59b4654b21ef477444fb26bf8d393eba795dd8de089b368ea74c2a,4982
+- completed:
+    hackage: QuickCheck-2.15.0.1@sha256:0cfd337bb9e6fbf09255bd24bb498a156f1d9bcd465396ac8657b25034b9ee31,9046
+    pantry-tree:
+      sha256: 27dddf0b64cc7d7e154326059c89b70da61530c25623af7ef576dd9db0c53821
+      size: 2437
+  original:
+    hackage: QuickCheck-2.15.0.1@sha256:0cfd337bb9e6fbf09255bd24bb498a156f1d9bcd465396ac8657b25034b9ee31,9046
+- completed:
     hackage: servant-auth-0.4.9.2@sha256:864fd0b2f439df23db75b119b4de5cccc13f4d1c0ba26934a917e96cf11f2cf7,2190
     pantry-tree:
       sha256: dcc11e1238ec32c476b0e72099b749b40f5033f41cbe4ea7a3255a17b19efb4d

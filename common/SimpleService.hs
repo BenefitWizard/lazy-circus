@@ -1,4 +1,9 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
+-- ^ Suppressed intentionally: SimpleRequest uses partial record fields
+-- to enable Generic/ToSchema derivation for openapi3 schema generation.
+-- All consumers use pattern matching, not record selectors.
 
 -- | Simple service types, handlers, and TH-generated service library.
 --
@@ -8,25 +13,83 @@
 module SimpleService where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), withObject, (.:), (.=), object)
+import Data.Char (toLower)
+import Data.List (stripPrefix)
+import Data.OpenApi.Internal.Schema (genericDeclareNamedSchema)
+import Data.OpenApi.SchemaOptions (SchemaOptions (..), defaultSchemaOptions)
+import Data.OpenApi.Schema (ToSchema (..))
 import Data.Text (unpack)
 import LazyCircus.App.Service
 import RIO
 
 -- -- Request and response types
 
+-- | Simple arithmetic operations: addition and subtraction.
 data SimpleRequest
-    = Add Int Int
-    | Subtract Int Int
-    deriving (Show, Eq)
+    = Add { addX :: Int -- ^ left operand for addition
+          , addY :: Int -- ^ right operand for addition
+          }
+    | Subtract { subX :: Int -- ^ left operand for subtraction
+               , subY :: Int -- ^ right operand for subtraction
+               }
+    deriving (Show, Eq, Generic)
 
-data SimpleResponse = SimpleResult Int
-    deriving (Show, Eq)
+-- | Result of a simple arithmetic operation.
+data SimpleResponse = SimpleResult
+    { simpleResultValue :: Int -- ^ the computed integer result
+    }
+    deriving (Show, Eq, Generic)
 
-data AddExpressionRequest = AddExpressionRequest Text
-    deriving (Show, Eq)
+-- | Request to process a text expression.
+data AddExpressionRequest = AddExpressionRequest
+    { addExpressionRequestExpression :: Text -- ^ the expression text to process
+    }
+    deriving (Show, Eq, Generic)
 
-data AddExpressionResponse = AddExpressionResult Text
-    deriving (Show, Eq)
+-- | Result of expression processing.
+data AddExpressionResponse = AddExpressionResult
+    { addExpressionResultValue :: Text -- ^ the processed expression text
+    }
+    deriving (Show, Eq, Generic)
+
+-- -- ToSchema instances
+
+-- | Strips constructor-specific prefix and lowercases the first character.
+-- Maps "addX" → "x", "addY" → "y", "subX" → "x", "subY" → "y".
+-- PRE-CONTRACT: Input must start with "add" or "sub" followed by an uppercase letter.
+stripCtorPrefix :: String -> String
+stripCtorPrefix s = case s of
+    'a':'d':'d':c:cs -> toLower c : cs
+    's':'u':'b':c:cs -> toLower c : cs
+    _ -> error $ "stripCtorPrefix: unexpected field name " <> show s
+                 <> ". Add a case for the new constructor prefix."
+
+-- | Strips a type-name prefix from a record field label and lowercases the next character.
+dropTypePrefix :: String -> String -> String
+dropTypePrefix prefix s = case stripPrefix prefix s of
+    Just (c:cs) -> toLower c : cs
+    Just [] -> []
+    Nothing -> s
+
+-- | Uses generic derivation with custom field label modifier to match 'FromJSON' field names
+-- and lowercase constructor tags to match the discriminator values.
+instance ToSchema SimpleRequest where
+    declareNamedSchema = genericDeclareNamedSchema defaultSchemaOptions
+        { fieldLabelModifier = stripCtorPrefix
+        , constructorTagModifier = map toLower
+        }
+
+-- | Default generic ToSchema for SimpleResponse.
+instance ToSchema SimpleResponse
+
+-- | Uses generic derivation with custom field label modifier to strip the type name prefix.
+instance ToSchema AddExpressionRequest where
+    declareNamedSchema = genericDeclareNamedSchema defaultSchemaOptions
+        { fieldLabelModifier = dropTypePrefix "addExpressionRequest"
+        }
+
+-- | Default generic ToSchema for AddExpressionResponse.
+instance ToSchema AddExpressionResponse
 
 -- -- Aeson instances (required by TH-generated FromJSON/ToJSON constraints when tool specs are present)
 
@@ -50,15 +113,17 @@ instance ToJSON AddExpressionResponse where
 
 -- -- Handlers
 
+-- | Processes a simple arithmetic request.
 handleSimpleRequest :: SimpleRequest -> IO SimpleResponse
 handleSimpleRequest req =
     case req of
-        Add x y -> pure $ SimpleResult (x + y)
-        Subtract x y -> pure $ SimpleResult (x - y)
+        Add{addX, addY} -> pure $ SimpleResult (addX + addY)
+        Subtract{subX, subY} -> pure $ SimpleResult (subX - subY)
 
+-- | Processes an expression request by appending "!".
 handleAddExpressionRequest :: AddExpressionRequest -> IO AddExpressionResponse
-handleAddExpressionRequest (AddExpressionRequest expr) =
-    pure $ AddExpressionResult (expr <> "!")
+handleAddExpressionRequest AddExpressionRequest{addExpressionRequestExpression} =
+    pure $ AddExpressionResult (addExpressionRequestExpression <> "!")
 
 -- -- Failback values
 

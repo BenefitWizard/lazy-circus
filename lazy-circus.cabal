@@ -102,6 +102,7 @@ library
     , jose
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant
@@ -159,6 +160,7 @@ library common-circus
     , lazy-circus
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant
@@ -203,6 +205,7 @@ executable bot
     , lazy-circus
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant
@@ -247,6 +250,7 @@ executable example
     , lazy-circus
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant
@@ -272,6 +276,7 @@ test-suite lazy-circus-test
       LogSpec
       ServiceCallSpec
       TestDbSupport
+      ToolSchemaSpec
       Paths_lazy_circus
   autogen-modules:
       Paths_lazy_circus
@@ -299,6 +304,7 @@ test-suite lazy-circus-test
     , lazy-circus
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant

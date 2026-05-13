@@ -17,12 +17,13 @@ module LazyCircus.App.Service.TH (
     makeServiceLib,
 ) where
 
+import Data.OpenApi.Schema (ToSchema, toInlinedSchema)
 import Data.Text qualified as Text (unpack)
 import RIO
 
 import Data.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, object, toJSON, withObject, (.:), (.=))
 import Data.Char (toLower)
-import Data.List (nub, unzip, (\\))
+import Data.List (nub, (\\))
 
 import Language.Haskell.TH
 
@@ -51,38 +52,6 @@ typeToFieldName name =
 -- | Shared no-unpacking, no-strictness record field annotation.
 recordBang :: Bang
 recordBang = Bang NoSourceUnpackedness NoSourceStrictness
-
-{- | Maps a Haskell Type to a JSON Schema type expression, if possible.
-Returns 'Nothing' for unsupported types.
--}
-typeToJsonSchemaType :: Type -> Maybe Exp
-typeToJsonSchemaType (ConT t)
-    | t == ''Int    = Just $ schemaTypeE "integer"
-    | t == ''Text   = Just $ schemaTypeE "string"
-    | t == ''Double = Just $ schemaTypeE "number"
-    | t == ''Bool   = Just $ schemaTypeE "boolean"
-typeToJsonSchemaType (AppT (ConT t) inner)
-    | t == ''Maybe = typeToJsonSchemaType inner
-typeToJsonSchemaType (AppT ListT inner) =
-    case typeToJsonSchemaType inner of
-        Nothing   -> Nothing
-        Just item -> Just $ AppE (VarE 'object) $ ListE
-            [ kvE "type" (textE "array")
-            , AppE (AppE (VarE '(.=)) (LitE (StringL "items"))) item
-            ]
-typeToJsonSchemaType _ = Nothing
-
--- | Build @object ["type" .= ("xxx" :: Text)]@.
-schemaTypeE :: String -> Exp
-schemaTypeE t = AppE (VarE 'object) $ ListE [kvE "type" (textE t)]
-
--- | Build @(key .= (value :: Text))@.
-kvE :: String -> Exp -> Exp
-kvE key val = AppE (AppE (VarE '(.=)) (LitE (StringL key))) val
-
--- | Build a Text-typed string literal: @("xxx" :: Text)@
-textE :: String -> Exp
-textE s = SigE (LitE (StringL s)) (ConT ''Text)
 
 {- | Internal representation of a service pair with optional tool specifications.
   (fieldName, requestType, responseType, toolSpecs).
@@ -285,6 +254,7 @@ genMkSig funName m configType libConName pairs = do
                 else
                     [ AppT (ConT ''FromJSON) (ConT reqName)
                     , AppT (ConT ''ToJSON) (ConT resName)
+                    , AppT (ConT ''ToSchema) (ConT reqName)
                     ]
 
 {- | Generates the function body for the @mk@ function.
@@ -445,80 +415,24 @@ genToolSchema libName rawPairs = do
     pure [SigD funName sigType, FunD funName clauses]
 
 {- | Generate one clause of the @toolSchema@ function for a single tool spec.
-PRE-CONTRACT: rawPairs contains the parent request type for the given constructor.
-POST-CONTRACT: Returns a Clause that matches the tool enum constructor.
+PRE-CONTRACT: rawPairs contains exactly one parent request type for the given constructor.
+POST-CONTRACT: Returns a Clause that matches the tool enum constructor and produces
+  @'Just' ('toJSON' ('toInlinedSchema' ('Proxy' :: 'Proxy' parentReq)))@.
 -}
 mkSchemaClause :: [(Name, Name, [(Name, String, String)])] -> (Name, String, String) -> Q Clause
 mkSchemaClause rawPairs (conName, _, _) = do
     let enumCon = mkName $ nameBase conName <> "Tool"
-        -- Find the parent request type for this constructor
         parentReqs = [reqName | (reqName, _, specs) <- rawPairs, (cn, _, _) <- specs, cn == conName]
     parentReq <- case parentReqs of
         [req] -> pure req
         []    -> fail $ "mkSchemaClause: no parent request type for constructor " <> nameBase conName
         _     -> fail $ "mkSchemaClause: ambiguous parent for constructor " <> nameBase conName
-    mSchema <- genSchemaForConstructor parentReq conName
-    let body = case mSchema of
-            Nothing  -> ConE 'Nothing
-            Just sch -> AppE (ConE 'Just) sch
+    -- Generate: Just (toJSON (toInlinedSchema (Proxy :: Proxy parentReq)))
+    let proxyExpr = SigE (ConE 'Proxy) (AppT (ConT ''Proxy) (ConT parentReq))
+        schemaExpr = AppE (VarE 'toInlinedSchema) proxyExpr
+        valueExpr  = AppE (VarE 'toJSON) schemaExpr
+        body       = AppE (ConE 'Just) valueExpr
     pure $ Clause [ConP enumCon [] []] (NormalB body) []
-
-{- | Attempt to generate a JSON Schema expression for a constructor.
-Returns 'Nothing' if the constructor is not a record or has unmappable field types.
-PRE-CONTRACT: reqName resolves to a 'DataD' or 'NewtypeD' via 'reify'.
-POST-CONTRACT: Returns 'Just' schema expression for record constructors with mappable types.
--}
-genSchemaForConstructor :: Name -> Name -> Q (Maybe Exp)
-genSchemaForConstructor reqName conName = do
-    info <- reify reqName
-    constructors <- case info of
-        TyConI (DataD _ _ _ _ cons _) -> pure cons
-        TyConI (NewtypeD _ _ _ _ con _) -> pure [con]
-        _ -> pure []
-    case findCon conName constructors of
-        Just (RecC _ fields) ->
-            case mapFields fields of
-                Nothing -> pure Nothing
-                Just (propExprs, requiredExprs) ->
-                    let schemaExpr = AppE (VarE 'object) $ ListE
-                            [ kvE "type" (textE "object")
-                            , AppE (AppE (VarE '(.=)) (LitE (StringL "properties")))
-                                  (AppE (VarE 'object) $ ListE propExprs)
-                            , AppE (AppE (VarE '(.=)) (LitE (StringL "required")))
-                                  (ListE requiredExprs)
-                            ]
-                    in pure $ Just schemaExpr
-        _ -> pure Nothing
-  where
-    -- | Map record fields to JSON Schema property expressions.
-    -- Returns Nothing if any field type is unmappable.
-    mapFields :: [(Name, Bang, Type)] -> Maybe ([Exp], [Exp])
-    mapFields fields = do
-        results <- mapM mapField fields
-        let (propExprs, reqExprs) = unzip results
-        pure (propExprs, reqExprs)
-
-    -- | Map one field to (property expression, required name expression).
-    mapField :: (Name, Bang, Type) -> Maybe (Exp, Exp)
-    mapField (fieldName, _, fieldType) = do
-        schemaExp <- typeToJsonSchemaType fieldType
-        let propExpr = AppE (AppE (VarE '(.=)) (LitE (StringL (nameBase fieldName)))) schemaExp
-            reqExpr = LitE (StringL (nameBase fieldName))
-        pure (propExpr, reqExpr)
-
-    -- | Find a constructor by Name.
-    findCon :: Name -> [Con] -> Maybe Con
-    findCon target = listToMaybe . filter (\c -> conNameOf c == target)
-
-    -- | Extract constructor name.
-    conNameOf :: Con -> Name
-    conNameOf (NormalC n _)   = n
-    conNameOf (RecC n _)      = n
-    conNameOf (InfixC _ n _)  = n
-    conNameOf (ForallC _ _ c) = conNameOf c
-    conNameOf (GadtC (n:_) _ _) = n
-    conNameOf (RecGadtC (n:_) _ _) = n
-    conNameOf _ = error "conNameOf: unsupported"
 
 -- ── New generators: ToolCall, ToolResponse, FromJSON, execute, etc. ──────
 
@@ -935,6 +849,8 @@ triples, generates:
 PRE-CONTRACT: The list of pairs is non-empty; all request type names are unique;
   all names refer to in-scope type constructors; constructor names in tool specs
   are unique across all request types and exist in their respective request types.
+  Request types with tool specs must be record types with derived 'Generic' and
+  'ToSchema' instances.
 POST-CONTRACT: Returns a list of declarations that define the service library,
   its config, instances, builder function, and tool-related types and functions.
 -}

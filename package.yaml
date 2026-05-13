@@ -128,6 +128,7 @@ internal-libraries:
       - jose
       - telegram-bot-api
       - telegram-bot-simple
+      - openapi3
 
 tests:
   lazy-circus-test:
