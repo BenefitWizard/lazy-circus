@@ -145,3 +145,4 @@ tests:
       - lazy-circus
       - common-circus
       - hspec
+      - telegram-bot-api

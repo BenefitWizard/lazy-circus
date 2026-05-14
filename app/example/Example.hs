@@ -12,7 +12,7 @@ import DemoEnv
 import Example.DemoScenarios
 
 import LazyCircus.App.Default (DefaultApp)
-import LazyCircus.App.Service (NoServiceLib)
+import SimpleServiceLib (AllServices)
 import LazyCircus.Scenario (ScenarioProgram)
 import LazyCircus.Script (Script)
 
@@ -54,7 +54,7 @@ printConfigStatus config = do
     putStrLn $ "  SMTP:        " ++ cfgSmtpHost config ++ ":" ++ show (cfgSmtpPort config)
 
 -- | Run a single scenario and print its result.
-runAndPrint :: DefaultApp NoServiceLib -> String -> ScenarioProgram Script NoServiceLib () -> IO ()
+runAndPrint :: DefaultApp AllServices -> String -> ScenarioProgram Script AllServices () -> IO ()
 runAndPrint app label scenario = do
     putStrLn $ "\n🎭 " ++ label
     putStrLn $ replicate (4 + length label) '-'

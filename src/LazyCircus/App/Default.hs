@@ -211,7 +211,7 @@ newDefaultApp config = do
         asyncTasksVal <- newTQueueIO
         processCtx <- mkDefaultProcessContext
         let logFuncVal = mkLogFunc $ \_cs _src _lvl msg ->
-                hPutBuilder stdout (getUtf8Builder msg)
+                hPutBuilder stdout (getUtf8Builder msg <> "\n")
         let genLogFuncVal = mkGLogFunc $ \_cs msg ->
                 atomically $ writeTQueue logQueueVal msg
         let sqlLog = fromMaybe putStrLn (cfgSqlLogAction config)

@@ -271,6 +271,7 @@ test-suite lazy-circus-test
   main-is: Spec.hs
   other-modules:
       AIAgentSpec
+      BotAppSpec
       BotScenariosSpec
       DBLangSpec
       LogSpec

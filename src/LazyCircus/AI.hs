@@ -17,7 +17,8 @@ module LazyCircus.AI
     , solveWithAgentLoop
     ) where
 
-import Data.Aeson (FromJSON, Value, eitherDecodeStrictText, object, (.=))
+import Data.Aeson (FromJSON, Value (Object), eitherDecodeStrictText, object, (.=))
+import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Text (encodeToLazyText)
 import qualified Data.Text.Lazy as TL (toStrict)
 import LazyCircus.AI.POML (renderPOMLtoPrompt)
@@ -44,7 +45,7 @@ data AIRequest a = AIRequest
 
 -- | Default model used for AI completions.
 defaultModel :: Models.Model
-defaultModel = "deepseek-v4-flash"
+defaultModel = "deepseek-chat"
 
 -- | OpenAI API finish reason indicating the model wants to call tools.
 finishReasonToolCalls :: Text
@@ -112,14 +113,24 @@ encodeValueToText = TL.toStrict . encodeToLazyText
 
 -- | Convert a 'ToolDescription' to an OpenAI 'Tool.Function' wrapper.
 -- POST-CONTRACT: The returned tool has a name and description from the input,
---   parameters defaulting to @{"type": "object"}@ when absent.
+--   parameters defaulting to @{"type": "object"}@ when absent or amended with
+--   @\"type\": \"object\"@ when the generated schema lacks a top-level type.
 toOpenAITool :: ToolDescription -> Tool.Tool
 toOpenAITool ToolDescription{toolDescName, toolDescDescription, toolDescParameters} = Tool.Tool_Function Tool.Function
     { Tool.name = toolDescName
     , Tool.description = Just toolDescDescription
-    , Tool.parameters = toolDescParameters <|> Just (object ["type" .= ("object" :: Text)])
+    , Tool.parameters = ensureObjectType <$> toolDescParameters <|> Just (object ["type" .= ("object" :: Text)])
     , Tool.strict = Nothing
     }
+
+-- | Ensure a JSON Schema 'Value' has a top-level @\"type\": \"object\"@ field.
+-- DeepSeek and OpenAI require tool parameter schemas to be of @type: "object"@;
+-- 'toInlinedSchema' for sum types produces @oneOf@ schemas that lack this field.
+ensureObjectType :: Value -> Value
+ensureObjectType (Object m)
+    | KM.member "type" m = Object m
+    | otherwise = Object $ KM.insert "type" "object" m
+ensureObjectType v = v
 
 -- | Run a multi-turn agent loop with tool use.
 -- The loop sends the conversation history to the model, processes any
@@ -188,11 +199,22 @@ solveWithAgentLoop AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIteratio
                                         let argsValue = case eitherDecodeStrictText argsText of
                                                 Right v -> v
                                                 Left _ -> object ["raw_arguments" .= argsText]
+                                        logCtx <- view logContextL
+                                        glog $ AppLogMsgWithContext
+                                            { logMsg = SensitiveLogMsg $ "Agent tool call: " <> toolName <> " " <> argsText
+                                            , logContext = logCtx
+                                            , logCallSite = Nothing
+                                            }
                                         result <- tryAny $ liftIO $ exec toolName argsValue
                                         let encodedResult = case result of
                                                 Right v  -> encodeValueToText v
                                                 Left err -> encodeValueToText $ object
                                                     [ "error" .= (fromString (displayException err) :: Text) ]
+                                        glog $ AppLogMsgWithContext
+                                            { logMsg = SensitiveLogMsg $ "Agent tool result: " <> toolName <> " " <> encodedResult
+                                            , logContext = logCtx
+                                            , logCallSite = Nothing
+                                            }
                                         pure (callId, encodedResult)
                             let assistantMsg = Chat.Assistant
                                     { Chat.assistant_content = Just [Chat.Text $ Chat.messageToContent message]
@@ -211,11 +233,15 @@ solveWithAgentLoop AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIteratio
         | content == "" = pure Nothing
         | otherwise = case eitherDecodeStrictText content of
             Right a -> pure (Just a)
-            Left err -> do
-                logCtx <- view logContextL
-                glog $ AppLogMsgWithContext
-                    { logMsg = SensitiveLogMsg $ "Agent decode error: " <> fromString err
-                    , logContext = logCtx
-                    , logCallSite = Nothing
-                    }
-                pure Nothing
+            Left _ -> case eitherDecodeStrictText (wrapAsAgentResponse content) of
+                Right a -> pure (Just a)
+                Left err -> do
+                    logCtx <- view logContextL
+                    glog $ AppLogMsgWithContext
+                        { logMsg = SensitiveLogMsg $ "Agent decode error: " <> fromString err
+                        , logContext = logCtx
+                        , logCallSite = Nothing
+                        }
+                    pure Nothing
+
+    wrapAsAgentResponse = TL.toStrict . encodeToLazyText

@@ -10,11 +10,12 @@
 -- agent loop (solveWithAgentLoop) directly by mocking the OpenAI API client.
 module AIAgentSpec (spec) where
 
-import Data.Aeson (Value, object, (.=))
+import Data.Aeson (Value (..), object, (.=))
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
 import LazyCircus.AI (AgentRequest(..), HasAIMethods(..), solveWithAgentLoop)
 import LazyCircus.App.Default (DefaultApp)
-import LazyCircus.App.Service (HasToolCallExec(..), NoServiceLib, ToolCallExec(..), ToolDescription(..))
+import LazyCircus.App.Service (HasToolCallExec(..), ToolCallExec(..), ToolDescription(..))
+import SimpleServiceLib (AllServices)
 import LazyCircus.Scenario (evalScript)
 import LazyCircus.Scene.AI (solveWithAgent)
 import LazyCircus.Script (Script(..))
@@ -36,7 +37,7 @@ testConfig =
         }
 
 -- | Run a test action with a DefaultApp.
-withTestApp :: (DefaultApp NoServiceLib -> IO ()) -> IO ()
+withTestApp :: (DefaultApp AllServices -> IO ()) -> IO ()
 withTestApp action = withDemoApp testConfig $ \app -> action app
 
 -- | Create a ChatCompletionObject with a single Assistant choice.
@@ -199,7 +200,7 @@ spec = do
                 result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
                 result `shouldBe` Nothing
 
-            it "returns Nothing when API returns invalid JSON content" $ \app -> do
+            it "wraps plain-text content as JSON string fallback" $ \app -> do
                 let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
                         pure $ mockCompletion "not valid json {{{" Nothing "stop"
                     }
@@ -209,7 +210,7 @@ spec = do
                         , agentMaxIterations = 5
                         }
                 result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
-                result `shouldBe` Nothing
+                result `shouldBe` Just (String "not valid json {{{")
 
             it "returns Nothing when API returns empty choices" $ \app -> do
                 let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
