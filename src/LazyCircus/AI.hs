@@ -17,7 +17,7 @@ module LazyCircus.AI
     , solveWithAgentLoop
     ) where
 
-import Data.Aeson (FromJSON, Value (Object), eitherDecodeStrictText, object, (.=))
+import Data.Aeson (FromJSON, Object, Value (Object, String), eitherDecodeStrictText, object, (.=))
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Text (encodeToLazyText)
 import qualified Data.Text.Lazy as TL (toStrict)
@@ -41,11 +41,32 @@ data AIRequest a = AIRequest
     { prompt :: [POML]       -- ^ user-facing prompt fragments
     , systemPrompt :: [POML] -- ^ system-level instruction fragments
     , outputType :: Proxy a  -- ^ phantom proxy guiding JSON decode target
+    , thinkingEnabled :: Bool  -- ^ enable DeepSeek thinking mode
     }
 
 -- | Default model used for AI completions.
 defaultModel :: Models.Model
-defaultModel = "deepseek-chat"
+defaultModel = "deepseek-v4-flash"
+
+-- | Construct the DeepSeek thinking extra object.
+-- POST-CONTRACT: Returns 'Just' with @{"thinking": {"type": "enabled"}}@ when True, 'Nothing' when False.
+thinkingExtra :: Bool -> Maybe Object
+thinkingExtra True  = Just $ KM.fromList [("thinking", object ["type" .= ("enabled" :: Text)])]
+thinkingExtra False = Nothing
+
+-- | Log reasoning_content from a response message's extra field.
+-- POST-CONTRACT: Logs reasoning content when present; does nothing otherwise.
+logReasoningContent :: (HasGLogFunc env, GMsg env ~ AppLogMsgWithContext, HasLoggingContext env, MonadReader env m, MonadIO m) => Chat.Message content -> m ()
+logReasoningContent msg =
+    case KM.lookup "reasoning_content" =<< Chat.messageExtra msg of
+        Just (String reasoning) -> do
+            logCtx <- view logContextL
+            glog $ AppLogMsgWithContext
+                { logMsg = SensitiveLogMsg $ "AI reasoning: " <> reasoning
+                , logContext = logCtx
+                , logCallSite = Nothing
+                }
+        _ -> pure ()
 
 -- | OpenAI API finish reason indicating the model wants to call tools.
 finishReasonToolCalls :: Text
@@ -56,6 +77,7 @@ data AgentRequest a = AgentRequest
     { agentPrompt        :: [POML]    -- ^ user-facing prompt fragments
     , agentSystemPrompt  :: [POML]    -- ^ system-level instruction fragments
     , agentMaxIterations :: Natural   -- ^ maximum ReAct iterations before giving up (must be >= 0, guaranteed by 'Natural')
+    , thinkingEnabled :: Bool  -- ^ enable DeepSeek thinking mode
     }
 
 -- | Environment capability that exposes the OpenAI client methods used by this module.
@@ -67,27 +89,30 @@ PRE-CONTRACT: The environment provides OpenAI methods through 'aiMethodsL', and 
 POST-CONTRACT: Returns the decoded first response when present and decodable, otherwise 'Nothing'.
 -}
 askAI :: (HasAIMethods env, HasGLogFunc env, GMsg env ~ AppLogMsgWithContext, HasLoggingContext env, MonadReader env m, MonadIO m, FromJSON a) => AIRequest a -> m (Maybe a)
-askAI (AIRequest prompt systemPrompt _outputType) = do
+askAI (AIRequest prompt systemPrompt _outputType thinkingEnabled) = do
     V1.Methods{V1.createChatCompletion} <- view aiMethodsL
     let
-        req =
-            Chat._CreateChatCompletion
-                { Chat.model = defaultModel
-                , Chat.response_format = Just Chat.JSON_Object
-                , Chat.messages =
-                    [ Chat.System
-                        { content =
-                            [ Chat.Text $ renderPOMLtoPrompt systemPrompt
-                            ]
-                        , name = Nothing
-                        }
-                    , Chat.User
-                        { content = [Chat.Text $ renderPOMLtoPrompt prompt]
-                        , name = Nothing
-                        }
-                    ]
-                }
+        sysMsg = Chat.System
+            { content = [Chat.Text $ renderPOMLtoPrompt systemPrompt]
+            , name = Nothing
+            , extra = Nothing
+            }
+        usrMsg = Chat.User
+            { content = [Chat.Text $ renderPOMLtoPrompt prompt]
+            , name = Nothing
+            , extra = Nothing
+            }
+        req = Chat._CreateChatCompletion
+            { Chat.model = defaultModel
+            , Chat.response_format = Just Chat.JSON_Object
+            , Chat.messages = [sysMsg, usrMsg]
+            , Chat.extra = thinkingExtra thinkingEnabled
+            }
     Chat.ChatCompletionObject{choices} <- liftIO $ createChatCompletion req
+    -- Log reasoning_content if present (DeepSeek thinking mode)
+    case choices !? 0 of
+        Just Chat.Choice{message} -> logReasoningContent message
+        Nothing -> pure ()
     let rawContent = do
             Chat.Choice{message} <- choices !? 0
             pure $ Chat.messageToContent message
@@ -154,16 +179,18 @@ solveWithAgentLoop ::
     , MonadUnliftIO m
     , FromJSON b
     ) => AgentRequest b -> m (Maybe b)
-solveWithAgentLoop AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations} = go agentMaxIterations initialMessages
+solveWithAgentLoop AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations, thinkingEnabled} = go agentMaxIterations initialMessages
   where
     initialMessages = V.fromList
         [ Chat.System
             { content = [Chat.Text $ renderPOMLtoPrompt agentSystemPrompt]
             , name = Nothing
+            , extra = Nothing
             }
         , Chat.User
             { content = [Chat.Text $ renderPOMLtoPrompt agentPrompt]
             , name = Nothing
+            , extra = Nothing
             }
         ]
 
@@ -180,6 +207,7 @@ solveWithAgentLoop AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIteratio
                 , Chat.messages = history
                 , Chat.tools = tools
                 , Chat.tool_choice = guard (not (null toolDescs)) >> Just Tool.ToolChoiceAuto
+                , Chat.extra = thinkingExtra thinkingEnabled
                 }
                 -- NOTE: response_format is NOT set for agent-loop requests because the model
                 -- must be free to return tool_calls during intermediate rounds. The system prompt
@@ -222,12 +250,15 @@ solveWithAgentLoop AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIteratio
                                     , Chat.name = Nothing
                                     , Chat.assistant_audio = Nothing
                                     , Chat.tool_calls = Just tcs
+                                    , Chat.extra = Chat.messageExtra message  -- preserve reasoning_content for DeepSeek thinking
                                     }
                                 toolMsgs = map (\(tid, result) ->
-                                    Chat.Tool { content = [Chat.Text result], tool_call_id = tid }
+                                    Chat.Tool { content = [Chat.Text result], tool_call_id = tid, extra = Nothing }
                                     ) toolResults
                             go (remaining - 1) (history <> V.fromList (assistantMsg : toolMsgs))
-                    _ -> decodeContent (Chat.messageToContent message)
+                    _ -> do
+                        logReasoningContent message
+                        decodeContent (Chat.messageToContent message)
 
     decodeContent content
         | content == "" = pure Nothing

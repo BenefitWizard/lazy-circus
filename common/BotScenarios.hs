@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
@@ -122,6 +123,7 @@ askAgent userQuery = do
                 { agentPrompt = [text userQuery]
                 , agentSystemPrompt = circusAgentSystemPrompt
                 , agentMaxIterations = defaultAgentMaxIterations
+                , thinkingEnabled = False
                 }
         mResult <- evalScript $ aiScriptWithAll $ solveWithAgent req
         case mResult of
@@ -181,6 +183,7 @@ mkReactionRequest name desc =
         { systemPrompt = reactionSystemPrompt
         , prompt = reactionUserPrompt name desc
         , outputType = Proxy @AudienceReaction
+        , thinkingEnabled = False
         }
 
 {- | Create a circus act, generate an AI audience reaction, update the act, and send a notification email.

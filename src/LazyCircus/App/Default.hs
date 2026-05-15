@@ -354,7 +354,7 @@ logAppFromDefaultApp app =
     let
         logFunc' = app ^. logFuncL
         genLogFunc' = mkGLogFunc $ \_cs msg ->
-            hPutBuilder stdout (getUtf8Builder (display msg))
+            hPutBuilder stdout (getUtf8Builder (display msg) <> "\n")
         logQueue' = app ^. logQueueL
      in
         LogApp logFunc' genLogFunc' logQueue'

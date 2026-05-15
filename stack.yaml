@@ -39,8 +39,8 @@ extra-deps:
   - openapi3-3.2.4@sha256:7309864a9a59b4654b21ef477444fb26bf8d393eba795dd8de089b368ea74c2a,4982
   - QuickCheck-2.15.0.1@sha256:0cfd337bb9e6fbf09255bd24bb498a156f1d9bcd465396ac8657b25034b9ee31,9046
   - servant-auth-0.4.9.2@sha256:864fd0b2f439df23db75b119b4de5cccc13f4d1c0ba26934a917e96cf11f2cf7,2190
-  - github: MercuryTechnologies/openai
-    commit: 0246105e18f52f9c509b36f0769a137a8f822a93
+  - github: Ecialo/openai
+    commit: 08424bda5f5952347bacf3c4dda0300672bc6483
   - github: Ecialo/servant-multipart
     commit: edfcefbfc3ce3ed4ce7dd2c2c307383b6667ba2c
     subdirs:
