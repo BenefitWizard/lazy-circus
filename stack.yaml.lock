@@ -26,6 +26,17 @@ packages:
   original:
     hackage: servant-auth-0.4.9.2@sha256:864fd0b2f439df23db75b119b4de5cccc13f4d1c0ba26934a917e96cf11f2cf7,2190
 - completed:
+    name: openai
+    pantry-tree:
+      sha256: c6893a2e83001ec5b0605fd5cf52b382211b7a2a09ad69176b8e6c84c285af94
+      size: 5111
+    sha256: 82eb611ae2cab01518ea4af4ae377f3807bf17bfaa58396774754ffd50c2d037
+    size: 2601516
+    url: https://github.com/Ecialo/openai/archive/08424bda5f5952347bacf3c4dda0300672bc6483.tar.gz
+    version: 2.5.3
+  original:
+    url: https://github.com/Ecialo/openai/archive/08424bda5f5952347bacf3c4dda0300672bc6483.tar.gz
+- completed:
     name: servant-multipart-client
     pantry-tree:
       sha256: ff20381718c9e0ba032f30658dad2f7f76553dd58597fcc8464fb5e4cb95397f
