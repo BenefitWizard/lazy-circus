@@ -400,7 +400,7 @@ evalScript $ aiScriptWith [AddTool, SubtractTool] $ ask myRequest
 
 ## Adding A New Effect
 
-To add a new scene language, follow the same structure as DB, Telegram, AI, and Mail.
+To add a new scene language, follow the same structure as DB, Telegram, AI, Mail, and HTTP.
 
 ### Step 1. Define The Functor And Smart Constructors
 
@@ -489,8 +489,8 @@ Update the default performer if the new effect needs a special environment proje
 ### Step 4. Add The Public Facade And Optional Top-Level Smart Constructor
 
 Public effects in this repository usually also get a stable facade module such as
-`LazyCircus.Scene.Telegram`, `LazyCircus.Scene.AI`, `LazyCircus.Scene.Mail`, or
-`LazyCircus.Scene.DB`.
+`LazyCircus.Scene.Telegram`, `LazyCircus.Scene.AI`, `LazyCircus.Scene.Mail`,
+`LazyCircus.Scene.DB`, or `LazyCircus.Scene.HTTP`.
 
 Typical facade shape:
 
@@ -510,7 +510,7 @@ import LazyCircus.Scene.MyEffect.Class
 import LazyCircus.Scene.MyEffect.Lang
 ```
 
-If the effect should have a convenience wrapper like `tgScript`, `mailScript`, or `aiScript`,
+If the effect should have a convenience wrapper like `tgScript`, `mailScript`, `aiScript`, or `httpScript`,
 also update `LazyCircus.hs`. There is intentionally no DB smart constructor, so add a new one
 only when the public API genuinely benefits from it.
 
@@ -525,7 +525,7 @@ only when the public API genuinely benefits from it.
 - `Script` constructor added
 - `ScenarioPerformer script serviceLib` dispatch updated
 - stable `LazyCircus.Scene.MyEffect` facade added when the effect is public
-- optional top-level smart constructor added only when the effect should mirror `tgScript`, `mailScript`, or `aiScript`
+- optional top-level smart constructor added only when the effect should mirror `tgScript`, `mailScript`, `aiScript`, or `httpScript`
 - default and test runtimes updated as needed
 
 ## Detailed Pitfalls

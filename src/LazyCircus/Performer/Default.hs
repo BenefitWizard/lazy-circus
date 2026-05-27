@@ -1,22 +1,23 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Production interpreter that wires every LazyCircus free language
--- (Telegram, Mail, AI, Database) into concrete RIO-based handler instances.
+-- (Telegram, Mail, AI, Database, HTTP) into concrete RIO-based handler instances.
 --
 -- PURPOSE: Provide the default performer newtype and all its interpreter
 -- instances so that a ScenarioProgram over the Script coproduct can be
--- executed against real services (Telegram API, SMTP, OpenAI, PostgreSQL).
+-- executed against real services (Telegram API, SMTP, OpenAI, PostgreSQL, HTTP).
 -- SCOPE: DefaultPerformer newtype, environment retargeting, NoBotConfigured
--- exception, and interpreter instances for TelegramScriptPerformer,
--- MailScriptPerformer, AILangPerformer, ScenarioPerformer, and KnownHowToEval.
+-- exception, AppWithClientEnv wrapper, and interpreter instances for
+-- TelegramScriptPerformer, MailScriptPerformer, AILangPerformer,
+-- HTTPPerformer, ScenarioPerformer, and KnownHowToEval.
 module LazyCircus.Performer.Default (
     DefaultPerformer (..),
     changeEnv,
     NoBotConfigured (..),
+    AppWithClientEnv (..),
     -- runDefaultScenario,
 ) where
 
-import Control.Monad.Free.Church qualified as FC
 import LazyCircus.AI (askAI, solveWithAgentLoop)
 import LazyCircus.App.Default
 import LazyCircus.App.Log
@@ -29,6 +30,7 @@ import LazyCircus.Mail qualified as Mail
 import LazyCircus.Scenario
 import LazyCircus.Scene.AI.Class (AILangPerformer (..), runAI)
 import LazyCircus.Scene.DB.Class (runDB)
+import LazyCircus.Scene.HTTP.Class (HTTPPerformer (..), runHTTP)
 import LazyCircus.Scene.Mail.Class (MailScriptPerformer (..), runMail)
 import LazyCircus.Scene.Telegram.Class (TelegramScriptPerformer (..), runTelegram)
 import LazyCircus.Script
@@ -37,6 +39,7 @@ import LazyCircus.Telegram.Types (AppWithBotEnv (..))
 import RIO
 import RIO.Map qualified as M
 import RIO.Time (getCurrentTime)
+import Servant.Client (ClientEnv, mkClientEnv, runClientM)
 
 -- | Newtype wrapper that equips a RIO environment with production interpreter instances.
 newtype DefaultPerformer env a = DefaultPerformer
@@ -62,6 +65,22 @@ newtype NoBotConfigured = NoBotConfigured Text
 -- | Allows NoBotConfigured to be thrown and caught as a typed exception.
 instance Exception NoBotConfigured
 
+-- | Attaches a concrete servant-client environment to an arbitrary application environment.
+data AppWithClientEnv app = AppWithClientEnv
+    { appClientEnv :: ClientEnv
+    , appOuter     :: app
+    }
+
+-- ORPHAN: HasLogQueue for AppWithClientEnv, needed by runHTTP.
+-- Delegates through appOuter.
+instance (HasLogQueue app) => HasLogQueue (AppWithClientEnv app) where
+    logQueueL = lens appOuter (\x y -> x{appOuter = y}) . logQueueL
+
+-- ORPHAN: HasLoggingContext for AppWithClientEnv, needed by runHTTP.
+-- Delegates through appOuter.
+instance (HasLoggingContext app) => HasLoggingContext (AppWithClientEnv app) where
+    logContextL = lens appOuter (\x y -> x{appOuter = y}) . logContextL
+
 -- | Delegates every Telegram operation to the concrete Telegram client
 -- running inside the supplied AppWithBotEnv.
 instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv (DefaultApp serviceLib))) where
@@ -83,6 +102,12 @@ instance MailScriptPerformer (DefaultPerformer (DefaultApp serviceLib)) where
 instance AILangPerformer (DefaultPerformer (DefaultApp serviceLib)) where
     ask' = askAI
     solveWithAgent' = solveWithAgentLoop
+
+-- | Executes servant-client actions against the real HTTP backend using the client environment.
+instance HTTPPerformer (DefaultPerformer (AppWithClientEnv (DefaultApp serviceLib))) where
+    runClient' act = do
+        clientEnv <- asks appClientEnv
+        liftIO $ runClientM act clientEnv
 
 -- | Full ScenarioPerformer instance for the DefaultPerformer.
 -- Wires orchestration primitives (logging, async, service calls, datetime,
@@ -115,15 +140,15 @@ instance
         local (logContextL %~ (`putInLoggingContext` values)) (run act)
 
 -- | Dispatches the Script coproduct to the correct domain interpreter
--- (Telegram, Mail, AI, or Database) using evalScriptDefault.
+-- (Telegram, Mail, AI, Database, HTTP) using evalScriptDefault.
 instance KnownHowToEval Script (DefaultPerformer (DefaultApp serviceLib)) where
     evalSubScript = evalScriptDefault
 
 -- | Pattern-matches on the Script coproduct and delegates each variant to its
--- corresponding language runner (runTelegram, runMail, runAI, runDB).
+-- corresponding language runner (runTelegram, runMail, runAI, runDB, runHTTP).
 -- PRE-CONTRACT: Telegram scripts require the requested bot name to be present
 -- in the environment's botEnvs map; DB scripts require a configured PostgreSQL
--- connection.
+-- connection; HTTP scripts require a reachable BaseUrl.
 -- POST-CONTRACT: Each script variant is executed in its own interpreter context
 -- with the appropriate environment projection applied.
 evalScriptDefault :: Script a -> DefaultPerformer (DefaultApp serviceLib) a
@@ -142,3 +167,7 @@ evalScriptDefault (DBScriptDef db mode scr) = do
             fallbackConn <- view postgresL
             pure $ fromMaybe fallbackConn mReadOnlyConn
     changeEnv (AppWithConnection conn) (runDB db mode scr)
+evalScriptDefault (HTTPScriptDef baseUrl scr) = do
+    manager <- view httpManagerL
+    let clientEnv = mkClientEnv manager baseUrl
+    changeEnv (AppWithClientEnv clientEnv) (runHTTP scr)

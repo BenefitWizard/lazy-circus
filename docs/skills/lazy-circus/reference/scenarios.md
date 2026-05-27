@@ -15,11 +15,12 @@ flowchart TB
         TG["TelegramScript a"]
         AI["AIScript a"]
         MAIL["MailScript a"]
+        HTTP["HTTPScript a"]
         LOG["LogLangF via HasLogLang"]
     end
 
     subgraph ScriptLayer["Script Coproduct"]
-        SCRIPT["Script a<br/>TelegramScriptDef<br/>MailScriptDef<br/>AIScriptDef<br/>DBScriptDef"]
+        SCRIPT["Script a<br/>TelegramScriptDef<br/>MailScriptDef<br/>AIScriptDef<br/>DBScriptDef<br/>HTTPScriptDef"]
     end
 
     subgraph ScenarioLayer["Scenario Layer"]
@@ -36,10 +37,12 @@ flowchart TB
     TG --> SCRIPT
     AI --> SCRIPT
     MAIL --> SCRIPT
+    HTTP --> SCRIPT
     LOG -.->|embedded in| DB
     LOG -.->|embedded in| TG
     LOG -.->|embedded in| AI
     LOG -.->|embedded in| MAIL
+    LOG -.->|embedded in| HTTP
     SCRIPT --> SCEN
     SCEN --> PERF
     PERF --> DEF
@@ -53,14 +56,14 @@ flowchart TB
 - `LazyCircus.Performer`: generic `ScenarioPerformer Script` dispatch
 - `LazyCircus.Performer.Default`: production interpreter stack
 - `LazyCircus.Testing.Performer`: mock-based test interpreter
-- `LazyCircus.Scene.DB`, `LazyCircus.Scene.Telegram`, `LazyCircus.Scene.AI`, `LazyCircus.Scene.Mail`: stable public facades that re-export scene APIs and logging helpers
+- `LazyCircus.Scene.DB`, `LazyCircus.Scene.Telegram`, `LazyCircus.Scene.AI`, `LazyCircus.Scene.Mail`, `LazyCircus.Scene.HTTP`: stable public facades that re-export scene APIs and logging helpers
 - `LazyCircus.Scene.*.Lang`: each effect language
 - `LazyCircus.Scene.*.Class`: each effect performer interface and runner
 
 Important implementation details:
 
 - each language runner uses `iterM`
-- `ScenarioProgram`, `DBScript`, `TelegramScript`, `AIScript`, and `MailScript` are Church-encoded free monads
+- `ScenarioProgram`, `DBScript`, `TelegramScript`, `AIScript`, `MailScript`, and `HTTPScript` are Church-encoded free monads
 - logging is embedded into each language functor via `HasLogLang`
 
 ## Writing Scenarios

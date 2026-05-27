@@ -52,6 +52,7 @@ import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.DB.Types (PgDB)
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
+import LazyCircus.Performer.Default (AppWithClientEnv (..))
 import LazyCircus.Performer.Default qualified as Default
 import LazyCircus.Scenario
     ( DbMode (..)
@@ -63,6 +64,7 @@ import LazyCircus.Scenario
 import LazyCircus.Scene.AI.Class (AILangPerformer (..), runAI)
 import LazyCircus.Scene.DB.Class (HasDbConnection (..), runDB)
 import LazyCircus.Scene.DB.Lang (DBScript)
+import LazyCircus.Scene.HTTP.Class (HTTPPerformer (..), runHTTP)
 import LazyCircus.Scene.Mail.Class (MailScriptPerformer (..), runMail)
 import LazyCircus.Scene.Telegram.Class (TelegramScriptPerformer (..), runTelegram)
 import LazyCircus.Scene.Telegram.Lang (TelegramScript)
@@ -75,6 +77,7 @@ import RIO
 import RIO.Map qualified as M
 import RIO.Process (HasProcessContext (..))
 import RIO.Time (getCurrentTime)
+import Servant.Client (mkClientEnv, runClientM)
 import Telegram.Bot.API (Message, Response, SendMessageRequest)
 import Telegram.Bot.API.Types (File, FileId)
 
@@ -221,6 +224,10 @@ instance HasToolDescriptions (EnvWithMocks serviceLib) where
 instance HasToolCallExec (EnvWithMocks serviceLib) where
     toolCallExecL = lens defaultApp (\env app -> env{defaultApp = app}) . toolCallExecL
 
+-- | Delegates HTTP manager access to the wrapped DefaultApp.
+instance App.HasHttpManager (EnvWithMocks serviceLib) where
+    httpManagerL = lens defaultApp (\env app -> env{defaultApp = app}) . App.httpManagerL
+
 -- | Re-target a test action to an outer environment via a pure projection.
 changeEnv :: (outer -> inner) -> TestPerformer inner a -> TestPerformer outer a
 changeEnv f (TestPerformer action) = TestPerformer (mapRIO f action)
@@ -247,6 +254,12 @@ instance MailScriptPerformer (TestPerformer (EnvWithMocks serviceLib)) where
 instance AILangPerformer (TestPerformer (EnvWithMocks serviceLib)) where
     ask' _ = pure Nothing
 
+-- | Executes servant-client actions against the real HTTP backend using the client environment.
+instance HTTPPerformer (TestPerformer (AppWithClientEnv (EnvWithMocks serviceLib))) where
+    runClient' act = do
+        clientEnv <- asks appClientEnv
+        liftIO $ runClientM act clientEnv
+
 -- | Dispatches top-level scripts using the same environment-projection model as production.
 instance KnownHowToEval Script (TestPerformer (EnvWithMocks serviceLib)) where
     evalSubScript = runScript
@@ -271,6 +284,10 @@ runScript (TelegramScriptDef botName script) = runTelegramWithMockLogging botNam
 runScript (MailScriptDef script) = runMail script
 runScript (AIScriptDef descs script) = local (toolDescriptionsL .~ descs) $ runAI script
 runScript (DBScriptDef db mode script) = runDBWithMockLogging db mode script
+runScript (HTTPScriptDef baseUrl scr) = do
+    manager <- view App.httpManagerL
+    let clientEnv = mkClientEnv manager baseUrl
+    changeEnv (AppWithClientEnv clientEnv) (runHTTP scr)
 
 -- | Run a 'ScenarioProgram' using production-style dispatch and test async semantics.
 -- POST-CONTRACT: Async scenarios are captured in mock state rather than executed.

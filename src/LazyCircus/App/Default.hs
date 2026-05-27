@@ -27,6 +27,7 @@ module LazyCircus.App.Default
     , HasBotEnvs(..)
     , HasExtraContext(..)
     , HasMailCreds(..)
+    , HasHttpManager(..)
       -- * Helpers
     , constructHFromMList
     , constructFromMList
@@ -47,6 +48,7 @@ import LazyCircus.Scene.DB.Class (HasDbConnection (..))
 import LazyCircus.Script (Script)
 import LazyCircus.Telegram (makeBotEnv)
 import LazyCircus.Telegram.Types (BotEnv)
+import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.Mail.SMTP
 import OpenAI.V1 (Methods, getClientEnv, makeMethods)
@@ -170,6 +172,8 @@ data DefaultApp serviceLib = App
     -- ^ tool descriptions available to AI interpreters
     , toolCallExec :: ToolCallExec
     -- ^ closure that dispatches named tool calls with JSON arguments
+    , httpManager :: Manager
+    -- ^ shared TLS connection manager for HTTP client requests
     }
 
 {- | Construct a fully initialized DefaultApp from raw configuration values.
@@ -234,6 +238,7 @@ newDefaultApp config = do
             , serviceLib = cfgServiceLib config
             , appToolDescriptions = []
             , toolCallExec = ToolCallExec $ \_ _ -> fail "ToolCallExec not initialized: set via toolCallExecL after newDefaultApp"
+            , httpManager = manager
             }
 
 -- | Capability for accessing initialized Telegram bot environments from a reader environment.
@@ -247,6 +252,10 @@ class HasExtraContext env where
 -- | Capability for accessing SMTP credentials from a reader environment.
 class HasMailCreds env where
     mailCredsL :: Lens' env MailCreds
+
+-- | Capability for accessing the shared HTTP connection manager from a reader environment.
+class HasHttpManager env where
+    httpManagerL :: Lens' env Manager
 
 -- | Satisfies HasLogFunc by delegating to the logFunc field.
 instance HasLogFunc (DefaultApp serviceLib) where
@@ -288,6 +297,10 @@ instance HasBotEnvs (DefaultApp serviceLib) where
 -- | Satisfies HasMailCreds by delegating to the mailCreds field.
 instance HasMailCreds (DefaultApp serviceLib) where
     mailCredsL = lens mailCreds (\x y -> x{mailCreds = y})
+
+-- | Satisfies HasHttpManager by delegating to the httpManager field.
+instance HasHttpManager (DefaultApp serviceLib) where
+    httpManagerL = lens httpManager (\x y -> x{httpManager = y})
 
 -- | Satisfies HasExtraContext by delegating to the extraContext field.
 instance HasExtraContext (DefaultApp serviceLib) where

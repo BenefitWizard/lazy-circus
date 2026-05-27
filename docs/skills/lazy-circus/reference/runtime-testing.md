@@ -37,6 +37,8 @@ Note: `runDefaultScenario` is not currently exported. Production scenarios are r
 - JWT settings, process context, and a SQL log hook
 - service library (or `NoServiceLib`)
 - tool descriptions available to AI interpreters
+- tool call executor for dispatching named tool calls with JSON arguments
+- shared TLS connection manager for HTTP client requests
 
 ### Wrapper Environments
 
@@ -79,7 +81,7 @@ There are two important execution entry points:
 
 The generic `ScenarioPerformer Script serviceLib` instance:
 
-- dispatches `Script` by calling `runTelegram`, `runMail`, `runAI`, and `runDB`
+- dispatches `Script` by calling `runTelegram`, `runMail`, `runAI`, `runDB`, and `runHTTP`
 - uses `async` directly for `runAsync`
 - returns `mempty` from `getExtraContext'`
 
@@ -107,7 +109,7 @@ The test runtime is not a separate reimplementation of scenario semantics. It ke
 shared-runner architecture as production:
 
 - `ScenarioProgram` still runs through the normal scenario interpreter machinery
-- top-level `Script` dispatch still chooses DB, Telegram, Mail, and AI branches the same way
+- top-level `Script` dispatch still chooses DB, Telegram, Mail, AI, and HTTP branches the same way
 - environment projection still happens through wrappers like `AppWithConnection` and `AppWithBotEnv`
 
 The main difference is the capability layer behind that runner:
@@ -116,6 +118,7 @@ The main difference is the capability layer behind that runner:
 - Telegram capability is replaced with capture-oriented mocks
 - Mail capability reuses real mail construction but captures sends
 - AI capability returns mock values (`Nothing` by default)
+- HTTP capability executes real servant-client requests via the configured manager and base URL
 - async capability captures scheduled scenarios instead of executing them
 - logging capability captures structured entries instead of draining the production queue
 
@@ -177,6 +180,7 @@ These run one sub-language in isolation with mock logging:
 | Mail `sendMail` | captures mail values |
 | Mail `makeMail` | uses real mail construction from env creds |
 | AI `ask` | always returns `Nothing` |
+| HTTP `runClient` | real execution via servant-client against target base URL |
 | DB | runs against a real DB connection |
 | Logging | captured in refs, not pushed to shared queue |
 | `runAsync` | captures scenario without executing it |

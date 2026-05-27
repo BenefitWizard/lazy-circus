@@ -2,9 +2,9 @@
 
 Read this when:
 
-- using or reviewing `DBScript`, `TelegramScript`, `AIScript`, or `MailScript`
+- using or reviewing `DBScript`, `TelegramScript`, `AIScript`, `MailScript`, or `HTTPScript`
 - checking scene-level logging APIs
-- deciding whether to use `tgScript`, `mailScript`, `aiScript`, or `DBScriptDef`
+- deciding whether to use `tgScript`, `mailScript`, `aiScript`, `httpScript`, or `DBScriptDef`
 
 ## Effect Languages
 
@@ -212,11 +212,50 @@ welcomeMail recipient = do
 
 Wrap Mail scripts with `mailScript`.
 
+## HTTP
+
+Module: `LazyCircus.Scene.HTTP.Lang`
+
+Program type:
+
+```haskell
+type HTTPScript = F HTTPLangF
+```
+
+Main operation:
+
+| Function | Result |
+|---|---|
+| `runClient` | `Either ClientError a` |
+
+`runClient` takes a `ClientM a` action (from servant-client) and lifts it into the HTTP script language. The result is `Either ClientError a` — `Left` for network or decode failures, `Right` for success.
+
+Example:
+
+```haskell
+import Servant.Client (ClientM, BaseUrl(..), mkClientEnv)
+
+fetchData :: ClientM MyData -> HTTPScript (Either ClientError MyData)
+fetchData request = runClient request
+```
+
+Production HTTP behavior:
+
+- uses the shared `httpManager` from `DefaultApp` to create a `ClientEnv`
+- dispatches the servant-client action via `runClientM`
+- returns `Left ClientError` on connection or decode failures
+
+Wrap HTTP scripts with `httpScript`, passing the target `BaseUrl`:
+
+```haskell
+evalScript $ httpScript (BaseUrl Https "api.example.com" 443 "") $ runClient myRequest
+```
+
 ## Logging Inside Scene Languages
 
 Module: `LazyCircus.Scene.Log`
 
-Use these inside DB, Telegram, AI, and Mail scripts:
+Use these inside DB, Telegram, AI, Mail, and HTTP scripts:
 
 - `slogInfo`
 - `slogWarn`

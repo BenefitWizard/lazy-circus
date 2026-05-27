@@ -116,13 +116,13 @@ Lazy Circus is an effect framework for Haskell built on **Church-encoded free mo
 │  (logging, errors, time, async, context, services)   │
 ├──────────────────────────────────────────────────────┤
 │  Script a                                            │  Coproduct (sum of effects)
-│  TelegramScript | MailScript | AIScript | DBScript   │
+│  TelegramScript | MailScript | AIScript | DBScript | HTTPScript │
 ├──────────────────────────────────────────────────────┤
 │  Scene-DSL  (DBLangF, TelegramScriptF, ...)          │  Effect Functors (GADT)
 │  + built-in LogLangF for logging                     │
 ├──────────────────────────────────────────────────────┤
 │  Performer  (typeclass-interpreters)                 │  Execution Layer
-│  runDB, runTelegram, runAI, runMail                  │
+│  runDB, runTelegram, runAI, runMail, runHTTP          │
 │  + DefaultPerformer for production                   │
 └──────────────────────────────────────────────────────┘
 ```
@@ -141,6 +141,7 @@ Each effect is described as a GADT functor. Church-encoding (`F`) transforms it 
 | Telegram | `TelegramScript a` | `LazyCircus.Scene.Telegram` |
 | AI | `AIScript a` | `LazyCircus.Scene.AI` |
 | Mail | `MailScript a` | `LazyCircus.Scene.Mail` |
+| HTTP | `HTTPScript a` | `LazyCircus.Scene.HTTP` |
 | Logging | built into all languages | `LazyCircus.Scene.Log` |
 
 ### Example: DB Script
@@ -205,6 +206,15 @@ getAnswer :: AIRequest MyResponse -> AIScript (Maybe MyResponse)
 getAnswer request = ask request
 ```
 
+### Example: HTTP Script
+
+```haskell
+import LazyCircus.Scene.HTTP
+
+fetchData :: ClientM MyData -> HTTPScript (Either ClientError MyData)
+fetchData request = runClient request
+```
+
 ### Logging inside any script
 
 All Scene languages have built-in logging via `HasLogLang`:
@@ -227,12 +237,13 @@ swithLogCtx [("user_id", "42")] $ do
 `Script` is a GADT that wraps any sub-language into a single type. Using smart constructors:
 
 ```haskell
-import LazyCircus (tgScript, mailScript, aiScript)
+import LazyCircus (tgScript, mailScript, aiScript, httpScript)
 
 -- Wrap sub-languages
 tgScript "my-bot-name"   myTelegramScript  :: Script b
 mailScript               myMailScript      :: Script b
 aiScript                 myAIScript        :: Script b
+httpScript myBaseUrl     myHTTPScript      :: Script b
 ```
 
 `aiScript` wraps with an empty tool-description list. For tool-aware AI scripts, use `AIScriptDef` directly or the TH-generated `aiScriptWithAll` / `aiScriptWith` smart constructors (see [Section 8](#8-adding-a-new-effect)).
@@ -302,6 +313,7 @@ Each sub-language has its own typeclass interpreter:
 | `TelegramScriptPerformer m` | `runTelegram :: TelegramScript a -> m a` |
 | `AILangPerformer m` | `runAI :: AIScript a -> m a` |
 | `MailScriptPerformer m` | `runMail :: MailScript a -> m a` |
+| `HTTPPerformer m` | `runHTTP :: HTTPScript a -> m a` |
 | `ScenarioPerformer script serviceLib m` | `run :: ScenarioProgram script serviceLib a -> m a` |
 
 Interpretation occurs via `iterM` — folding the Church-encoded free monad into the target monadic context.
@@ -310,7 +322,7 @@ Interpretation occurs via `iterM` — folding the Church-encoded free monad into
 
 All sub-languages use a common `handleLogLang` handler, which:
 1. Extracts the current `LoggingContext` from the reader environment
-2. Adds a language tag (`"DB"`, `"Telegram"`, `"AI"`, `"Mail"`)
+2. Adds a language tag (`"DB"`, `"Telegram"`, `"AI"`, `"Mail"`, `"HTTP"`)
 3. Extracts the call site
 4. Writes to a shared `TQueue`
 
@@ -341,6 +353,8 @@ runRIO app $ runDefaultPerformer $ run @Script @serviceLib myScenario
 - `ScheduledActions` — queue of async tasks
 - `serviceLib` — in-process service handlers (or `NoServiceLib`)
 - `appToolDescriptions` — tool descriptions available to AI interpreters
+- `toolCallExec` — closure that dispatches named tool calls with JSON arguments
+- `httpManager` — shared TLS connection manager for HTTP client requests
 
 ---
 
@@ -400,7 +414,7 @@ The `LazyCircus.Testing.Performer` module provides a mock interpreter for tests:
 Tests reuse the same high-level runner structure as production:
 
 - `ScenarioProgram` is interpreted through the normal scenario machinery
-- `Script` dispatch still routes into DB / Telegram / Mail / AI branches
+- `Script` dispatch still routes into DB / Telegram / Mail / AI / HTTP branches
 - environment projection still happens through wrapper envs such as `AppWithConnection` and `AppWithBotEnv`
 
 What changes is the capability layer underneath that runner:
@@ -409,6 +423,7 @@ What changes is the capability layer underneath that runner:
 - Telegram uses capture mocks for immediate and scheduled sends
 - Mail uses real mail building but mocked send capture
 - AI returns mock answers (`Nothing` by default)
+- HTTP executes real servant-client requests via the configured manager and base URL
 - `runAsync` records deferred scenarios instead of executing them
 - logging is captured as structured messages with context and call-site metadata
 
@@ -464,6 +479,7 @@ tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
 | Mail `sendMail` | Capture Mail values |
 | Mail `makeMail` | Actual creation via SMTP credentials from env |
 | AI `ask` | Always returns `Nothing` |
+| HTTP `runClient` | Real execution via servant-client against target base URL |
 | DB | Real execution against DB (requires test database) |
 | Logging | Capture in ref-lists (no production queue writes) |
 | `runAsync` | Capture ScenarioProgram without execution |

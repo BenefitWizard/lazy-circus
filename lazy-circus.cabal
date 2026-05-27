@@ -56,6 +56,9 @@ library
       LazyCircus.Scene.DB.Class
       LazyCircus.Scene.DB.Lang
       LazyCircus.Scene.DB.RLS
+      LazyCircus.Scene.HTTP
+      LazyCircus.Scene.HTTP.Class
+      LazyCircus.Scene.HTTP.Lang
       LazyCircus.Scene.Log
       LazyCircus.Scene.Mail
       LazyCircus.Scene.Mail.Class
@@ -274,6 +277,7 @@ test-suite lazy-circus-test
       BotAppSpec
       BotScenariosSpec
       DBLangSpec
+      HTTPLangSpec
       LogSpec
       ServiceCallSpec
       TestDbSupport
