@@ -19,12 +19,14 @@ import RIO.Map qualified as M
 import SimpleService
     ( AddExpressionRequest (..),
       AddExpressionResponse (..),
-      AllServices (..),
-      AllServicesConfig (..),
       SimpleRequest (..),
       SimpleResponse (..),
       handleAddExpressionRequest,
-      handleSimpleRequest,
+      handleSimpleRequest
+    )
+import SimpleServiceLib
+    ( AllServices (..),
+      AllServicesConfig (..),
       mkAllServices
     )
 import Test.Hspec

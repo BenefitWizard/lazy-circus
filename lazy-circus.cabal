@@ -56,6 +56,9 @@ library
       LazyCircus.Scene.DB.Class
       LazyCircus.Scene.DB.Lang
       LazyCircus.Scene.DB.RLS
+      LazyCircus.Scene.HTTP
+      LazyCircus.Scene.HTTP.Class
+      LazyCircus.Scene.HTTP.Lang
       LazyCircus.Scene.Log
       LazyCircus.Scene.Mail
       LazyCircus.Scene.Mail.Class
@@ -102,6 +105,7 @@ library
     , jose
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant
@@ -123,6 +127,7 @@ library common-circus
       Common
       DemoEnv
       SimpleService
+      SimpleServiceLib
   other-modules:
       Paths_lazy_circus
   autogen-modules:
@@ -158,6 +163,7 @@ library common-circus
     , lazy-circus
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant
@@ -202,6 +208,7 @@ executable bot
     , lazy-circus
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant
@@ -246,6 +253,7 @@ executable example
     , lazy-circus
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant
@@ -265,11 +273,15 @@ test-suite lazy-circus-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      AIAgentSpec
+      BotAppSpec
       BotScenariosSpec
       DBLangSpec
+      HTTPLangSpec
       LogSpec
       ServiceCallSpec
       TestDbSupport
+      ToolSchemaSpec
       Paths_lazy_circus
   autogen-modules:
       Paths_lazy_circus
@@ -297,6 +309,7 @@ test-suite lazy-circus-test
     , lazy-circus
     , mime-mail
     , openai
+    , openapi3
     , postgresql-simple
     , rio
     , servant

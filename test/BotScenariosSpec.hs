@@ -6,7 +6,8 @@
 module BotScenariosSpec (spec) where
 
 import BotScenarios
-    ( createActWithReaction
+    ( askAgent
+    , createActWithReaction
     , deleteAct
     , generateReaction
     , getAct
@@ -29,7 +30,7 @@ import LazyCircus.Testing.Performer
     , runWithMocks
     )
 import LazyCircus.App.Default (DefaultApp)
-import LazyCircus.App.Service (NoServiceLib)
+import SimpleServiceLib (AllServices)
 import LazyCircus.Performer.Default (NoBotConfigured(..))
 import LazyCircus.Scenario (evalScript)
 import LazyCircus.Scene.Telegram.Lang (getBotName, scheduleMessage, sendMessage)
@@ -61,11 +62,11 @@ botTestConfig =
 
 -- | Run a scenario action with a DefaultApp obtained from withDemoApp.
 -- Uses aroundAll so the database is set up once for all tests.
-withTestApp :: (DefaultApp NoServiceLib -> IO ()) -> IO ()
+withTestApp :: (DefaultApp AllServices -> IO ()) -> IO ()
 withTestApp action = withDemoApp testConfig $ \app -> action app
 
 -- | Run a scenario action with a DefaultApp that has one configured Telegram bot.
-withBotTestApp :: (DefaultApp NoServiceLib -> IO ()) -> IO ()
+withBotTestApp :: (DefaultApp AllServices -> IO ()) -> IO ()
 withBotTestApp action = withDemoApp botTestConfig $ \app -> action app
 
 spec :: Spec
@@ -223,6 +224,33 @@ spec = do
                 case result of
                     Left (NoBotConfigured botName) -> botName `shouldBe` "missing-bot"
                     Right _ -> expectationFailure "Expected NoBotConfigured"
+
+        describe "askAgent" $ do
+            it "returns Nothing in test environment (solveWithAgent' defaults to Nothing)" $ \app -> do
+                (_, result) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ askAgent "What is 2 + 2?"
+                result `shouldBe` Nothing
+
+            it "logs agent processing query" $ \app -> do
+                (mocks, _) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ askAgent "Calculate 15 + 27"
+                logs <- readLog mocks
+                any (isLogContaining "Agent: processing query") logs `shouldBe` True
+
+            it "logs warning when agent returns no response" $ \app -> do
+                (mocks, _) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ askAgent "What is 2 + 2?"
+                logs <- readLog mocks
+                any (isLogContaining "Agent: no response") logs `shouldBe` True
+
+            it "adds query to log context" $ \app -> do
+                (mocks, _) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ askAgent "Test query text"
+                contextualLogs <- readLogWithContext mocks
+                case contextualLogs of
+                    [AppLogMsgWithContext _ (LogContext ctx) _] -> do
+                        M.lookup "query" ctx `shouldBe` Just "Test query text"
+                    _ -> expectationFailure "Expected exactly one contextual log entry"
 
     aroundAll withBotTestApp $ do
         describe "Telegram capture" $ do

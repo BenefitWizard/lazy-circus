@@ -25,7 +25,7 @@ import RIO hiding (logInfo)
 import RIO.Map qualified as M
 import Test.Hspec
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
-import LazyCircus.App.Service (NoServiceLib)
+import SimpleServiceLib (AllServices)
 import LazyCircus.Scenario (logInfo, withLogContext)
 
 -- | A no-op LogFunc for tests that do not need RIO's standard logging.
@@ -55,7 +55,7 @@ readSingleLog :: LogQueue -> IO AppLogMsgWithContext
 readSingleLog queue = atomically $ readTQueue queue
 
 -- | Run a test action with a DefaultApp used for logging-runtime assertions.
-withLogApp :: (DefaultApp NoServiceLib -> IO ()) -> IO ()
+withLogApp :: (DefaultApp AllServices -> IO ()) -> IO ()
 withLogApp action =
     withDemoApp
         defaultDemoConfig

@@ -20,12 +20,6 @@ source-repository-package
 
 source-repository-package
     type: git
-    location: https://github.com/fizruk/telegram-bot-simple.git
-    tag: 494251f7cde155955add20f62e1bfc03ea98eba7
-    subdir: telegram-bot-api
-
-source-repository-package
-    type: git
     location: https://github.com/Ecialo/servant-multipart.git
     tag: edfcefbfc3ce3ed4ce7dd2c2c307383b6667ba2c
     subdir: servant-multipart-client
@@ -44,14 +38,8 @@ source-repository-package
 
 source-repository-package
     type: git
-    location: https://github.com/Ecialo/morpheus-graphql.git
-    tag: d21b1d21565a1dffa80f71054c439118039baab3
-    subdir: morpheus-graphql-code-gen
-
-source-repository-package
-    type: git
-    location: https://github.com/MercuryTechnologies/openai.git
-    tag: 0246105e18f52f9c509b36f0769a137a8f822a93
+    location: https://github.com/Ecialo/openai.git
+    tag: 08424bda5f5952347bacf3c4dda0300672bc6483
 
 constraints:
   x509 ==1.7.7,

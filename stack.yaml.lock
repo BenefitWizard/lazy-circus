@@ -5,6 +5,20 @@
 
 packages:
 - completed:
+    hackage: openapi3-3.2.4@sha256:7309864a9a59b4654b21ef477444fb26bf8d393eba795dd8de089b368ea74c2a,4982
+    pantry-tree:
+      sha256: 1ac8db74ee9753398df1b87f2556c83cce42994c3a2c80faa13169ddba250ab0
+      size: 2263
+  original:
+    hackage: openapi3-3.2.4@sha256:7309864a9a59b4654b21ef477444fb26bf8d393eba795dd8de089b368ea74c2a,4982
+- completed:
+    hackage: QuickCheck-2.15.0.1@sha256:0cfd337bb9e6fbf09255bd24bb498a156f1d9bcd465396ac8657b25034b9ee31,9046
+    pantry-tree:
+      sha256: 27dddf0b64cc7d7e154326059c89b70da61530c25623af7ef576dd9db0c53821
+      size: 2437
+  original:
+    hackage: QuickCheck-2.15.0.1@sha256:0cfd337bb9e6fbf09255bd24bb498a156f1d9bcd465396ac8657b25034b9ee31,9046
+- completed:
     hackage: servant-auth-0.4.9.2@sha256:864fd0b2f439df23db75b119b4de5cccc13f4d1c0ba26934a917e96cf11f2cf7,2190
     pantry-tree:
       sha256: dcc11e1238ec32c476b0e72099b749b40f5033f41cbe4ea7a3255a17b19efb4d
@@ -14,14 +28,14 @@ packages:
 - completed:
     name: openai
     pantry-tree:
-      sha256: a31968cb93520cfc2871eb633a19a1859b3425b4da63417c9b28c966a96f45ea
-      size: 5026
-    sha256: ee084616b5570e486f764cb386ad7ff5962024afd9caf902396b2728c9e5b6ce
-    size: 2587853
-    url: https://github.com/MercuryTechnologies/openai/archive/0246105e18f52f9c509b36f0769a137a8f822a93.tar.gz
-    version: 1.2.0
+      sha256: c6893a2e83001ec5b0605fd5cf52b382211b7a2a09ad69176b8e6c84c285af94
+      size: 5111
+    sha256: 82eb611ae2cab01518ea4af4ae377f3807bf17bfaa58396774754ffd50c2d037
+    size: 2601516
+    url: https://github.com/Ecialo/openai/archive/08424bda5f5952347bacf3c4dda0300672bc6483.tar.gz
+    version: 2.5.3
   original:
-    url: https://github.com/MercuryTechnologies/openai/archive/0246105e18f52f9c509b36f0769a137a8f822a93.tar.gz
+    url: https://github.com/Ecialo/openai/archive/08424bda5f5952347bacf3c4dda0300672bc6483.tar.gz
 - completed:
     name: servant-multipart-client
     pantry-tree:

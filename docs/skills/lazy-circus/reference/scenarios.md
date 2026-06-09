@@ -10,36 +10,39 @@ Read this when:
 
 ```mermaid
 flowchart TB
-    subgraph Scene[Scene DSLs]
-        DB[DBScript db a]
-        TG[TelegramScript a]
-        AI[AIScript a]
-        MAIL[MailScript a]
-        LOG[LogLangF via HasLogLang]
+    subgraph Scene["Scene DSLs"]
+        DB["DBScript db a"]
+        TG["TelegramScript a"]
+        AI["AIScript a"]
+        MAIL["MailScript a"]
+        HTTP["HTTPScript a"]
+        LOG["LogLangF via HasLogLang"]
     end
 
-    subgraph ScriptLayer[Script Coproduct]
-        SCRIPT[Script a\nTelegramScriptDef\nMailScriptDef\nAIScriptDef\nDBScriptDef]
+    subgraph ScriptLayer["Script Coproduct"]
+        SCRIPT["Script a<br/>TelegramScriptDef<br/>MailScriptDef<br/>AIScriptDef<br/>DBScriptDef<br/>HTTPScriptDef"]
     end
 
-    subgraph ScenarioLayer[Scenario Layer]
-        SCEN[ScenarioProgram Script a\nevalScript\nrunSafely\ngetDateTime\nwithLogContext\nrunAsync\ncallService]
+    subgraph ScenarioLayer["Scenario Layer"]
+        SCEN["ScenarioProgram Script sl a<br/>evalScript / runSafely / getDateTime<br/>withLogContext / runAsync / callService"]
     end
 
-    subgraph Runtime[Runtime Layer]
-        PERF[ScenarioPerformer Script m]
-        DEF[DefaultPerformer DefaultApp]
-        TEST[TestInterpreter]
+    subgraph Runtime["Runtime Layer"]
+        PERF["ScenarioPerformer Script sl m"]
+        DEF["DefaultPerformer (DefaultApp sl)"]
+        TEST["TestInterpreter sl"]
     end
 
     DB --> SCRIPT
     TG --> SCRIPT
     AI --> SCRIPT
     MAIL --> SCRIPT
-    LOG -. embedded in .-> DB
-    LOG -. embedded in .-> TG
-    LOG -. embedded in .-> AI
-    LOG -. embedded in .-> MAIL
+    HTTP --> SCRIPT
+    LOG -.->|embedded in| DB
+    LOG -.->|embedded in| TG
+    LOG -.->|embedded in| AI
+    LOG -.->|embedded in| MAIL
+    LOG -.->|embedded in| HTTP
     SCRIPT --> SCEN
     SCEN --> PERF
     PERF --> DEF
@@ -53,19 +56,19 @@ flowchart TB
 - `LazyCircus.Performer`: generic `ScenarioPerformer Script` dispatch
 - `LazyCircus.Performer.Default`: production interpreter stack
 - `LazyCircus.Testing.Performer`: mock-based test interpreter
-- `LazyCircus.Scene.DB`, `LazyCircus.Scene.Telegram`, `LazyCircus.Scene.AI`, `LazyCircus.Scene.Mail`: stable public facades that re-export scene APIs and logging helpers
+- `LazyCircus.Scene.DB`, `LazyCircus.Scene.Telegram`, `LazyCircus.Scene.AI`, `LazyCircus.Scene.Mail`, `LazyCircus.Scene.HTTP`: stable public facades that re-export scene APIs and logging helpers
 - `LazyCircus.Scene.*.Lang`: each effect language
 - `LazyCircus.Scene.*.Class`: each effect performer interface and runner
 
 Important implementation details:
 
 - each language runner uses `iterM`
-- `ScenarioProgram`, `DBScript`, `TelegramScript`, `AIScript`, and `MailScript` are Church-encoded free monads
+- `ScenarioProgram`, `DBScript`, `TelegramScript`, `AIScript`, `MailScript`, and `HTTPScript` are Church-encoded free monads
 - logging is embedded into each language functor via `HasLogLang`
 
 ## Writing Scenarios
 
-`ScenarioProgram s a` is the orchestration layer. Use it for business workflows that combine
+`ScenarioProgram script serviceLib a` is the orchestration layer. Use it for business workflows that combine
 multiple effects and control concerns.
 
 ### Core Operations
@@ -93,12 +96,13 @@ multiple effects and control concerns.
 ```haskell
 import Control.Monad (void)
 import LazyCircus (Script, aiScript, tgScript)
+import LazyCircus.App.Service (NoServiceLib)
 import LazyCircus.Scene.AI (ask)
 import LazyCircus.Scene.Telegram (sendMessage)
 import LazyCircus.Scenario
 import RIO
 
-myScenario :: ScenarioProgram Script ()
+myScenario :: ScenarioProgram Script NoServiceLib ()
 myScenario = do
     logInfo "Starting scenario"
 
@@ -110,7 +114,7 @@ myScenario = do
                     throw $ userError "AI returned nothing"
                 Just request ->
                     void $ evalScript $ tgScript "demo-bot" $ sendMessage request
-        ) :: ScenarioProgram Script (Either SomeException ())
+        ) :: ScenarioProgram Script NoServiceLib (Either SomeException ())
 
     case result of
         Left err ->
@@ -124,7 +128,7 @@ Assume `myRequest :: AIRequest SendMessageRequest`.
 ### Using Log Context
 
 ```haskell
-processAct :: Int32 -> ScenarioProgram Script ()
+processAct :: Int32 -> ScenarioProgram Script serviceLib ()
 processAct actId =
     withLogEntry "act_id" actId $ do
         logInfo "Starting act processing"
@@ -135,7 +139,7 @@ processAct actId =
 ### Using Extra Context And Feature Flags
 
 ```haskell
-featureScenario :: ScenarioProgram Script ()
+featureScenario :: ScenarioProgram Script serviceLib ()
 featureScenario = do
     env <- readFromExtraContext "env"
     enabled <- getFeatureFlag "some_flag"
@@ -152,7 +156,7 @@ featureScenario = do
 - in tests it is captured in mocks and not executed
 
 ```haskell
-cleanupLater :: Int32 -> ScenarioProgram Script ()
+cleanupLater :: Int32 -> ScenarioProgram Script serviceLib ()
 cleanupLater actId = do
     runAsync $ do
         logInfo "Background cleanup started"

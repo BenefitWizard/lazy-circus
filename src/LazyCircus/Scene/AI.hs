@@ -6,7 +6,9 @@
 module LazyCircus.Scene.AI (
     AILangF (..),
     ask,
+    solveWithAgent,
     AIScript,
+    AgentRequest(..),
     -- Logging re-exports
     slogInfo,
     slogWarn,
@@ -16,10 +18,14 @@ module LazyCircus.Scene.AI (
 )
 where
 
+import LazyCircus.AI (AgentRequest(..))
 import LazyCircus.Scene.AI.Lang (AILangF (..))
 
 
 import LazyCircus.Scene.AI.Lang (ask)
+
+
+import LazyCircus.Scene.AI.Lang (solveWithAgent)
 
 
 import LazyCircus.Scene.AI.Lang (AIScript)

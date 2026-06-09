@@ -27,6 +27,7 @@ module LazyCircus.App.Default
     , HasBotEnvs(..)
     , HasExtraContext(..)
     , HasMailCreds(..)
+    , HasHttpManager(..)
       -- * Helpers
     , constructHFromMList
     , constructFromMList
@@ -47,6 +48,7 @@ import LazyCircus.Scene.DB.Class (HasDbConnection (..))
 import LazyCircus.Script (Script)
 import LazyCircus.Telegram (makeBotEnv)
 import LazyCircus.Telegram.Types (BotEnv)
+import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.Mail.SMTP
 import OpenAI.V1 (Methods, getClientEnv, makeMethods)
@@ -166,6 +168,12 @@ data DefaultApp serviceLib = App
     -- ^ optional SQL query tracer used during development
     , serviceLib :: serviceLib
     -- ^ collection of in-process service handlers
+    , appToolDescriptions :: [ToolDescription]
+    -- ^ tool descriptions available to AI interpreters
+    , toolCallExec :: ToolCallExec
+    -- ^ closure that dispatches named tool calls with JSON arguments
+    , httpManager :: Manager
+    -- ^ shared TLS connection manager for HTTP client requests
     }
 
 {- | Construct a fully initialized DefaultApp from raw configuration values.
@@ -207,7 +215,7 @@ newDefaultApp config = do
         asyncTasksVal <- newTQueueIO
         processCtx <- mkDefaultProcessContext
         let logFuncVal = mkLogFunc $ \_cs _src _lvl msg ->
-                hPutBuilder stdout (getUtf8Builder msg)
+                hPutBuilder stdout (getUtf8Builder msg <> "\n")
         let genLogFuncVal = mkGLogFunc $ \_cs msg ->
                 atomically $ writeTQueue logQueueVal msg
         let sqlLog = fromMaybe putStrLn (cfgSqlLogAction config)
@@ -228,6 +236,9 @@ newDefaultApp config = do
             , aiMethods = aiMethodsVal
             , sqlLogAction = sqlLog
             , serviceLib = cfgServiceLib config
+            , appToolDescriptions = []
+            , toolCallExec = ToolCallExec $ \_ _ -> fail "ToolCallExec not initialized: set via toolCallExecL after newDefaultApp"
+            , httpManager = manager
             }
 
 -- | Capability for accessing initialized Telegram bot environments from a reader environment.
@@ -241,6 +252,10 @@ class HasExtraContext env where
 -- | Capability for accessing SMTP credentials from a reader environment.
 class HasMailCreds env where
     mailCredsL :: Lens' env MailCreds
+
+-- | Capability for accessing the shared HTTP connection manager from a reader environment.
+class HasHttpManager env where
+    httpManagerL :: Lens' env Manager
 
 -- | Satisfies HasLogFunc by delegating to the logFunc field.
 instance HasLogFunc (DefaultApp serviceLib) where
@@ -283,6 +298,10 @@ instance HasBotEnvs (DefaultApp serviceLib) where
 instance HasMailCreds (DefaultApp serviceLib) where
     mailCredsL = lens mailCreds (\x y -> x{mailCreds = y})
 
+-- | Satisfies HasHttpManager by delegating to the httpManager field.
+instance HasHttpManager (DefaultApp serviceLib) where
+    httpManagerL = lens httpManager (\x y -> x{httpManager = y})
+
 -- | Satisfies HasExtraContext by delegating to the extraContext field.
 instance HasExtraContext (DefaultApp serviceLib) where
     extraContextL = lens extraContext (\x y -> x{extraContext = y})
@@ -309,11 +328,19 @@ instance HasAIMethods (DefaultApp serviceLib) where
 instance HasServiceLib (DefaultApp serviceLib) serviceLib where
     serviceLibL = lens serviceLib (\x y -> x{serviceLib = y})
 
+-- | Satisfies HasToolDescriptions by delegating to the appToolDescriptions field.
+instance HasToolDescriptions (DefaultApp serviceLib) where
+    toolDescriptionsL = lens appToolDescriptions (\x y -> x{appToolDescriptions = y})
+
+-- | Satisfies HasToolCallExec by delegating to the toolCallExec field.
+instance HasToolCallExec (DefaultApp serviceLib) where
+    toolCallExecL = lens toolCallExec (\x y -> x{toolCallExec = y})
+
 -- | Drop missing values from an association list while preserving keys for present entries.
 constructHFromMList :: [(Text, Maybe a)] -> HashMap Text a
 constructHFromMList vals' = HM.fromList $ mapMaybe attachKey vals'
   where
-    -- \| Keep only entries with a present value.
+    -- | Keep only entries with a present value.
     attachKey (k, Just v) = Just (k, v)
     attachKey _ = Nothing
 
@@ -321,7 +348,7 @@ constructHFromMList vals' = HM.fromList $ mapMaybe attachKey vals'
 constructFromMList :: [(Text, Maybe a)] -> Map Text a
 constructFromMList vals' = M.fromList $ mapMaybe attachKey vals'
   where
-    -- \| Keep only entries with a present value.
+    -- | Keep only entries with a present value.
     attachKey (k, Just v) = Just (k, v)
     attachKey _ = Nothing
 
@@ -340,14 +367,13 @@ logAppFromDefaultApp app =
     let
         logFunc' = app ^. logFuncL
         genLogFunc' = mkGLogFunc $ \_cs msg ->
-            hPutBuilder stdout (getUtf8Builder (display msg))
+            hPutBuilder stdout (getUtf8Builder (display msg) <> "\n")
         logQueue' = app ^. logQueueL
      in
         LogApp logFunc' genLogFunc' logQueue'
 
-{- | ORPHAN: MonadRandom and RIO are from separate packages.
-LAW: getRandomBytes preserves length: n == ByteString.length (getRandomBytes n — holds by delegation to the Crypto.Random instance.
--}
+-- | ORPHAN: MonadRandom and RIO are from separate packages.
+-- LAW: getRandomBytes preserves length: holds — n == ByteString.length (getRandomBytes n) by delegation to the Crypto.Random instance.
 instance MonadRandom (RIO env) where
     -- TODO: switch to seeded pseudo-random generator
     getRandomBytes = liftIO . getRandomBytes

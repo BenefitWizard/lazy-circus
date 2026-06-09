@@ -29,13 +29,13 @@ import LazyCircus.App.Default qualified as LAD (DefaultAppConfig (..))
 import LazyCircus.App.Log hiding (genLogFunc, logContext, logFunc, logQueue)
 import LazyCircus.AsyncWorker (runAsyncWorker)
 import LazyCircus.Performer.Default (runDefaultPerformer)
-import LazyCircus.Scenario (run)
-import LazyCircus.Script (Script)
-import LazyCircus.Scenario (ScenarioProgram)
+import LazyCircus.Scenario (ScenarioProgram, run)
 import LazyCircus.Script (Script)
 
 import Common (migration)
 import LazyCircus.App.Service
+import SimpleService (handleSimpleRequest, handleAddExpressionRequest)
+import SimpleServiceLib (AllServices, AllServicesConfig (..), allToolDescriptions, mkAllServices, mkToolCallExec)
 import System.Environment (lookupEnv)
 import System.IO (putStrLn)
 
@@ -141,8 +141,8 @@ Fields cfgTgChatId and cfgNotificationEmail are demo-specific and not passed thr
 PRE-CONTRACT: None.
 POST-CONTRACT: All shared fields are mapped; demo-only fields are discarded.
 -}
-demoConfigToAppConfig :: DemoConfig -> LAD.DefaultAppConfig NoServiceLib
-demoConfigToAppConfig cfg =
+demoConfigToAppConfig :: AllServices -> DemoConfig -> LAD.DefaultAppConfig AllServices
+demoConfigToAppConfig services cfg =
     LAD.DefaultAppConfig
         { LAD.cfgPgConnectionString = testConnectionString
         , LAD.cfgPgConnectionStringReadOnly = Nothing
@@ -154,41 +154,50 @@ demoConfigToAppConfig cfg =
         , LAD.cfgMailCreds = MailCreds (cfgSmtpHost cfg) (cfgSmtpPort cfg) (cfgSmtpLogin cfg) (cfgSmtpPass cfg) (cfgSmtpName cfg) (cfgSmtpUseTls cfg)
         , LAD.cfgExtraContext = HM.fromList [("env", "demo"), ("circus_name", "Lazy Circus")]
         , LAD.cfgSqlLogAction = Just putStrLn
-        , LAD.cfgServiceLib = NoServiceLib
+        , LAD.cfgServiceLib = services
         }
 
 {- | Run an action with a demo application, managing lifecycle and background workers.
 PRE-CONTRACT: PostgreSQL must be reachable at 127.0.0.1:5432.
 POST-CONTRACT: Background threads are cancelled and database connections are closed after the action completes.
 -}
-withDemoApp :: DemoConfig -> (DefaultApp NoServiceLib -> IO ()) -> IO ()
+withDemoApp :: DemoConfig -> (DefaultApp AllServices -> IO ()) -> IO ()
 withDemoApp cfg action = do
     setupDatabase
-    let appConfig = demoConfigToAppConfig cfg
+    let svcConfig = AllServicesConfig
+            { simpleRequest = handleSimpleRequest
+            , addExpressionRequest = handleAddExpressionRequest
+            }
+    (allServices, workers) <- mkAllServices svcConfig
+    let appConfig = demoConfigToAppConfig allServices cfg
     app <- newDefaultApp appConfig
+    let app' = app & toolDescriptionsL .~ allToolDescriptions
+                   & toolCallExecL .~ mkToolCallExec allServices
     bracket
         ( do
-            logThread <- async $ runRIO (logAppFromDefaultApp app) logWorker
-            asyncThread <- async $ runRIO app (runAsyncWorker (runDefaultPerformer . run @Script @NoServiceLib))
-            pure (app, logThread, asyncThread)
+            workerThreads <- runAllWorkers workers
+            logThread <- async $ runRIO (logAppFromDefaultApp app') logWorker
+            asyncThread <- async $ runRIO app' (runAsyncWorker (runDefaultPerformer . run @Script @AllServices))
+            pure (app', logThread, asyncThread, workerThreads)
         )
-        ( \(app', logThread, asyncThread) -> do
+        ( \(_, logThread, asyncThread, workerThreads) -> do
             cancel asyncThread
             cancel logThread
+            mapM_ cancel workerThreads
             close (pgDbConnection app')
             mapM_ close (pgDbConnectionReadOnly app')
         )
-        (action . fst3)
+        (action . fst4)
   where
-    -- \| Extract the first element of a 3-tuple.
-    fst3 (a, _, _) = a
+    -- \| Extract the first element of a 4-tuple.
+    fst4 (a, _, _, _) = a
 
 {- | Execute a scenario program against the demo application's default performer stack.
 PRE-CONTRACT: The DefaultApp must have a live database connection.
 POST-CONTRACT: Returns the scenario result.
 -}
-runDemoScenario :: DefaultApp NoServiceLib -> ScenarioProgram Script NoServiceLib a -> IO a
-runDemoScenario app scenario = runRIO app $ runDefaultPerformer $ run @Script @NoServiceLib scenario
+runDemoScenario :: DefaultApp AllServices -> ScenarioProgram Script AllServices a -> IO a
+runDemoScenario app scenario = runRIO app $ runDefaultPerformer $ run @Script @AllServices scenario
 
 ------------------------------------------------------------------------
 -- Database helpers

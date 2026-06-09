@@ -253,6 +253,7 @@ aiScenario = do
           { prompt = [cp_ "Question" ["Describe a circus act in one sentence"]]
           , systemPrompt = demoSystemPrompt
           , outputType = Proxy @AiDescription
+          , thinkingEnabled = False
           }
     mResult <- evalScript $ aiScript $ ask request
     case mResult of

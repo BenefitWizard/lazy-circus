@@ -50,6 +50,7 @@ dependencies:
   - http-types
   - unordered-containers
   - template-haskell
+  - openapi3
 
 ghc-options:
   - -Wall
@@ -127,6 +128,7 @@ internal-libraries:
       - jose
       - telegram-bot-api
       - telegram-bot-simple
+      - openapi3
 
 tests:
   lazy-circus-test:
@@ -143,3 +145,4 @@ tests:
       - lazy-circus
       - common-circus
       - hspec
+      - telegram-bot-api

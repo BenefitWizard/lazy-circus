@@ -3,7 +3,7 @@
 Read this when:
 
 - debugging interpreter behavior
-- working with `DefaultPerformer`, `runDefaultScenario`, or environment projection
+- working with `DefaultPerformer`, `evalScriptDefault`, or environment projection
 - reasoning about async execution, extra context, bot lookup, or test semantics
 
 ## Runtimes And Environments
@@ -19,9 +19,12 @@ newtype DefaultPerformer env a = DefaultPerformer
     { runDefaultPerformer :: RIO env a }
 ```
 
-`runDefaultScenario :: ScenarioProgram Script a -> DefaultPerformer DefaultApp a`
+`runDefaultScenario :: ScenarioProgram Script serviceLib a -> DefaultPerformer (DefaultApp serviceLib) a`
 
-`DefaultApp` contains:
+Note: `runDefaultScenario` is not currently exported. Production scenarios are run via the generic `run` function:
+`runRIO app $ runDefaultPerformer $ run @Script @serviceLib myScenario`
+
+`DefaultApp serviceLib` contains:
 
 - primary PostgreSQL connection
 - optional read-only PostgreSQL connection
@@ -32,6 +35,10 @@ newtype DefaultPerformer env a = DefaultPerformer
 - extra context map
 - scheduled async action queue
 - JWT settings, process context, and a SQL log hook
+- service library (or `NoServiceLib`)
+- tool descriptions available to AI interpreters
+- tool call executor for dispatching named tool calls with JSON arguments
+- shared TLS connection manager for HTTP client requests
 
 ### Wrapper Environments
 
@@ -67,17 +74,18 @@ This is not a lens update. It is a pure projection from outer environment to inn
 
 There are two important execution entry points:
 
-1. `run` from `LazyCircus.Scenario` together with the generic `ScenarioPerformer Script`
+1. `run` from `LazyCircus.Scenario` together with the generic `ScenarioPerformer Script serviceLib`
    instance in `LazyCircus.Performer`
-2. `runDefaultScenario` from `LazyCircus.Performer.Default`
+2. `evalScriptDefault` from `LazyCircus.Performer.Default` — the production dispatch that
+   pattern-matches on `Script` variants
 
-The generic `ScenarioPerformer Script` instance:
+The generic `ScenarioPerformer Script serviceLib` instance:
 
-- dispatches `Script` by calling `runTelegram`, `runMail`, `runAI`, and `runDB`
+- dispatches `Script` by calling `runTelegram`, `runMail`, `runAI`, `runDB`, and `runHTTP`
 - uses `async` directly for `runAsync`
 - returns `mempty` from `getExtraContext'`
 
-`runDefaultScenario` is the production-specific path. It pattern matches on `Script` itself and:
+The default performer's `evalScriptDefault` is the production-specific dispatch. It:
 
 - looks up the requested Telegram bot name and throws `NoBotConfigured` when absent
 - projects into `AppWithBotEnv` before running `runTelegram`
@@ -101,7 +109,7 @@ The test runtime is not a separate reimplementation of scenario semantics. It ke
 shared-runner architecture as production:
 
 - `ScenarioProgram` still runs through the normal scenario interpreter machinery
-- top-level `Script` dispatch still chooses DB, Telegram, Mail, and AI branches the same way
+- top-level `Script` dispatch still chooses DB, Telegram, Mail, AI, and HTTP branches the same way
 - environment projection still happens through wrappers like `AppWithConnection` and `AppWithBotEnv`
 
 The main difference is the capability layer behind that runner:
@@ -110,6 +118,7 @@ The main difference is the capability layer behind that runner:
 - Telegram capability is replaced with capture-oriented mocks
 - Mail capability reuses real mail construction but captures sends
 - AI capability returns mock values (`Nothing` by default)
+- HTTP capability executes real servant-client requests via the configured manager and base URL
 - async capability captures scheduled scenarios instead of executing them
 - logging capability captures structured entries instead of draining the production queue
 
@@ -120,11 +129,11 @@ capabilities at the edges.
 
 | Type | Purpose |
 |---|---|
-| `Mocks` | collected mock state (Tg requests, mails, logs, async tasks) |
+| `Mocks serviceLib` | collected mock state (Tg requests, mails, logs, async tasks) |
 | `TgMock` | Telegram mock with configurable response queue |
 | `MailMock` | Mail mock for capturing sent mails |
-| `EnvWithMocks` | environment extended with mock state |
-| `TestInterpreter` | the test-performer monad |
+| `EnvWithMocks serviceLib` | environment extended with mock state |
+| `TestInterpreter serviceLib a` | the test-performer monad |
 | `OnSendMessageRequest` | callback type for custom Telegram send handling |
 
 ### Main Helpers
@@ -171,6 +180,7 @@ These run one sub-language in isolation with mock logging:
 | Mail `sendMail` | captures mail values |
 | Mail `makeMail` | uses real mail construction from env creds |
 | AI `ask` | always returns `Nothing` |
+| HTTP `runClient` | real execution via servant-client against target base URL |
 | DB | runs against a real DB connection |
 | Logging | captured in refs, not pushed to shared queue |
 | `runAsync` | captures scenario without executing it |
@@ -189,6 +199,14 @@ spec = do
 
         logs <- readLog mocks
         logs `shouldSatisfy` elem (AppLogMsg "Scenario completed")
+```
+
+When no services are needed, use `NoServiceLib`:
+
+```haskell
+import LazyCircus.App.Service (NoServiceLib)
+
+app :: DefaultApp NoServiceLib
 ```
 
 ### DB Integration Tests
