@@ -2,6 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
 
 --   PURPOSE: Define a reusable logging effect language that can be embedded into any sub-language, providing unified slogInfo/slogWarn/slogError/slogSensitive and swithLogCtx operations across DBScript, TelegramScript, CryptoScript, MailScript, AIScript, and ScenarioProgram.
 --   SCOPE: LogLangF functor, HasLogLang typeclass with functional dependency, polymorphic smart constructors, and the handleLogLang interpreter helper.
@@ -16,6 +17,7 @@ module LazyCircus.Scene.Log (
     slogError,
     slogSensitive,
     swithLogCtx,
+    timedAndLog,
     handleLogLang,
 )
 where
@@ -23,8 +25,9 @@ where
 import Control.Monad.Free.Church (F)
 import Control.Monad.Free.Class (MonadFree, liftF)
 import GHC.Stack (CallStack, HasCallStack, callStack)
-import LazyCircus.App.Log (AppLogMsg (..), HasLogQueue, HasLoggingContext, LoggingContext, logContextL, putInLoggingContext, sublangLog)
+import LazyCircus.App.Log (AppLogMsg (..), AppLogMsgWithContext (..), HasLogQueue, HasLoggingContext, LoggingContext, extractCallSite, logContextL, logQueueL, putInLoggingContext, sublangLog)
 import RIO
+import RIO.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 
 {- | Effect functor for logging operations that can be embedded into any sub-language.
 The 'prog' type parameter represents the host program type (e.g., DBScript db).
@@ -98,3 +101,40 @@ handleLogLang langTag runProg = \case
         let updatedContext = putInLoggingContext logContext values
         result <- local (logContextL .~ updatedContext) (runProg prog)
         next result
+
+-- | Run an action, measure elapsed time, emit a structured scene log.
+-- Log context receives 'lang', 'op', and 'elapsed_ms' keys.
+-- The timing log is emitted even when the action throws, then the exception is re-thrown.
+-- PRE-CONTRACT: The environment must provide 'HasLogQueue' and 'HasLoggingContext'.
+-- POST-CONTRACT: The action result is returned unchanged; a timing log is emitted to the queue.
+timedAndLog ::
+    ( HasCallStack
+    , HasLogQueue env
+    , HasLoggingContext env
+    , MonadReader env m
+    , MonadIO m
+    , MonadUnliftIO m
+    ) =>
+    Text ->
+    Text ->
+    m a ->
+    m a
+timedAndLog langTag opName action = do
+    start <- liftIO getCurrentTime
+    eres <- tryAny action
+    end <- liftIO getCurrentTime
+    let elapsed = diffUTCTime end start
+        callSite = extractCallSite callStack
+    q <- view logQueueL
+    logCtx <- view logContextL
+    let enrichedCtx = putInLoggingContext logCtx
+            [("lang", langTag), ("op", opName), ("elapsed_ms", msFormat elapsed)]
+        msg = AppLogMsgWithContext (AppLogMsg $ langTag <> "." <> opName) enrichedCtx callSite
+    atomically $ writeTQueue q msg
+    case eres of
+        Left e  -> throwIO e
+        Right r -> pure r
+  where
+    -- | Format elapsed time as integer milliseconds.
+    msFormat :: NominalDiffTime -> Text
+    msFormat = tshow @Int64 . round . (* 1000)

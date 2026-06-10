@@ -45,6 +45,7 @@ Default routing:
 | DB/Telegram/AI/Mail/HTTP DSL operations, smart constructors, scene-level logging, or top-level wrappers like `tgScript` / `mailScript` / `aiScript` / `httpScript` | [reference/effects.md](reference/effects.md) |
 | `DefaultPerformer`, `evalScriptDefault`, environment projection, async queue behavior, test interpreter behavior, mocks, or DB test setup | [reference/runtime-testing.md](reference/runtime-testing.md) |
 | DB service instances, service registration, adding a new public effect, integration checklists, or the detailed pitfalls/review checklist | [reference/extension.md](reference/extension.md) |
+| Where to place logs, what to log vs what not to log, debug vs prod, context propagation, or logging anti-patterns | [reference/logging.md](reference/logging.md) |
 
 Read more than one reference file when a task crosses layers.
 
@@ -52,6 +53,11 @@ Read more than one reference file when a task crosses layers.
 
 - Use `logInfo`, `logWarn`, `logError`, and `logSensitive` in `ScenarioProgram`.
 - Use `slogInfo`, `slogWarn`, `slogError`, `slogSensitive`, and `swithLogCtx` inside scene languages.
+- Log WHAT happened and WHAT decision was made. Not WHY — the "why" lives in the code.
+- Put traceability context (IDs, keys) in `withLogContext` / `withLogEntry`, not in the log message string.
+- Never log user data (message text, LLM output, file content). Use IDs in structured context instead.
+- Timing is automatic (`timedAndLog` in performers). Do not log start/finish manually.
+- `logSensitive` / `slogSensitive` = debug only. Everything else is visible in production.
 - Wrap scene programs before `evalScript`:
   - Telegram -> `tgScript "bot-name" ...`
    - Mail -> `mailScript ...`
@@ -89,6 +95,9 @@ Prefer LSP navigation for Haskell modules when possible.
 
 - Writing orchestration logic inside a scene DSL instead of `ScenarioProgram`.
 - Calling `logInfo` inside a scene language or `slogInfo` inside `ScenarioProgram`.
+- Putting user data (query text, AI response, email body) into log message strings instead of structured context.
+- Logging manual start/finish timing when `timedAndLog` already handles it in the performer.
+- Explaining reasoning in log text instead of stating the observable decision.
 - Forgetting to wrap a scene script into `Script` before `evalScript`.
 - Treating DB `create` helpers as if they returned a plain row instead of `Maybe`.
 - Assuming tests execute async work or fake DB behavior.
@@ -100,8 +109,10 @@ Prefer LSP navigation for Haskell modules when possible.
 
 1. Is the code in the correct layer?
 2. Are logging APIs used at the correct layer?
-3. Are exported APIs documented with Haddock contracts?
-4. If DB tables changed, are the service instances complete?
-5. If a new effect was added, was dispatch updated everywhere?
-6. Are tests aligned with real async and DB behavior?
-7. Was `hpack` run before build or test?
+3. Do scenario logs capture decisions at branch points?
+4. Is user data kept out of log text (only IDs in structured context)?
+5. Are exported APIs documented with Haddock contracts?
+6. If DB tables changed, are the service instances complete?
+7. If a new effect was added, was dispatch updated everywhere?
+8. Are tests aligned with real async and DB behavior?
+9. Was `hpack` run before build or test?

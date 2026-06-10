@@ -23,10 +23,14 @@ import LazyCircus.Testing.Performer
 import LazyCircus.App.Log qualified as Log
 import RIO hiding (logInfo)
 import RIO.Map qualified as M
+import RIO.Text qualified as Text
 import Test.Hspec
+import Common
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
+import LazyCircus.Scene.DB (find)
+import LazyCircus.Script (Script (DBScriptDef))
+import LazyCircus.Scenario (DbMode (..), evalScript, logInfo, withLogContext)
 import SimpleServiceLib (AllServices)
-import LazyCircus.Scenario (logInfo, withLogContext)
 
 -- | A no-op LogFunc for tests that do not need RIO's standard logging.
 noopLogFunc :: LogFunc
@@ -45,6 +49,11 @@ instance HasLogQueue TestLogEnv where
 -- | Provides access to the structured logging context used by tests.
 instance HasLoggingContext TestLogEnv where
     logContextL = lens testLogContext (\env ctx -> env{testLogContext = ctx})
+
+-- | Check whether a log message carries timing context (elapsed_ms key).
+hasTimingCtx :: AppLogMsgWithContext -> Bool
+hasTimingCtx (AppLogMsgWithContext _ (LogContext ctx) _) =
+    M.member "elapsed_ms" ctx
 
 mkEnv :: IO TestLogEnv
 mkEnv = do
@@ -150,3 +159,23 @@ spec = do
                         M.lookup "user_id" ctx `shouldBe` Just "42"
                         mCallSite `shouldSatisfy` isJust
                     _ -> expectationFailure "Expected one contextual scenario log"
+
+        describe "performer operation timing" $ do
+            it "emits timing log for DB Find via shared instance" $ \app -> do
+                (mocks, _) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ evalScript $
+                        DBScriptDef simpleDb ReadWrite $ find (CircusActId 999 :: CircusActId)
+                captured <- readLogWithContext mocks
+                let timingLogs = filter hasTimingCtx captured
+                null timingLogs `shouldBe` False
+                -- Verify the first timing log has correct structure
+                case timingLogs of
+                    [] -> expectationFailure "Expected at least one timing log"
+                    (AppLogMsgWithContext _ (LogContext ctx) _ : _) -> do
+                        M.lookup "lang" ctx `shouldBe` Just "DB"
+                        M.lookup "op" ctx `shouldBe` Just "Find"
+                        M.lookup "elapsed_ms" ctx `shouldSatisfy` isJust
+                        -- elapsed_ms should be a non-empty string
+                        case M.lookup "elapsed_ms" ctx of
+                            Just ms -> ms `shouldSatisfy` (not . Text.null)
+                            Nothing -> expectationFailure "elapsed_ms missing from context"

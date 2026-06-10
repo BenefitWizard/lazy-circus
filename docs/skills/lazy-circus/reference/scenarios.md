@@ -127,6 +127,9 @@ Assume `myRequest :: AIRequest SendMessageRequest`.
 
 ### Using Log Context
 
+For logging principles (what to log, where to place logs, what not to log), see
+[reference/logging.md](logging.md).
+
 ```haskell
 processAct :: Int32 -> ScenarioProgram Script serviceLib ()
 processAct actId =

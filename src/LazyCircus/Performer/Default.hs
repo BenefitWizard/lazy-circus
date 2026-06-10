@@ -32,6 +32,7 @@ import LazyCircus.Scene.AI.Class (AILangPerformer (..), runAI)
 import LazyCircus.Scene.DB.Class (runDB)
 import LazyCircus.Scene.HTTP.Class (HTTPPerformer (..), runHTTP)
 import LazyCircus.Scene.Mail.Class (MailScriptPerformer (..), runMail)
+import LazyCircus.Scene.Log (timedAndLog)
 import LazyCircus.Scene.Telegram.Class (TelegramScriptPerformer (..), runTelegram)
 import LazyCircus.Script
 import LazyCircus.Telegram qualified as TG
@@ -83,29 +84,33 @@ instance (HasLoggingContext app) => HasLoggingContext (AppWithClientEnv app) whe
 
 -- | Delegates every Telegram operation to the concrete Telegram client
 -- running inside the supplied AppWithBotEnv.
+-- IO operations are wrapped with 'timedAndLog' for automatic timing.
 instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv (DefaultApp serviceLib))) where
-    sendMessage' = TG.sendMessage
-    getFile' = TG.getFile
-    getBotName' = TG.getBotName
-    scheduleMessages' = TG.scheduleMessages
-    setBotCommands' = TG.setBotCommands
-    setMessageReaction' = TG.setMessageReaction
-    answerCallbackQuery' = TG.answerCallbackQuery
-    editMessageText' = TG.editMessageText
+    sendMessage' req = timedAndLog "Telegram" "SendMessage" $ TG.sendMessage req
+    getFile' fid = timedAndLog "Telegram" "GetFile" $ TG.getFile fid
+    getBotName' = TG.getBotName  -- pure reader lookup, no IO timing needed
+    scheduleMessages' reqs = timedAndLog "Telegram" "ScheduleMessages" $ TG.scheduleMessages reqs
+    setBotCommands' cmds = timedAndLog "Telegram" "SetBotCommands" $ TG.setBotCommands cmds
+    setMessageReaction' req = timedAndLog "Telegram" "SetMessageReaction" $ TG.setMessageReaction req
+    answerCallbackQuery' req = timedAndLog "Telegram" "AnswerCallbackQuery" $ TG.answerCallbackQuery req
+    editMessageText' req = timedAndLog "Telegram" "EditMessageText" $ TG.editMessageText req
 
 -- | Delegates mail operations to the concrete SMTP-backed mail service.
+-- IO operations are wrapped with 'timedAndLog' for automatic timing.
 instance MailScriptPerformer (DefaultPerformer (DefaultApp serviceLib)) where
-    sendMail' = Mail.sendMail
-    makeMail' = Mail.makeMail
+    sendMail' mail = timedAndLog "Mail" "SendMail" $ Mail.sendMail mail
+    makeMail' to subj body = timedAndLog "Mail" "MakeMail" $ Mail.makeMail to subj body
 
 -- | Routes AI requests through the configured OpenAI client.
+-- IO operations are wrapped with 'timedAndLog' for automatic timing.
 instance AILangPerformer (DefaultPerformer (DefaultApp serviceLib)) where
-    ask' = askAI
-    solveWithAgent' = solveWithAgentLoop
+    ask' arg = timedAndLog "AI" "Ask" $ askAI arg
+    solveWithAgent' arg = timedAndLog "AI" "SolveWithAgent" $ solveWithAgentLoop arg
 
 -- | Executes servant-client actions against the real HTTP backend using the client environment.
+-- Wrapped with 'timedAndLog' for automatic timing.
 instance HTTPPerformer (DefaultPerformer (AppWithClientEnv (DefaultApp serviceLib))) where
-    runClient' act = do
+    runClient' act = timedAndLog "HTTP" "RunClient" $ do
         clientEnv <- asks appClientEnv
         liftIO $ runClientM act clientEnv
 

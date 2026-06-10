@@ -253,6 +253,9 @@ evalScript $ httpScript (BaseUrl Https "api.example.com" 443 "") $ runClient myR
 
 ## Logging Inside Scene Languages
 
+For logging principles (what to log, where to place logs, what not to log), see
+[reference/logging.md](logging.md).
+
 Module: `LazyCircus.Scene.Log`
 
 Use these inside DB, Telegram, AI, Mail, and HTTP scripts:

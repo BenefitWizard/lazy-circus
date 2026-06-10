@@ -36,7 +36,7 @@ import LazyCircus.DB.Service
 import LazyCircus.DB.Types (PgDB)
 import LazyCircus.Scene.DB.Lang
 import LazyCircus.Scene.DB.RLS (RLSContext, setRLSContext)
-import LazyCircus.Scene.Log (handleLogLang)
+import LazyCircus.Scene.Log (handleLogLang, timedAndLog)
 import LazyCircus.Scenario (DbMode (..))
 import RIO
 
@@ -67,45 +67,45 @@ instance
     ) =>
     DBScriptPerformer m
     where
-    create' db _mode tables = do
+    create' db _mode tables = timedAndLog "DB" "Create" $ do
         conn <- view dbConnectionL
         liftIO $ runBeamPostgres conn $ runInsertReturningList (generateInsert db tables)
 
-    createAsIs' db _mode tables = do
+    createAsIs' db _mode tables = timedAndLog "DB" "CreateAsIs" $ do
         conn <- view dbConnectionL
         liftIO $ runBeamPostgres conn $ runInsertReturningList (generateInsert db (map identityToMaybe tables))
 
-    find' db _mode lid = do
+    find' db _mode lid = timedAndLog "DB" "Find" $ do
         conn <- view dbConnectionL
         liftIO $ runBeamPostgres conn $ runSelectReturningList $ generateSelect db lid
 
-    update' db _mode table lid = do
+    update' db _mode table lid = timedAndLog "DB" "Update" $ do
         conn <- view dbConnectionL
         liftIO $ runBeamPostgres conn $
             runUpdateReturningList $
                 Beam.update (getTargetTable db) (generateAssigment db table) (generateFiltration db lid)
 
-    updateMany' db _mode table lids = do
+    updateMany' db _mode table lids = timedAndLog "DB" "UpdateMany" $ do
         conn <- view dbConnectionL
         liftIO $ runBeamPostgres conn $
             runUpdateReturningList $
                 Beam.update (getTargetTable db) (generateAssigment db table) $
                     \t -> foldr (\lid' rest -> generateFiltration db lid' t ||. rest) (val_ False) lids
 
-    delete' db _mode lid = do
+    delete' db _mode lid = timedAndLog "DB" "Delete" $ do
         conn <- view dbConnectionL
         liftIO $ runBeamPostgres conn $ runDelete $
             Beam.delete (getTargetTable db) (\t -> generateFiltration db lid t)
 
-    runQuery' db _mode pg = do
+    runQuery' db _mode pg = timedAndLog "DB" "RunQuery" $ do
         conn <- view dbConnectionL
         liftIO $ runBeamPostgres conn (pg db)
 
-    rawQuery' _mode q params = do
+    rawQuery' _mode q params = timedAndLog "DB" "RawQuery" $ do
         conn <- view dbConnectionL
         liftIO $ Simple.query conn q params
 
-    withTransaction' db mode mCtx script = do
+    withTransaction' db mode mCtx script = timedAndLog "DB" "WithTransaction" $ do
         conn <- view dbConnectionL
         withRunInIO $ \runInIO ->
             Simple.withTransaction conn $ do
