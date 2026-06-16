@@ -29,6 +29,7 @@ import Telegram.Bot.API as TGAPI (File (..), FileId, Response (..), Token, botBa
 import Telegram.Bot.API qualified as TGAPI
 import Telegram.Bot.API.Methods (SendMessageRequest)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
+import Telegram.Bot.API.Methods.SendDocument (SendDocumentRequest)
 import Telegram.Bot.API.UpdatingMessages (EditMessageResponse, EditMessageTextRequest)
 
 -- https://api.telegram.org/file/bot<token>/<file_path>
@@ -208,6 +209,22 @@ editMessageText req = do
     case mv of
         Left _err -> pure Nothing
         Right v -> pure $ Just (TGAPI.responseResult v)
+
+-- | Send a document file via the Telegram Bot API.
+-- PRE-CONTRACT: The request must contain a valid chat identifier and an accessible document source.
+-- POST-CONTRACT: Returns the Telegram API response for the document send.
+sendDocument ::
+    ( HasTgClientEnv env
+    , MonadIO m
+    , MonadReader env m
+    ) =>
+    SendDocumentRequest -> m (TGAPI.Response TGAPI.Message)
+sendDocument req = do
+    clientEnv <- view tgClientEnvL
+    mv <- liftIO $ runClientM (TGAPI.sendDocument req) clientEnv
+    case mv of
+        Left err -> handleClientError err
+        Right v -> pure v
 
 -- glog $ AppLogMsg $ "Setting commands for bot " <> botName
 

@@ -7,6 +7,7 @@ module LazyCircus.Scene.Telegram.Lang (
   getFile,
   getBotName,
   sendMessage,
+  sendDocument,
   sendImportantMessage,
   scheduleMessage,
   scheduleMessages,
@@ -24,6 +25,7 @@ import LazyCircus.Telegram.Types (WithImportance (..))
 import RIO
 import Telegram.Bot.API (Message, Response, SendMessageRequest, SetMessageReactionRequest)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
+import Telegram.Bot.API.Methods.SendDocument (SendDocumentRequest)
 import Telegram.Bot.API.Types (File, FileId)
 import Telegram.Bot.API.UpdatingMessages (EditMessageResponse, EditMessageTextRequest)
 
@@ -34,6 +36,7 @@ data TelegramScriptF a where
   -- DownloadFile :: File -> (RawServiceAccount -> a) -> TelegramScriptF a
   GetBotName :: (Text -> a) -> TelegramScriptF a
   SendMessage :: (WithImportance SendMessageRequest) -> (Response Message -> a) -> TelegramScriptF a
+  SendDocument :: SendDocumentRequest -> (Response Message -> a) -> TelegramScriptF a
   ScheduleMessages :: [SendMessageRequest] -> a -> TelegramScriptF a
   SetMessageReaction :: SetMessageReactionRequest -> a -> TelegramScriptF a
   SetBotCommands :: HashMap LangCode [(Text, Text)] -> a -> TelegramScriptF a
@@ -47,6 +50,7 @@ instance Functor TelegramScriptF where
   -- fmap f (DownloadFile file next) = DownloadFile file (f . next)
   fmap f (GetBotName next) = GetBotName (f . next)
   fmap f (SendMessage request next) = SendMessage request (f . next)
+  fmap f (SendDocument req next) = SendDocument req (f . next)
   fmap f (ScheduleMessages requests next) = ScheduleMessages requests (f next)
   fmap f (SetBotCommands commands next) = SetBotCommands commands (f next)
   fmap f (SetMessageReaction request next) = SetMessageReaction request (f next)
@@ -90,6 +94,13 @@ POST-CONTRACT: Produces a script that yields the Telegram API response for an im
 -}
 sendImportantMessage :: SendMessageRequest -> TelegramScript (Response Message)
 sendImportantMessage request = liftF $ SendMessage (Important request) id
+
+{- | Lift sending a document file via the Telegram Bot API into the Telegram script language.
+PRE-CONTRACT: The request must be valid for the configured Telegram bot and API endpoint.
+POST-CONTRACT: Produces a script that yields the Telegram API response for a document send.
+-}
+sendDocument :: SendDocumentRequest -> TelegramScript (Response Message)
+sendDocument req = liftF $ SendDocument req id
 
 {- | Lift scheduling of a single Telegram message into the Telegram script language.
 PRE-CONTRACT: The request must be valid for the interpreter's deferred-delivery queue.

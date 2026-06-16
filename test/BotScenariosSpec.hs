@@ -33,7 +33,7 @@ import LazyCircus.App.Default (DefaultApp)
 import SimpleServiceLib (AllServices)
 import LazyCircus.Performer.Default (NoBotConfigured(..))
 import LazyCircus.Scenario (evalScript)
-import LazyCircus.Scene.Telegram.Lang (getBotName, scheduleMessage, sendMessage)
+import LazyCircus.Scene.Telegram.Lang (getBotName, scheduleMessage, sendDocument, sendMessage)
 import LazyCircus.Telegram.Types (WithImportance(..))
 import Network.Mail.Mime (Address(..))
 import RIO
@@ -41,7 +41,9 @@ import RIO.List (find)
 import RIO.Map qualified as M
 import Data.Text qualified as T
 import Test.Hspec
-import Telegram.Bot.API (ChatId(..), SomeChatId(..), defSendMessage)
+import Telegram.Bot.API (ChatId(..), Response(..), SomeChatId(..), defSendMessage)
+import Telegram.Bot.API.Methods.SendDocument (defSendDocument, DocumentFile(..))
+import Telegram.Bot.API.Types (FileId(..), InputFile(..))
 
 -- | Minimal configuration sufficient for running scenario tests without Telegram or AI.
 -- PRE-CONTRACT: PostgreSQL must be reachable at 127.0.0.1:5432.
@@ -275,6 +277,17 @@ spec = do
 
                 scheduledRequests <- readScheduledTgRequests mocks
                 length scheduledRequests `shouldBe` 1
+
+            it "sendDocument returns canned response from mock" $ \app -> do
+                let docRequest =
+                        defSendDocument
+                            (SomeChatId $ ChatId 777)
+                            (MakeDocumentFile $ InputFileId $ FileId "test-file-id")
+                (_, resp) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        evalScript $ tgScript "demo-bot" $ sendDocument docRequest
+                responseOk resp `shouldBe` True
+
 
 -- | Check whether a log message contains the given substring.
 -- PRE-CONTRACT: None.

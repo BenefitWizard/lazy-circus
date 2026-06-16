@@ -10,6 +10,7 @@ module LazyCircus.Scene.Telegram (
   getFile,
   getBotName,
   sendMessage,
+  sendDocument,
   sendImportantMessage,
   scheduleMessage,
   scheduleMessages,
@@ -43,6 +44,9 @@ import LazyCircus.Scene.Telegram.Lang (getBotName)
 
 
 import LazyCircus.Scene.Telegram.Lang (sendMessage)
+
+
+import LazyCircus.Scene.Telegram.Lang (sendDocument)
 
 
 import LazyCircus.Scene.Telegram.Lang (sendImportantMessage)

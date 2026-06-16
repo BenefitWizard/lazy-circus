@@ -87,6 +87,7 @@ instance (HasLoggingContext app) => HasLoggingContext (AppWithClientEnv app) whe
 -- IO operations are wrapped with 'timedAndLog' for automatic timing.
 instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv (DefaultApp serviceLib))) where
     sendMessage' req = timedAndLog "Telegram" "SendMessage" $ TG.sendMessage req
+    sendDocument' req = timedAndLog "Telegram" "SendDocument" $ TG.sendDocument req
     getFile' fid = timedAndLog "Telegram" "GetFile" $ TG.getFile fid
     getBotName' = TG.getBotName  -- pure reader lookup, no IO timing needed
     scheduleMessages' reqs = timedAndLog "Telegram" "ScheduleMessages" $ TG.scheduleMessages reqs

@@ -244,6 +244,7 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
     setMessageReaction' _ = pure ()
     answerCallbackQuery' _ = pure ()
     editMessageText' _ = pure Nothing
+    sendDocument' _ = asks (defaultResponse . tgMock . mocks . app)
 
 -- | Captures mail sends while reusing production mail construction.
 instance MailScriptPerformer (TestPerformer (EnvWithMocks serviceLib)) where

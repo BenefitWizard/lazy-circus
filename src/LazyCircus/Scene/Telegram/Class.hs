@@ -13,6 +13,7 @@ import LazyCircus.Telegram.Types (WithImportance)
 import RIO
 import Telegram.Bot.API (Response, SendMessageRequest, SetMessageReactionRequest)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
+import Telegram.Bot.API.Methods.SendDocument (SendDocumentRequest)
 import Telegram.Bot.API.Types (File, FileId, Message)
 import Telegram.Bot.API.UpdatingMessages (EditMessageResponse, EditMessageTextRequest)
 
@@ -23,6 +24,7 @@ class (Monad m) => TelegramScriptPerformer m where
   -- downloadFile' :: File -> m RawServiceAccount
   getBotName' :: m Text
   sendMessage' :: WithImportance SendMessageRequest -> m (Response Message)
+  sendDocument' :: SendDocumentRequest -> m (Response Message)
   scheduleMessages' :: [SendMessageRequest] -> m ()
   setBotCommands' :: HashMap LangCode [(Text, Text)] -> m ()
   setMessageReaction' :: SetMessageReactionRequest -> m ()
@@ -49,6 +51,9 @@ runTelegram = iterM go
   go (SendMessage request next) = do
     response <- sendMessage' request
     next response
+  go (SendDocument req next) = do
+    resp <- sendDocument' req
+    next resp
   go (ScheduleMessages requests next) = do
     scheduleMessages' requests
     next
