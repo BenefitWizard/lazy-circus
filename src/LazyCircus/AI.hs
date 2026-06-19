@@ -1,4 +1,5 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedLists #-}
 
@@ -12,15 +13,22 @@
 module LazyCircus.AI
     ( AIRequest(..)
     , AgentRequest(..)
+    , Conversation
     , HasAIMethods(..)
     , askAI
+    , askAIContinuing
+    , conversationFromTurns
+    , emptyConversation
     , solveWithAgentLoop
+    , solveWithAgentLoopContinuing
+    , unConversation
     ) where
 
 import Data.Aeson (FromJSON, Object, Value (Object, String), eitherDecodeStrictText, object, (.=))
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Text (encodeToLazyText)
 import qualified Data.Text.Lazy as TL (toStrict)
+import LazyCircus.AI.Conversation (Conversation, conversationFromTurns, emptyConversation, unConversation)
 import LazyCircus.AI.POML (renderPOMLtoPrompt)
 import LazyCircus.AI.POML.Types (POML)
 import LazyCircus.App.Log (AppLogMsg (SensitiveLogMsg), AppLogMsgWithContext (..), HasLoggingContext, logContextL)
@@ -72,6 +80,35 @@ logReasoningContent msg =
 finishReasonToolCalls :: Text
 finishReasonToolCalls = "tool_calls"
 
+-- | Convert a response 'Chat.Message' (whose @content@ is plain 'Text') into a
+-- request-style message (whose @content@ is a 'Vector' of 'Chat.Content')
+-- suitable for durable storage in a 'Conversation' and lossless replay.
+--
+-- A chat-completion @choice.message@ carries its text as 'Text', while request
+-- messages and 'Conversation' turns use @'Vector' 'Chat.Content'@; this wraps
+-- each textual content as a single 'Chat.Text' part and preserves every other
+-- field (@tool_calls@, @refusal@, @extra@, etc.).
+-- PRE-CONTRACT: The input is a 'Chat.Message' obtained from a completion
+--   response choice (its @content@ type is 'Text').
+-- POST-CONTRACT: The returned message has the same constructor and fields,
+--   with each textual @content@ lifted into @'Vector' 'Chat.Content'@.
+toDurableMessage :: Chat.Message Text -> Chat.Message (Vector Chat.Content)
+toDurableMessage = \case
+    Chat.System content name extra ->
+        Chat.System (V.singleton (Chat.Text content)) name extra
+    Chat.User content name extra ->
+        Chat.User (V.singleton (Chat.Text content)) name extra
+    Chat.Assistant assistant_content refusal name assistant_audio tool_calls extra ->
+        Chat.Assistant
+            (fmap (V.singleton . Chat.Text) assistant_content)
+            refusal
+            name
+            assistant_audio
+            tool_calls
+            extra
+    Chat.Tool content tool_call_id extra ->
+        Chat.Tool (V.singleton (Chat.Text content)) tool_call_id extra
+
 -- | Request payload for an agent-loop AI completion with tool use.
 data AgentRequest a = AgentRequest
     { agentPrompt        :: [POML]    -- ^ user-facing prompt fragments
@@ -86,10 +123,17 @@ class HasAIMethods env where
 
 {- | Execute a typed AI request and decode the first chat-completion response.
 PRE-CONTRACT: The environment provides OpenAI methods through 'aiMethodsL', and the model returns a JSON payload matching the requested response type.
-POST-CONTRACT: Returns the decoded first response when present and decodable, otherwise 'Nothing'.
+POST-CONTRACT: Returns the decoded first response when present and decodable, otherwise 'Nothing'. This is the stateless wrapper over 'askAIContinuing'; it discards the resulting 'Conversation'.
 -}
 askAI :: (HasAIMethods env, HasGLogFunc env, GMsg env ~ AppLogMsgWithContext, HasLoggingContext env, MonadReader env m, MonadIO m, FromJSON a) => AIRequest a -> m (Maybe a)
-askAI (AIRequest prompt systemPrompt _outputType thinkingEnabled) = do
+askAI req = fst <$> askAIContinuing req emptyConversation
+
+{- | Execute a typed AI request, threading and returning a 'Conversation'.
+PRE-CONTRACT: The input 'Conversation' does NOT begin with a 'Chat.System' message (see the 'Conversation' invariant). The environment provides OpenAI methods through 'aiMethodsL'.
+POST-CONTRACT: Returns the decoded first response and an updated 'Conversation' that appends the assistant's reply (when a choice exists). The returned 'Conversation' does NOT contain a leading 'Chat.System'.
+-}
+askAIContinuing :: (HasAIMethods env, HasGLogFunc env, GMsg env ~ AppLogMsgWithContext, HasLoggingContext env, MonadReader env m, MonadIO m, FromJSON a) => AIRequest a -> Conversation -> m (Maybe a, Conversation)
+askAIContinuing (AIRequest prompt systemPrompt _outputType thinkingEnabled) conv = do
     V1.Methods{V1.createChatCompletion} <- view aiMethodsL
     let
         sysMsg = Chat.System
@@ -102,10 +146,11 @@ askAI (AIRequest prompt systemPrompt _outputType thinkingEnabled) = do
             , name = Nothing
             , extra = Nothing
             }
+        messages = V.cons sysMsg (unConversation conv <> V.singleton usrMsg)
         req = Chat._CreateChatCompletion
             { Chat.model = defaultModel
             , Chat.response_format = Just Chat.JSON_Object
-            , Chat.messages = [sysMsg, usrMsg]
+            , Chat.messages = messages
             , Chat.extra = thinkingExtra thinkingEnabled
             }
     Chat.ChatCompletionObject{choices} <- liftIO $ createChatCompletion req
@@ -113,12 +158,24 @@ askAI (AIRequest prompt systemPrompt _outputType thinkingEnabled) = do
     case choices !? 0 of
         Just Chat.Choice{message} -> logReasoningContent message
         Nothing -> pure ()
-    let rawContent = do
-            Chat.Choice{message} <- choices !? 0
-            pure $ Chat.messageToContent message
+    -- Determine the assistant message (if any) for the transcript.
+    -- The user turn of THIS operation and the assistant reply are both appended
+    -- to the conversation so the next operation sees the full exchange (the
+    -- assistant turn is appended regardless of decode success — the model
+    -- answered — so continuity is never lost).
+    -- A response choice carries a 'Message' whose content is plain 'Text'; we
+    -- convert it into a request-style message via 'toDurableMessage' so it can
+    -- be replayed losslessly on the next operation.
+    let originalMsg = fmap (\Chat.Choice{message} -> message) (choices !? 0)
+        durableMsg = fmap toDurableMessage originalMsg
+        -- The new durable turns: always the user turn, plus the assistant reply
+        -- when a choice exists.
+        newTurns = V.singleton usrMsg <> maybe V.empty V.singleton durableMsg
+        conv' = conv <> conversationFromTurns newTurns
+        rawContent = Chat.messageToContent <$> originalMsg
         decoded = eitherDecodeStrictText <$> rawContent
     logCtx <- view logContextL
-    case decoded of
+    result <- case decoded of
         Just (Right a) -> pure (Just a)
         Just (Left err) -> do
             let msg =
@@ -130,6 +187,7 @@ askAI (AIRequest prompt systemPrompt _outputType thinkingEnabled) = do
             glog msg
             pure Nothing
         Nothing -> pure Nothing
+    pure (result, conv')
 
 -- | Encode an Aeson 'Value' to strict 'Text'.
 -- POST-CONTRACT: Result is the JSON serialisation of the input value.
@@ -167,7 +225,9 @@ ensureObjectType v = v
 --   tool execution through the respective lenses. 'agentMaxIterations' uses
 --   'Natural' so negative values are impossible.
 -- POST-CONTRACT: Returns the decoded final response when the agent converges
---   within the iteration budget, otherwise 'Nothing'.
+--   within the iteration budget, otherwise 'Nothing'. This is the stateless
+--   wrapper over 'solveWithAgentLoopContinuing'; it discards the resulting
+--   'Conversation'.
 solveWithAgentLoop ::
     ( HasAIMethods env
     , HasToolDescriptions env
@@ -179,22 +239,40 @@ solveWithAgentLoop ::
     , MonadUnliftIO m
     , FromJSON b
     ) => AgentRequest b -> m (Maybe b)
-solveWithAgentLoop AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations, thinkingEnabled} = go agentMaxIterations initialMessages
-  where
-    initialMessages = V.fromList
-        [ Chat.System
-            { content = [Chat.Text $ renderPOMLtoPrompt agentSystemPrompt]
-            , name = Nothing
-            , extra = Nothing
-            }
-        , Chat.User
-            { content = [Chat.Text $ renderPOMLtoPrompt agentPrompt]
-            , name = Nothing
-            , extra = Nothing
-            }
-        ]
+solveWithAgentLoop req = fst <$> solveWithAgentLoopContinuing req emptyConversation
 
-    go 0 _ = pure Nothing
+{- | Run a multi-turn agent loop with tool use, threading and returning a 'Conversation'.
+PRE-CONTRACT: The input 'Conversation' does NOT begin with a 'Chat.System' message. The single leading System message injected on entry is stripped from the returned 'Conversation' via 'V.drop 1'.
+POST-CONTRACT: Returns the decoded final response and a 'Conversation' containing all durable turns (replayed + new). When the loop is exhausted or the API returns no choice, the returned 'Conversation' still reflects the turns exchanged so far (minus the leading System).
+-}
+solveWithAgentLoopContinuing ::
+    ( HasAIMethods env
+    , HasToolDescriptions env
+    , HasToolCallExec env
+    , HasGLogFunc env
+    , GMsg env ~ AppLogMsgWithContext
+    , HasLoggingContext env
+    , MonadReader env m
+    , MonadUnliftIO m
+    , FromJSON b
+    ) => AgentRequest b -> Conversation -> m (Maybe b, Conversation)
+solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations, thinkingEnabled} conv = do
+    (result, finalHistory) <- go agentMaxIterations initialMessages
+    pure (result, conversationFromTurns (V.drop 1 finalHistory))
+  where
+    initialMessages = V.cons sysMsg (unConversation conv <> V.singleton usrMsg)
+    sysMsg = Chat.System
+        { content = [Chat.Text $ renderPOMLtoPrompt agentSystemPrompt]
+        , name = Nothing
+        , extra = Nothing
+        }
+    usrMsg = Chat.User
+        { content = [Chat.Text $ renderPOMLtoPrompt agentPrompt]
+        , name = Nothing
+        , extra = Nothing
+        }
+
+    go 0 history = pure (Nothing, history)
     go remaining history = do
         V1.Methods{V1.createChatCompletion} <- view aiMethodsL
         toolDescs <- view toolDescriptionsL
@@ -216,7 +294,7 @@ solveWithAgentLoop AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIteratio
         Chat.ChatCompletionObject{choices} <- liftIO $ createChatCompletion req
 
         case choices !? 0 of
-            Nothing -> pure Nothing
+            Nothing -> pure (Nothing, history)
             Just Chat.Choice{message, finish_reason} ->
                 case message of
                     Chat.Assistant{Chat.tool_calls = Just tcs}
@@ -258,7 +336,11 @@ solveWithAgentLoop AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIteratio
                             go (remaining - 1) (history <> V.fromList (assistantMsg : toolMsgs))
                     _ -> do
                         logReasoningContent message
-                        decodeContent (Chat.messageToContent message)
+                        r <- decodeContent (Chat.messageToContent message)
+                        -- Append the final assistant turn so the transcript stays
+                        -- complete for continuity: the model's reply is itself a
+                        -- durable turn that the next operation must replay.
+                        pure (r, history <> V.singleton (toDurableMessage message))
 
     decodeContent content
         | content == "" = pure Nothing

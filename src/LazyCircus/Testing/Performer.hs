@@ -43,7 +43,7 @@ module LazyCircus.Testing.Performer (
 where
 
 import Database.PostgreSQL.Simple qualified as Simple
-import LazyCircus.AI (HasAIMethods (..))
+import LazyCircus.AI (HasAIMethods (..), emptyConversation)
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
 import LazyCircus.App.Service (HasServiceLib (..), HasToolCallExec (..), HasToolDescriptions (..), callViaServiceLib)
@@ -252,8 +252,10 @@ instance MailScriptPerformer (TestPerformer (EnvWithMocks serviceLib)) where
     makeMail' = buildMail
 
 -- | Returns no decoded AI answers in tests.
+-- The continuing primitive is overridden so the stateless 'ask'' default (and
+-- the 'solveWithAgentContinuing'' default) inherit the no-op behaviour.
 instance AILangPerformer (TestPerformer (EnvWithMocks serviceLib)) where
-    ask' _ = pure Nothing
+    askContinuing' _ _ = pure (Nothing, emptyConversation)
 
 -- | Executes servant-client actions against the real HTTP backend using the client environment.
 instance HTTPPerformer (TestPerformer (AppWithClientEnv (EnvWithMocks serviceLib))) where

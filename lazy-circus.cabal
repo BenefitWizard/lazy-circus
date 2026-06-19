@@ -27,6 +27,7 @@ library
   exposed-modules:
       LazyCircus
       LazyCircus.AI
+      LazyCircus.AI.Conversation
       LazyCircus.AI.POML
       LazyCircus.AI.POML.Table
       LazyCircus.AI.POML.Types

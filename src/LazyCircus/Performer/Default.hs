@@ -18,7 +18,7 @@ module LazyCircus.Performer.Default (
     -- runDefaultScenario,
 ) where
 
-import LazyCircus.AI (askAI, solveWithAgentLoop)
+import LazyCircus.AI (askAIContinuing, solveWithAgentLoopContinuing)
 import LazyCircus.App.Default
 import LazyCircus.App.Log
 import LazyCircus.App.Service (HasToolDescriptions (..), callViaServiceLib)
@@ -104,9 +104,11 @@ instance MailScriptPerformer (DefaultPerformer (DefaultApp serviceLib)) where
 
 -- | Routes AI requests through the configured OpenAI client.
 -- IO operations are wrapped with 'timedAndLog' for automatic timing.
+-- The continuing primitives are defined here; the stateless 'ask'' and
+-- 'solveWithAgent'' are inherited from the class defaults.
 instance AILangPerformer (DefaultPerformer (DefaultApp serviceLib)) where
-    ask' arg = timedAndLog "AI" "Ask" $ askAI arg
-    solveWithAgent' arg = timedAndLog "AI" "SolveWithAgent" $ solveWithAgentLoop arg
+    askContinuing' arg conv = timedAndLog "AI" "Ask" $ askAIContinuing arg conv
+    solveWithAgentContinuing' arg conv = timedAndLog "AI" "SolveWithAgent" $ solveWithAgentLoopContinuing arg conv
 
 -- | Executes servant-client actions against the real HTTP backend using the client environment.
 -- Wrapped with 'timedAndLog' for automatic timing.

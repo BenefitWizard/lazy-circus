@@ -13,12 +13,13 @@ module AIAgentSpec (spec) where
 import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson.KeyMap qualified as KM
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
-import LazyCircus.AI (AgentRequest(..), HasAIMethods(..), solveWithAgentLoop)
+import LazyCircus.AI (AIRequest(..), AgentRequest(..), HasAIMethods(..), askAIContinuing, conversationFromTurns, emptyConversation, solveWithAgentLoop, solveWithAgentLoopContinuing, unConversation)
 import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.App.Service (HasToolCallExec(..), ToolCallExec(..), ToolDescription(..))
 import SimpleServiceLib (AllServices)
 import LazyCircus.Scenario (evalScript)
 import LazyCircus.Scene.AI (solveWithAgent)
+import qualified LazyCircus.Scene.AI as Scene (ask)
 import LazyCircus.Script (Script(..))
 import LazyCircus.Testing.Performer (runWithDefaultMocks, runScenarioProgram)
 import OpenAI.V1 qualified as V1
@@ -71,6 +72,22 @@ mockCompletion contentText toolCalls finishReason = Chat.ChatCompletionObject
 
 spec :: Spec
 spec = do
+    describe "Conversation (Semigroup/Monoid)" $ do
+        it "emptyConversation holds no turns" $
+            V.length (unConversation emptyConversation) `shouldBe` 0
+        it "appending conversations concatenates their turns" $ do
+            let mkUser :: Chat.Message (Vector Chat.Content)
+                mkUser = Chat.User
+                    { content = V.singleton (Chat.Text "hi")
+                    , name = Nothing
+                    , extra = Nothing
+                    }
+                a = conversationFromTurns (V.singleton mkUser)
+                b = conversationFromTurns (V.fromList [mkUser, mkUser])
+            V.length (unConversation (a <> b)) `shouldBe` 3
+            -- `mempty` is the identity (emptyConversation == mempty by length).
+            V.length (unConversation (a <> mempty)) `shouldBe` 1
+
     aroundAll withTestApp $ do
         describe "solveWithAgent (test performer - returns Nothing)" $ do
             it "returns Nothing in test environment without API calls" $ \app -> do
@@ -306,8 +323,8 @@ spec = do
                     secondResponse = mockCompletion "{\"status\": \"done\"}" Nothing "stop"
                 requestsRef <- newIORef ([] :: [Chat.CreateChatCompletion])
                 counterRef <- newIORef (0 :: Int)
-                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \req -> do
-                        atomicModifyIORef' requestsRef (\rs -> (rs ++ [req], ()))
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \sentReq -> do
+                        atomicModifyIORef' requestsRef (\rs -> (rs ++ [sentReq], ()))
                         n <- atomicModifyIORef' counterRef (\c -> (c + 1, c))
                         pure $ if n == 0 then firstResponse else secondResponse
                     }
@@ -327,3 +344,125 @@ spec = do
                     [_, _, assistantMsg, _] ->
                         Chat.messageExtra assistantMsg `shouldBe` Just extraObj
                     _ -> expectationFailure $ "Expected 4 messages in second request, got " ++ show (V.length (Chat.messages secondReq))
+
+        describe "solveWithAgentLoopContinuing (conversation continuity)" $ do
+            it "replays prior turns in the second agent request" $ \app -> do
+                let resp1 = mockCompletion "{\"v\": 1}" Nothing "stop"
+                    resp2 = mockCompletion "{\"v\": 2}" Nothing "stop"
+                responsesRef <- newIORef [resp1, resp2]
+                requestsRef <- newIORef ([] :: [Chat.CreateChatCompletion])
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \sentReq -> do
+                        atomicModifyIORef' requestsRef (\rs -> (rs ++ [sentReq], ()))
+                        atomicModifyIORef' responsesRef $ \case
+                            [] -> error "No more mock responses"
+                            (r : rest) -> (rest, r)
+                    }
+                    req :: AgentRequest Value = AgentRequest
+                        { agentPrompt = ["test"]
+                        , agentSystemPrompt = ["test"]
+                        , agentMaxIterations = 5
+                        , thinkingEnabled = False
+                        }
+                (r1, conv1) <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoopContinuing req emptyConversation)
+                r1 `shouldBe` Just (object ["v" .= (1 :: Int)])
+                -- conv1 excludes the leading System: [User1, Assistant1].
+                V.length (unConversation conv1) `shouldBe` 2
+                (r2, _) <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoopContinuing req conv1)
+                r2 `shouldBe` Just (object ["v" .= (2 :: Int)])
+                capturedReqs <- readIORef requestsRef
+                length capturedReqs `shouldBe` 2
+                let secondReq = capturedReqs !! 1
+                -- Second request replays conv1 verbatim then appends the new user:
+                -- [System, User1, Assistant1, User2].
+                case V.toList (Chat.messages secondReq) of
+                    [_sys, _u1, _a1, _u2] -> pure ()
+                    _ -> expectationFailure $ "Expected 4 messages in second request, got " ++ show (V.length (Chat.messages secondReq))
+
+            it "losslessly replays a tool exchange preserving tool_call_id" $ \app -> do
+                let toolCall = TC.ToolCall_Function
+                        { TC.id = "call_xyz"
+                        , TC.function = TC.Function
+                            { TC.name = "get_status"
+                            , TC.arguments = "{}"
+                            }
+                        }
+                    resp1 = mockCompletion "checking" (Just (V.fromList [toolCall])) "tool_calls"
+                    resp2 = mockCompletion "{\"done\": true}" Nothing "stop"
+                    resp3 = mockCompletion "{\"done\": true}" Nothing "stop"
+                responsesRef <- newIORef [resp1, resp2, resp3]
+                requestsRef <- newIORef ([] :: [Chat.CreateChatCompletion])
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \sentReq -> do
+                        atomicModifyIORef' requestsRef (\rs -> (rs ++ [sentReq], ()))
+                        atomicModifyIORef' responsesRef $ \case
+                            [] -> error "No more mock responses"
+                            (r : rest) -> (rest, r)
+                    }
+                    mockExec = ToolCallExec $ \_ _ -> pure $ object ["status" .= ("ok" :: Text)]
+                    req :: AgentRequest Value = AgentRequest
+                        { agentPrompt = ["test"]
+                        , agentSystemPrompt = ["test"]
+                        , agentMaxIterations = 5
+                        , thinkingEnabled = False
+                        }
+                (r, conv1) <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoopContinuing req emptyConversation)
+                r `shouldBe` Just (object ["done" .= True])
+                -- conv1: [User1, Assistant(tool_calls), Tool(result), Assistant(final answer)].
+                V.length (unConversation conv1) `shouldBe` 4
+                (r2, _) <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoopContinuing req conv1)
+                r2 `shouldBe` Just (object ["done" .= True])
+                capturedReqs <- readIORef requestsRef
+                -- Call 1: tool round + final round = 2 requests. Call 2: 1 request.
+                length capturedReqs `shouldBe` 3
+                let replayedReq = capturedReqs !! 2
+                    hasToolWithCallId = any
+                        (\case Chat.Tool{ Chat.tool_call_id = tid } -> tid == "call_xyz"; _ -> False)
+                        (V.toList (Chat.messages replayedReq))
+                hasToolWithCallId `shouldBe` True
+
+        describe "askAIContinuing (conversation continuity)" $ do
+            it "threads the conversation across two asks with a single leading System" $ \app -> do
+                let resp1 = mockCompletion "{\"a\": 1}" Nothing "stop"
+                    resp2 = mockCompletion "{\"a\": 2}" Nothing "stop"
+                responsesRef <- newIORef [resp1, resp2]
+                requestsRef <- newIORef ([] :: [Chat.CreateChatCompletion])
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \sentReq -> do
+                        atomicModifyIORef' requestsRef (\rs -> (rs ++ [sentReq], ()))
+                        atomicModifyIORef' responsesRef $ \case
+                            [] -> error "No more mock responses"
+                            (r : rest) -> (rest, r)
+                    }
+                    aiReq :: AIRequest Value = AIRequest
+                        { prompt = ["test"]
+                        , systemPrompt = ["test"]
+                        , outputType = Proxy
+                        , thinkingEnabled = False
+                        }
+                (r1, conv1) <- runRIO (app & aiMethodsL .~ mockMethods) (askAIContinuing aiReq emptyConversation)
+                r1 `shouldBe` Just (object ["a" .= (1 :: Int)])
+                V.length (unConversation conv1) `shouldBe` 2
+                (r2, _) <- runRIO (app & aiMethodsL .~ mockMethods) (askAIContinuing aiReq conv1)
+                r2 `shouldBe` Just (object ["a" .= (2 :: Int)])
+                capturedReqs <- readIORef requestsRef
+                length capturedReqs `shouldBe` 2
+                let secondReq = capturedReqs !! 1
+                    msgs = V.toList (Chat.messages secondReq)
+                length msgs `shouldBe` 4
+                case msgs of
+                    (Chat.System{} : _) -> pure ()
+                    _ -> expectationFailure "Expected the first message of the second request to be System"
+                -- The System context is ephemeral: exactly one System per request.
+                length [() | Chat.System{} <- msgs] `shouldBe` (1 :: Int)
+
+        describe "ask (test performer - non-regression)" $ do
+            it "returns Nothing in test environment without API calls" $ \app -> do
+                let aiReq :: AIRequest Value = AIRequest
+                        { prompt = ["Calculate 2+2"]
+                        , systemPrompt = ["You are a calculator."]
+                        , outputType = Proxy
+                        , thinkingEnabled = False
+                        }
+                    script :: Script (Maybe Value)
+                    script = AIScriptDef [] (Scene.ask aiReq)
+                (_, result) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ evalScript script
+                result `shouldBe` (Nothing :: Maybe Value)
