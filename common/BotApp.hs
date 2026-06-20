@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE NoImplicitPrelude #-}
@@ -15,8 +16,10 @@ module BotApp (
 ) where
 
 import Control.Exception qualified as CE
+import Control.Monad.Except (catchError)
 import RIO hiding (ask, log, logError, logInfo, logWarn)
 import RIO.Text qualified as Text
+import Servant.Client (ClientError)
 import System.IO (hPutStrLn, stderr)
 
 import Telegram.Bot.API (
@@ -30,32 +33,42 @@ import Telegram.Bot.Simple (
     replyText,
     (<#),
  )
+import Telegram.Bot.Simple.Eff (BotM (..))
 import Telegram.Bot.Simple.UpdateParser ()
 
+import LazyCircus.AI (Conversation, emptyConversation)
 import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.Scenario (run)
 import LazyCircus.Performer.Default (runDefaultPerformer)
 import LazyCircus.Script (Script)
 
-import BotScenarios (askAgent, createActWithReaction, deleteAct, generateReaction, getAct, listActs)
+import BotScenarios (askAgentContinuing, createActWithReaction, deleteAct, generateReaction, getAct, listActs)
 import Common (CircusAct, CircusActT (..))
 import LazyCircus.App.Service
 import Network.Mail.Mime (Address (..))
 import SimpleServiceLib (AllServices)
 
--- | Per-chat conversation state for the multi-step /newact dialog.
+-- | Per-chat conversation state for the multi-step /newact dialog and the agent busy-lock.
 data ChatState
     = Idle
     | WaitingForName
     | -- | act name already received
       WaitingForDescription Text
+    | -- | an agent turn is in flight; used as a non-reentrancy lock so a second
+      -- text message arriving during the (multi-second) agent call is deferred
+      -- instead of reading a stale 'modelConversation' and clobbering it.
+      AgentBusy
 
--- | Bot model holding the current chat conversation state.
+-- | Bot model holding the current chat conversation state and the durable agent transcript.
 data Model = Model
     { modelChatState :: ChatState
+      -- ^ current multi-step dialog state for commands like /newact
+    , modelConversation :: Conversation
+      -- ^ durable agent 'Conversation' threaded across messages so tool exchanges survive
     }
 
 -- | Actions the bot can perform, derived from incoming Telegram updates.
+-- 'Show' is hand-written because 'Conversation' intentionally has no 'Show' instance.
 data Action
     = NoAction
     | HandleStart
@@ -65,7 +78,55 @@ data Action
     | HandleReactAct Int32
     | HandleDeleteAct Int32
     | HandleTextMessage Text
-    deriving (Show, Eq)
+    | HandleAgentDone Conversation (Maybe Text)
+    -- ^ follow-up action carrying the agent's resulting 'Conversation' and optional text reply;
+    -- emitted by the 'HandleTextMessage'/'Idle' branch so the pure 'Eff' model can be updated.
+
+instance Show Action where
+    show a = case a of
+        NoAction -> "NoAction"
+        HandleStart -> "HandleStart"
+        HandleNewAct -> "HandleNewAct"
+        HandleList -> "HandleList"
+        HandleViewAct n -> "HandleViewAct " ++ show n
+        HandleReactAct n -> "HandleReactAct " ++ show n
+        HandleDeleteAct n -> "HandleDeleteAct " ++ show n
+        HandleTextMessage t -> "HandleTextMessage " ++ show t
+        HandleAgentDone _conv mResp -> "HandleAgentDone <Conversation> " ++ show mResp
+
+-- | Structural equality for 'Action'. All constructors compare fully, EXCEPT
+-- 'HandleAgentDone' which compares only the reply text — the carried
+-- 'Conversation' intentionally has no 'Eq' instance (see "LazyCircus.AI.Conversation").
+-- LAW: reflexivity: holds; for 'HandleAgentDone' equality is partial on the text only.
+instance Eq Action where
+    (==) = \case
+        NoAction -> \case
+            NoAction -> True
+            _ -> False
+        HandleStart -> \case
+            HandleStart -> True
+            _ -> False
+        HandleNewAct -> \case
+            HandleNewAct -> True
+            _ -> False
+        HandleList -> \case
+            HandleList -> True
+            _ -> False
+        HandleViewAct a -> \case
+            HandleViewAct b -> a == b
+            _ -> False
+        HandleReactAct a -> \case
+            HandleReactAct b -> a == b
+            _ -> False
+        HandleDeleteAct a -> \case
+            HandleDeleteAct b -> a == b
+            _ -> False
+        HandleTextMessage a -> \case
+            HandleTextMessage b -> a == b
+            _ -> False
+        HandleAgentDone _ a -> \case
+            HandleAgentDone _ b -> a == b
+            _ -> False
 
 {- | Build a telegram-bot-simple BotApp that routes commands to Lazy Circus scenarios.
 PRE-CONTRACT: The 'DefaultApp' environment must be fully initialised (DB, AI, SMTP, etc.).
@@ -74,7 +135,7 @@ POST-CONTRACT: Returns a BotApp whose initial model is 'Idle'.
 makeBot :: DefaultApp AllServices -> Maybe Address -> BotApp Model Action
 makeBot app notificationEmail =
     BotApp
-        { botInitialModel = Model Idle
+        { botInitialModel = Model Idle emptyConversation
         , botAction = flip handleUpdate
         , botHandler = handleAction app notificationEmail
         , botJobs = []
@@ -118,7 +179,7 @@ handleAction app notificationEmail action model = case action of
                 \/delete <id> — delete an act"
             return ()
     HandleNewAct ->
-        Model WaitingForName <# do
+        model { modelChatState = WaitingForName } <# do
             replyText "🎭 Enter act name:"
             return ()
     HandleList ->
@@ -161,25 +222,36 @@ handleAction app notificationEmail action model = case action of
                     replyText "❌ An internal error occurred. Please try again later."
                 Right () -> replyText "🗑️ Act deleted."
             return ()
+    HandleAgentDone conv mResp ->
+        model { modelConversation = conv, modelChatState = busyToIdle (modelChatState model) } <# do
+            case mResp of
+                Nothing  -> replyText "🤷 I couldn't process your request. Please try again."
+                Just resp -> replyText resp
+            return ()
     HandleTextMessage txt -> case modelChatState model of
         Idle ->
+            model { modelChatState = AgentBusy } <# do
+                safeReplyText "🤔 Thinking..."
+                result <-
+                    liftIO $ CE.try @SomeException $
+                        runRIO app $ runDefaultPerformer $ run @Script @AllServices
+                            (askAgentContinuing (modelConversation model) txt)
+                (mResp, conv') <- case result of
+                    Left e -> do
+                        liftIO $ hPutStrLn stderr $ "Bot error (agent): " ++ show e
+                        pure (Nothing, modelConversation model)
+                    Right (r, c) -> pure (r, c)
+                pure (HandleAgentDone conv' mResp)
+        AgentBusy ->
             model <# do
-                replyText "🤔 Thinking..."
-                result <- liftIO $ CE.try @SomeException $
-                    runRIO app $ runDefaultPerformer $ run @Script @AllServices (askAgent txt)
-                case result of
-                    Left err -> do
-                        liftIO $ hPutStrLn stderr $ "Bot error (agent): " ++ show err
-                        replyText "❌ An internal error occurred. Please try again later."
-                    Right Nothing -> replyText "🤷 I couldn't process your request. Please try again."
-                    Right (Just response) -> replyText response
+                replyText "⏳ Still processing your previous message — please wait for the reply, then resend."
                 return ()
         WaitingForName ->
-            Model (WaitingForDescription txt) <# do
+            model { modelChatState = WaitingForDescription txt } <# do
                 replyText "📝 Enter act description:"
                 return ()
         WaitingForDescription name ->
-            Model Idle <# do
+            model { modelChatState = Idle } <# do
                 replyText "⏳ Creating act..."
                 let email = fromMaybe (Address Nothing "noreply@lazy-circus.example") notificationEmail
                 result <- liftIO $ CE.try @SomeException $ runRIO app $ runDefaultPerformer $ run @Script @AllServices $ createActWithReaction name txt email
@@ -220,3 +292,23 @@ parseCommandArg :: Text -> Text -> Maybe Int32
 parseCommandArg prefix txt = do
     let rest = Text.drop (Text.length prefix + 1) txt
     readMaybe (Text.unpack rest)
+
+{- | 'replyText' that swallows 'Servant.Client.ClientError' so a transient Telegram
+API / network failure cannot abort the enclosing 'BotM' effect. This matters in the
+'Idle' agent arm, where aborting before emitting 'HandleAgentDone' would stick the
+'AgentBusy' lock permanently (the model is a single global 'TVar').
+PRE-CONTRACT: None.
+POST-CONTRACT: Never throws 'ClientError'; a failed reply is silently dropped (the consumer loop logs it).
+-}
+safeReplyText :: Text -> BotM ()
+safeReplyText t =
+    BotM (_runBotM (replyText t) `catchError` \(_e :: ClientError) -> pure ())
+
+{- | Release the agent busy-lock: reset 'AgentBusy' back to 'Idle' while leaving any
+unrelated chat state untouched (e.g. a /newact dialog begun while an agent turn was in flight).
+PRE-CONTRACT: None.
+POST-CONTRACT: 'AgentBusy' maps to 'Idle'; every other 'ChatState' is returned unchanged.
+-}
+busyToIdle :: ChatState -> ChatState
+busyToIdle AgentBusy = Idle
+busyToIdle other     = other

@@ -1,3 +1,4 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
@@ -7,6 +8,7 @@ module BotScenariosSpec (spec) where
 
 import BotScenarios
     ( askAgent
+    , askAgentContinuing
     , createActWithReaction
     , deleteAct
     , generateReaction
@@ -17,6 +19,7 @@ import Common
 import Control.Exception qualified as E
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
 import LazyCircus (tgScript)
+import LazyCircus.AI (conversationFromTurns, emptyConversation, unConversation)
 import LazyCircus.App.Log (AppLogMsg(..), AppLogMsgWithContext(..), LoggingContext(..))
 import LazyCircus.Testing.Performer
     ( readLog
@@ -36,9 +39,11 @@ import LazyCircus.Scenario (evalScript)
 import LazyCircus.Scene.Telegram.Lang (getBotName, scheduleMessage, sendDocument, sendMessage)
 import LazyCircus.Telegram.Types (WithImportance(..))
 import Network.Mail.Mime (Address(..))
+import OpenAI.V1.Chat.Completions qualified as Chat
 import RIO
 import RIO.List (find)
 import RIO.Map qualified as M
+import RIO.Vector qualified as V
 import Data.Text qualified as T
 import Test.Hspec
 import Telegram.Bot.API (ChatId(..), Response(..), SomeChatId(..), defSendMessage)
@@ -249,10 +254,36 @@ spec = do
                 (mocks, _) <- runWithDefaultMocks app $ do
                     runScenarioProgram $ askAgent "Test query text"
                 contextualLogs <- readLogWithContext mocks
-                case contextualLogs of
-                    [AppLogMsgWithContext _ (LogContext ctx) _] -> do
+                case find (isLogContaining "Agent: processing query" . logMsg) contextualLogs of
+                    Nothing -> expectationFailure "Expected contextual log entry for query processing"
+                    Just (AppLogMsgWithContext _ (LogContext ctx) _) ->
                         M.lookup "query" ctx `shouldBe` Just "Test query text"
-                    _ -> expectationFailure "Expected exactly one contextual log entry"
+
+        describe "askAgentContinuing" $ do
+            it "returns (Nothing, emptyConversation) in the test environment" $ \app -> do
+                (_, (mResp, conv)) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ askAgentContinuing emptyConversation "What is 2 + 2?"
+                mResp `shouldBe` Nothing
+                V.length (unConversation conv) `shouldBe` 0
+
+            it "keeps the input Conversation unchanged when the agent yields no result (last-known-good)" $ \app -> do
+                let userTurn :: Chat.Message (Vector Chat.Content)
+                    userTurn = Chat.User
+                        { content = V.singleton (Chat.Text "previous")
+                        , name = Nothing
+                        , extra = Nothing
+                        }
+                    c1 = conversationFromTurns (V.singleton userTurn)
+                (_, (mResp, returnedConv)) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ askAgentContinuing c1 "follow up"
+                mResp `shouldBe` Nothing
+                V.length (unConversation returnedConv) `shouldBe` V.length (unConversation c1)
+
+            it "logs the continuing processing marker" $ \app -> do
+                (mocks, _) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $ askAgentContinuing emptyConversation "Calculate 15 + 27"
+                logs <- readLog mocks
+                any (isLogContaining "Agent: processing query") logs `shouldBe` True
 
     aroundAll withBotTestApp $ do
         describe "Telegram capture" $ do

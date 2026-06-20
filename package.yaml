@@ -121,6 +121,7 @@ internal-libraries:
       - TypeApplications
       - StrictData
     dependencies:
+      - mtl
       - rio
       - beam-core
       - beam-postgres

@@ -163,6 +163,7 @@ library common-circus
     , jose
     , lazy-circus
     , mime-mail
+    , mtl
     , openai
     , openapi3
     , postgresql-simple

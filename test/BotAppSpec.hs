@@ -13,6 +13,7 @@ import Data.Int (Int32)
 import Test.Hspec
 
 import BotApp (Action (..), ChatState (..), Model (..), handleUpdate)
+import LazyCircus.AI (emptyConversation)
 import Telegram.Bot.API (Update (..))
 
 -- | Build a minimal Update from JSON that carries a text message.
@@ -35,7 +36,7 @@ mkTextUpdate txt = case fromJSON jsonVal of
 
 -- | Model in Idle state, used as the default for routing tests.
 idleModel :: Model
-idleModel = Model Idle
+idleModel = Model Idle emptyConversation
 
 spec :: Spec
 spec = do

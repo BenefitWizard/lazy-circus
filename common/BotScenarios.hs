@@ -15,6 +15,7 @@ module BotScenarios (
     deleteAct,
     AudienceReaction,
     askAgent,
+    askAgentContinuing,
     AgentResponse,
 ) where
 
@@ -24,7 +25,7 @@ import Common hiding (migration)
 import Control.Exception (ErrorCall (..))
 import Data.Aeson
 import LazyCircus (aiScript, mailScript)
-import LazyCircus.AI (AgentRequest (..), AIRequest (..))
+import LazyCircus.AI (AgentRequest (..), AIRequest (..), Conversation, emptyConversation)
 import LazyCircus.AI.POML.Types (
     POML,
     cp_,
@@ -38,7 +39,7 @@ import LazyCircus.AI.POML.Types (
     text,
  )
 import LazyCircus.Scenario (DbMode (..), ScenarioProgram, evalScript, logError, logInfo, logWarn, runAsync, runSafely, throw, withLogContext)
-import LazyCircus.Scene.AI.Lang (ask, solveWithAgent)
+import LazyCircus.Scene.AI.Lang (ask, solveWithAgentContinuing)
 import SimpleServiceLib (aiScriptWithAll)
 import LazyCircus.Scene.DB.Lang (
     create,
@@ -111,26 +112,39 @@ circusAgentSystemPrompt =
 defaultAgentMaxIterations :: Natural
 defaultAgentMaxIterations = 10
 
-{- | Send a user query to the AI agent loop for autonomous tool use.
-PRE-CONTRACT: The AI service must be configured and tool descriptions/exec must be set on the app.
-POST-CONTRACT: Returns 'Just' the agent's text response, or 'Nothing' if the agent fails to converge.
+{- | Continuing version of 'askAgent': threads a 'Conversation' through the agent
+loop and keeps the last-known-good transcript on any failure.
+PRE-CONTRACT: The input 'Conversation' does not contain a leading 'Chat.System' message (see the 'Conversation' invariant).
+POST-CONTRACT: Returns @(Just resp, conv')@ on success (conv' is the updated transcript including tool exchanges). On exception or no-response, returns @(Nothing, <input conv>)@ — the transcript is NOT overwritten.
 -}
-askAgent :: Text -> ScenarioProgram Script serviceLib (Maybe Text)
-askAgent userQuery = do
+askAgentContinuing :: Conversation -> Text -> ScenarioProgram Script serviceLib (Maybe Text, Conversation)
+askAgentContinuing conv userQuery =
     withLogContext [("query", userQuery)] $ do
-        logInfo "Agent: processing query"
+        logInfo "Agent: processing query (continuing)"
         let req = AgentRequest
                 { agentPrompt = [text userQuery]
                 , agentSystemPrompt = circusAgentSystemPrompt
                 , agentMaxIterations = defaultAgentMaxIterations
                 , thinkingEnabled = False
                 }
-        mResult <- evalScript $ aiScriptWithAll $ solveWithAgent req
-        case mResult of
-            Nothing -> do
-                logWarn "Agent: no response"
-                pure Nothing
-            Just (AgentResponse resp) -> pure (Just resp)
+        eitherResult <- runSafely @SomeException $
+            evalScript $ aiScriptWithAll $ solveWithAgentContinuing req conv
+        case eitherResult of
+            Left _ -> do
+                logError "Agent: exception during agent loop (keeping last-known-good)"
+                pure (Nothing, conv)
+            Right (mResult, conv') -> case mResult of
+                Just (AgentResponse resp) -> pure (Just resp, conv')
+                Nothing -> do
+                    logWarn "Agent: no response (keeping last-known-good)"
+                    pure (Nothing, conv)
+
+{- | Send a user query to the AI agent loop for autonomous tool use (stateless).
+PRE-CONTRACT: The AI service must be configured and tool descriptions/exec must be set on the app.
+POST-CONTRACT: Returns 'Just' the agent's text response, or 'Nothing' if the agent fails to converge. The resulting 'Conversation' is discarded (see 'askAgentContinuing' for the stateful form).
+-}
+askAgent :: Text -> ScenarioProgram Script serviceLib (Maybe Text)
+askAgent userQuery = fst <$> askAgentContinuing emptyConversation userQuery
 
 -- | System prompt for audience reaction generation, following the QuickSpell prompt structure.
 reactionSystemPrompt :: [POML]
