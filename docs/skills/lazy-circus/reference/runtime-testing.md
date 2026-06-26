@@ -172,6 +172,7 @@ These run one sub-language in isolation with mock logging:
 | Effect | Test behavior |
 |---|---|
 | Telegram `sendMessage` | captures `WithImportance SendMessageRequest` values and returns canned/default response |
+| Telegram `sendDocument` | returns the mock `defaultResponse`; not captured |
 | Telegram scheduled sends | captured in a separate list |
 | Telegram missing bot | throws `NoBotConfigured` exactly like production dispatch |
 | Telegram `getBotName` | returns the supplied bot name |
@@ -179,7 +180,7 @@ These run one sub-language in isolation with mock logging:
 | Telegram `editMessageText` | always returns `Nothing` |
 | Mail `sendMail` | captures mail values |
 | Mail `makeMail` | uses real mail construction from env creds |
-| AI `ask` | always returns `Nothing` |
+| AI `ask` / `askContinuing` / `solveWithAgent` / `solveWithAgentContinuing` | always returns `Nothing` paired with an unchanged (empty) `Conversation` |
 | HTTP `runClient` | real execution via servant-client against target base URL |
 | DB | runs against a real DB connection |
 | Logging | captured in refs, not pushed to shared queue |

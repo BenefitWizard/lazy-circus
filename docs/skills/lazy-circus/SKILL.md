@@ -5,8 +5,10 @@ description: >
   Church-encoded free monads and ScenarioProgram orchestration. Use this skill whenever
   the user mentions LazyCircus, lazy-circus, ScenarioProgram, Script, DBScript,
   TelegramScript, AIScript, MailScript, HTTPScript, evalScript, tgScript, mailScript,
-  aiScript, httpScript, DefaultPerformer, DBScriptDef, HasLogLang, or asks how to write
-  scenarios, add new effects, define DB service instances, or test Lazy Circus programs.
+  aiScript, httpScript, sendDocument, askContinuing, solveWithAgent,
+  solveWithAgentContinuing, AgentRequest, Conversation, DefaultPerformer, DBScriptDef,
+  HasLogLang, or asks how to write scenarios, add new effects, define DB service
+  instances, or test Lazy Circus programs.
 ---
 
 # Lazy Circus Skill
@@ -65,6 +67,8 @@ Read more than one reference file when a task crosses layers.
    - DB -> `DBScriptDef db mode ...`
    - HTTP -> `httpScript baseUrl ...`
 - `AIScriptDef` takes a `[ToolDescription]` as its first argument; `aiScript` passes `[]` for backward compatibility.
+- For multi-turn AI, thread a `Conversation` with `askContinuing` / `solveWithAgentContinuing`. Stateless `ask` / `solveWithAgent` inject `emptyConversation` and discard the transcript.
+- A `Conversation` never holds a `Chat.System` message; build it only via `emptyConversation` or `conversationFromTurns`.
 - Use `callService` to invoke registered services from `ScenarioProgram`.
 - `ScenarioProgram` has two type parameters: `ScenarioProgram script serviceLib a`.
 - `DefaultApp` is parameterized by the service library type: `DefaultApp serviceLib`. Use `NoServiceLib` when no services are needed.
@@ -83,6 +87,7 @@ Read more than one reference file when a task crosses layers.
 - `src/LazyCircus/Script.hs`
 - `src/LazyCircus/Performer.hs`
 - `src/LazyCircus/Performer/Default.hs`
+- `src/LazyCircus/AI.hs` and `src/LazyCircus/AI/Conversation.hs` for AI request types, the agent loop, and the `Conversation` transcript
 - the relevant `src/LazyCircus/Scene/*` module for the domain you are touching
 - `src/LazyCircus/Testing/Performer.hs` for tests
 - `src/LazyCircus/DB/Service.hs` plus the concrete table module for DB integration work
@@ -100,6 +105,7 @@ Prefer LSP navigation for Haskell modules when possible.
 - Explaining reasoning in log text instead of stating the observable decision.
 - Forgetting to wrap a scene script into `Script` before `evalScript`.
 - Treating DB `create` helpers as if they returned a plain row instead of `Maybe`.
+- Building a `Conversation` with a leading `Chat.System` message, or pattern-matching on the unexported `Conversation` constructor instead of using `emptyConversation` / `conversationFromTurns`.
 - Assuming tests execute async work or fake DB behavior.
 - Adding a new public effect without the supporting `Script` dispatch and stable public facade when needed.
 - Using `makeServiceLib` with `(Name, Name)` pairs instead of `(Name, Name, [(Name, String, String)])` triples.

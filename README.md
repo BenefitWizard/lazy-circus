@@ -36,9 +36,9 @@ Lazy Circus ships with a rich set of built-in capabilities ready for production 
 
 * **Orchestration Framework:** A robust control layer (`ScenarioProgram`) for executing sub-scenarios, spawning asynchronous background tasks, managing environment state, handling errors gracefully, and calling registered services. You can orchestrate the built-in effects or plug in your own.
 * **Database Effect DSL (via `beam`):** A comprehensive database language supporting both typed CRUD operations and raw queries. Advanced features like separate Read-Only connections, Row-Level Security (RLS), and transaction management are supported out-of-the-box.
-* **Telegram Bot Integration:** A ready-to-use effect for sending messages and reactions. It natively supports running multiple bots from a single application seamlessly.
+* **Telegram Bot Integration:** A ready-to-use effect for sending messages, documents, and reactions. It natively supports running multiple bots from a single application seamlessly.
 * **Mail Integration:** A robust email effect for composing and sending transactional emails.
-* **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses and implements an XML-like prompt templating language which significantly improves prompt adherence.
+* **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses, an XML-like prompt templating language which significantly improves prompt adherence, a multi-turn `Conversation` handle that threads context across calls, and an agent loop (`solveWithAgent`) that runs a ReAct cycle with tool use against registered services.
 * **Production & Test Interpreters:** Two distinct performers (`DefaultPerformer` and `TestInterpreter`). The test runtime keeps the same shared-runner architecture as production, but swaps capabilities at the edges: DB can stay real, while Telegram, mail, AI, logging, and async work are captured through mocks in the capability layer.
 * **Structured Async Logging:** High-performance, asynchronous structured logging available universally across all effect types. It supports nested log contexts (e.g., automatically attaching a `user_id` or `trace_id` to all subsequent nested calls).
 * **Service Call Infrastructure:** A transparent mechanism for running parallel typed workers with a standardized request/response interface. When the application needs concurrent background workers that process requests one at a time, register them through `LazyCircus.App.Service` and call from scenarios with `callService` — no coupling to concrete implementations. The `makeServiceLib` Template Haskell macro generates the service library data type, config, dispatch instances, builder function, and optional tool-call plumbing for AI integration from a list of request/response/tool-spec triples.
@@ -58,7 +58,15 @@ When installed, the skill provides your AI assistant (e.g., GitHub Copilot) with
 
 To install the Lazy Circus skill for your AI workspace:
 
-Copy the `docs/skills/lazy-circus` folder into your project's AI skills directory (for example, `.claude/skills/lazy-circus` or a custom AI prompts folder).
+```bash
+# Install into ~/.opencode/skills/lazy-circus (default)
+./install_skill.sh
+
+# Or install into a custom parent skills directory
+./install_skill.sh path/to/skills
+```
+
+The script mirrors `docs/skills/lazy-circus` into the destination, removing stale files. To install manually instead, copy the `docs/skills/lazy-circus` folder into your project's AI skills directory (for example, `.claude/skills/lazy-circus` or a custom AI prompts folder).
 
 ## Installation
 
@@ -475,6 +483,7 @@ tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
 | Telegram `sendMessage` | Capture requests, returns canned responses |
 | Telegram `scheduleMessages` | Captured in a separate list |
 | Missing Telegram bot | Throws `NoBotConfigured` during script dispatch |
+| Telegram `sendDocument` | Returns mock default response; not captured |
 | Telegram others | no-op / default |
 | Mail `sendMail` | Capture Mail values |
 | Mail `makeMail` | Actual creation via SMTP credentials from env |

@@ -94,6 +94,7 @@ Main operations:
 | `getFile` | `Response File` |
 | `getBotName` | `Text` |
 | `sendMessage` | `Response Message` |
+| `sendDocument` | `Response Message` |
 | `sendImportantMessage` | `Response Message` |
 | `scheduleMessage` / `scheduleMessages` | `()` |
 | `setBotCommands` | `()` |
@@ -134,11 +135,18 @@ Program type:
 type AIScript = F AILangF
 ```
 
-Main operation:
+Main operations:
 
 | Function | Result |
 |---|---|
-| `ask` | `Maybe a` where `a` has `FromJSON` |
+| `ask` | `Maybe a` where `a` has `FromJSON` (stateless) |
+| `askContinuing` | `(Maybe a, Conversation)` — threads and returns a transcript |
+| `solveWithAgent` | `Maybe a` via a tool-using agent loop (stateless) |
+| `solveWithAgentContinuing` | `(Maybe a, Conversation)` — agent loop that threads a transcript |
+
+The stateless variants (`ask`, `solveWithAgent`) inject `emptyConversation` and discard the
+resulting transcript. Use the `Continuing` variants when a later operation must see the prior
+exchange.
 
 Example:
 
@@ -154,17 +162,51 @@ data AIRequest a = AIRequest
     { prompt :: [POML]
     , systemPrompt :: [POML]
     , outputType :: Proxy a
+    , thinkingEnabled :: Bool
     }
+```
+
+For tool-using agent loops, use `AgentRequest` (also from `LazyCircus.AI`):
+
+```haskell
+data AgentRequest a = AgentRequest
+    { agentPrompt :: [POML]
+    , agentSystemPrompt :: [POML]
+    , agentMaxIterations :: Natural
+    , thinkingEnabled :: Bool
+    }
+```
+
+### Conversation Threading
+
+A `Conversation` (from `LazyCircus.AI.Conversation`, re-exported by `LazyCircus.AI` and
+`LazyCircus.Scene.AI`) is a durable transcript of prior turns. Build one with
+`emptyConversation` or `conversationFromTurns`, and accumulate it across operations with its
+`Semigroup`/`Monoid` instances.
+
+INVARIANT: a `Conversation` never contains a `Chat.System` message — system context is
+re-injected from the request's `systemPrompt` on every operation. The `Conversation`
+constructor is intentionally not exported; build transcripts only through the smart
+constructors.
+
+```haskell
+multiTurn :: AIScript (Maybe Answer, Conversation)
+multiTurn = do
+    (r1, conv) <- askContinuing firstRequest emptyConversation
+    askContinuing secondRequest conv
 ```
 
 Production AI behavior:
 
 - uses OpenAI-compatible client methods from the environment
-- hardcodes the chat model to `deepseek-chat`
-- requests JSON object output
-- decodes the first choice only
-- logs decode failures as a sensitive log message with the current logging context
-- returns `Nothing` when decoding fails or content is absent
+- hardcodes the chat model to `deepseek-v4-flash`
+- `ask` requests JSON object output and decodes the first choice only
+- `solveWithAgent` runs a ReAct loop: it sends the transcript, executes any tool calls via the
+  registered `ToolCallExec`, appends results, and repeats until the model returns a final answer
+  or `agentMaxIterations` is exhausted
+- logs decode failures and agent tool calls/results as sensitive log messages with the current
+  logging context
+- returns `Nothing` when decoding fails, content is absent, or the iteration budget is exhausted
 
 Wrap AI scripts with `aiScript`.
 
