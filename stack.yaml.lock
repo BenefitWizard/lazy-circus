@@ -114,6 +114,17 @@ packages:
   original:
     subdir: beam-postgres
     url: https://github.com/haskell-beam/beam/archive/eafea7b9f7972853671c286d62f0c6e1bfc2a565.tar.gz
+- completed:
+    name: telegram-bot-extra
+    pantry-tree:
+      sha256: 429200761ec6c593bb7090f9f2bd873f662efe4e47ec5465c3baa37e06f625d5
+      size: 1180
+    sha256: 470191cc05d17bc913c754500c6af20e57dbf416f79ee5d50d96d54cb9c49ebe
+    size: 15925
+    url: https://github.com/BenefitWizard/telegram-bot-extra/archive/1d8be5aff2668ca15f44417fc7352649f010909f.tar.gz
+    version: 0.1.1.0
+  original:
+    url: https://github.com/BenefitWizard/telegram-bot-extra/archive/1d8be5aff2668ca15f44417fc7352649f010909f.tar.gz
 snapshots:
 - completed:
     sha256: a82ac3305208490a33760197fb2f4506be2d0310fbda0b4c041b9135f8010eb3

@@ -37,6 +37,7 @@ dependencies:
   - servant-auth
   - servant-auth-server
   - telegram-bot-api
+  - telegram-bot-extra
   - cassava
   - smtp-mail
   - mime-mail
@@ -51,6 +52,8 @@ dependencies:
   - unordered-containers
   - template-haskell
   - openapi3
+  - stm
+  - transformers
 
 ghc-options:
   - -Wall
@@ -146,4 +149,3 @@ tests:
       - lazy-circus
       - common-circus
       - hspec
-      - telegram-bot-api

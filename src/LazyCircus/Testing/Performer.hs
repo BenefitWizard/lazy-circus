@@ -18,6 +18,8 @@ module LazyCircus.Testing.Performer (
     Mocks (..),
     EnvWithMocks (..),
     TestInterpreter,
+    OutgoingMessage (..),
+    OutgoingKind (..),
     runTestInterpreter,
     changeEnv,
     runScript,
@@ -35,6 +37,7 @@ module LazyCircus.Testing.Performer (
     discardMocks,
     readTgRequests,
     readScheduledTgRequests,
+    readOutgoingMailbox,
     readLog,
     readLogWithContext,
     readSentMails,
@@ -78,11 +81,54 @@ import RIO.Map qualified as M
 import RIO.Process (HasProcessContext (..))
 import RIO.Time (getCurrentTime)
 import Servant.Client (mkClientEnv, runClientM)
-import Telegram.Bot.API (Message, Response, SendMessageRequest)
-import Telegram.Bot.API.Types (File, FileId)
+import Telegram.Bot.API (ChatId, Message, MessageId, Response, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, responseResult, sendDocumentCaption, sendDocumentChatId, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
+import Telegram.Bot.API.Types (File, FileId, MessageId (..))
 
 -- | Response factory used by the Telegram mock to derive a reply from one outgoing request.
 type OnSendMessageRequest = WithImportance SendMessageRequest -> Response Message
+
+-- | Discriminator tagging which Telegram operation produced an 'OutgoingMessage' capture.
+data OutgoingKind
+    = OutSendMessage
+    -- ^ a @sendMessage@ reply
+    | OutSendDocument
+    -- ^ a @sendDocument@ reply
+    | OutSetReaction
+    -- ^ a @setMessageReaction@ request
+    | OutEditMessage
+    -- ^ an @editMessageText@ request
+    deriving (Eq, Show)
+
+-- | A captured outgoing Telegram side effect, observable by the @tgTest@ DSL.
+--
+-- The mock publishes one 'OutgoingMessage' to the 'outgoingMailbox' 'STM.TBQueue'
+-- for every Telegram operation that produces user-visible traffic, so the test
+-- DSL's @waitFor*@ operations can observe replies deterministically through STM.
+-- The 'omMessageId' is the /assigned/ incremental id for @sendMessage@\/@sendDocument@
+-- (see 'tgMockMessageIdCounter'), or the /target/ id for @setMessageReaction@\/@editMessageText@.
+data OutgoingMessage = OutgoingMessage
+    { omKind :: OutgoingKind
+    -- ^ which Telegram operation produced this capture
+    , omChatId :: Maybe ChatId
+    -- ^ resolved numeric target chat id ('Nothing' for username-targeted sends)
+    , omText :: Maybe Text
+    -- ^ message text, when the operation carries one
+    , omMessageId :: Maybe MessageId
+    -- ^ assigned incremental id (sendMessage/sendDocument) or target id (reaction/edit)
+    , omReplyMarkup :: Maybe SomeReplyMarkup
+    -- ^ inline keyboard attached to a sent message, if any
+    }
+
+-- | Manual 'Show' for 'OutgoingMessage' because 'SomeReplyMarkup' has no 'Show'
+-- instance; the opaque markup is rendered as a placeholder.
+instance Show OutgoingMessage where
+    show om =
+        "OutgoingMessage{ omKind = " <> show (omKind om)
+            <> ", omChatId = " <> show (omChatId om)
+            <> ", omText = " <> show (omText om)
+            <> ", omMessageId = " <> show (omMessageId om)
+            <> ", omReplyMarkup = " <> maybe "Nothing" (const "(markup)") (omReplyMarkup om)
+            <> " }"
 
 -- | Telegram mock state used by the test performer.
 data TgMock = TgMock
@@ -94,6 +140,10 @@ data TgMock = TgMock
     -- ^ captured deferred Telegram sends requested via 'scheduleMessages'
     , defaultResponse :: Response Message
     -- ^ fallback response used when no canned response is queued
+    , outgoingMailbox :: TBQueue OutgoingMessage
+    -- ^ STM mailbox of every outgoing Telegram side effect, drained by the @tgTest@ DSL's @waitFor*@ ops
+    , tgMockMessageIdCounter :: TVar Int
+    -- ^ incremental counter stamping unique 'MessageId's onto mock send responses
     }
 
 -- | Mail mock state used by the test performer.
@@ -238,13 +288,97 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
     getBotName' = TG.getBotName
     sendMessage' request = do
         logTgRequests [request]
-        dequeueTgResponse request
+        tg <- askTgMock
+        let req = importancePayload request
+        assignedId <- liftIO $ publishWithFreshId tg $ \mid ->
+            outgoingSendMessage
+                mid
+                (someChatIdToChatId (sendMessageChatId req))
+                (Just (sendMessageText req))
+                (sendMessageReplyMarkup req)
+        resp <- dequeueTgResponse request
+        pure (stampMessageId assignedId resp)
     scheduleMessages' = logScheduledTgRequests
     setBotCommands' _ = pure ()
-    setMessageReaction' _ = pure ()
+    setMessageReaction' req = do
+        tg <- askTgMock
+        liftIO $
+            publishOutgoing tg $
+                OutgoingMessage
+                    { omKind = OutSetReaction
+                    , omChatId = someChatIdToChatId (setMessageReactionRequestChatId req)
+                    , omText = Nothing
+                    , omMessageId = Just (setMessageReactionRequestMessageId req)
+                    , omReplyMarkup = Nothing
+                    }
     answerCallbackQuery' _ = pure ()
-    editMessageText' _ = pure Nothing
-    sendDocument' _ = asks (defaultResponse . tgMock . mocks . app)
+    editMessageText' req = do
+        tg <- askTgMock
+        liftIO $
+            publishOutgoing tg $
+                OutgoingMessage
+                    { omKind = OutEditMessage
+                    , omChatId = someChatIdToChatId =<< editMessageTextChatId req
+                    , omText = Just (editMessageTextText req)
+                    , omMessageId = editMessageTextMessageId req
+                    , omReplyMarkup = Nothing
+                    }
+        pure Nothing
+    sendDocument' req = do
+        tg <- askTgMock
+        assignedId <- liftIO $ publishWithFreshId tg $ \mid ->
+            OutgoingMessage
+                { omKind = OutSendDocument
+                , omChatId = someChatIdToChatId (sendDocumentChatId req)
+                , omText = sendDocumentCaption req
+                , omMessageId = Just mid
+                , omReplyMarkup = Nothing
+                }
+        resp <- asks (defaultResponse . tgMock . mocks . app)
+        pure (stampMessageId assignedId resp)
+
+-- | Project the current 'TgMock' out of the bot-environment-wrapped test environment.
+askTgMock :: TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib)) TgMock
+askTgMock = asks (tgMock . mocks . app)
+
+-- | Build an 'OutSendMessage' 'OutgoingMessage' carrying an explicit assigned id.
+outgoingSendMessage :: MessageId -> Maybe ChatId -> Maybe Text -> Maybe SomeReplyMarkup -> OutgoingMessage
+outgoingSendMessage mid chatId text markup =
+    OutgoingMessage
+        { omKind = OutSendMessage
+        , omChatId = chatId
+        , omText = text
+        , omMessageId = Just mid
+        , omReplyMarkup = markup
+        }
+
+-- | Publish an 'OutgoingMessage' that already carries its own id (a reaction or
+-- an edit — operations with no returned 'Message' to stamp).
+publishOutgoing :: TgMock -> OutgoingMessage -> IO ()
+publishOutgoing tg msg = atomically $ writeTBQueue (outgoingMailbox tg) msg
+
+{- | Assign a fresh incremental 'MessageId', build the 'OutgoingMessage' from it,
+and publish — all in a SINGLE 'atomically'.
+
+Keeping the counter increment and the queue write in one transaction is what
+makes the @tgTest@ DSL's @waitFor*@ deterministic: a reader blocked in
+'atomically' on the mailbox is re-evaluated the moment this transaction commits,
+so it wakes with the id and the message arriving together (no id-without-message
+window, no lost wake-up).
+-}
+publishWithFreshId :: TgMock -> (MessageId -> OutgoingMessage) -> IO MessageId
+publishWithFreshId tg mkMsg = atomically $ do
+    n <- readTVar (tgMockMessageIdCounter tg)
+    writeTVar (tgMockMessageIdCounter tg) (n + 1)
+    let msgId = MessageId (fromIntegral n)
+    writeTBQueue (outgoingMailbox tg) (mkMsg msgId)
+    pure msgId
+
+-- | Stamp an assigned 'MessageId' onto a mock 'Response Message' so callers can
+-- correlate by 'messageMessageId' instead of the static 'defaultMessage' id (-1).
+stampMessageId :: MessageId -> Response Message -> Response Message
+stampMessageId msgId resp =
+    resp{responseResult = (responseResult resp){messageMessageId = msgId}}
 
 -- | Captures mail sends while reusing production mail construction.
 instance MailScriptPerformer (TestPerformer (EnvWithMocks serviceLib)) where
@@ -271,7 +405,15 @@ instance KnownHowToEval Script (TestPerformer (EnvWithMocks serviceLib)) where
 instance ScenarioPerformer Script serviceLib (TestPerformer (EnvWithMocks serviceLib)) where
     onEvalScript = evalSubScript
     throw' = throwIO
-    runSafely' = try . run
+    -- Async exceptions are re-thrown, never returned as 'Left' (mirrors the
+    -- production performer). LAW: @Left@ is never an async exception.
+    runSafely' scenario = do
+        v <- try $ run scenario
+        case v of
+            Right a -> pure (Right a)
+            Left e
+                | Just (_ :: SomeAsyncException) <- fromException (toException e) -> throwIO e
+                | otherwise -> pure (Left e)
     getDateTime' = liftIO getCurrentTime
     log' cs = sublangLog cs "Scenario"
     getExtraContext' = view App.extraContextL
@@ -312,6 +454,12 @@ runTelegramWithMockLogging botName script = do
         Nothing -> throwIO $ Default.NoBotConfigured botName
         Just botEnv -> changeEnv (AppWithBotEnv botEnv) (runTelegram script)
 
+-- | Bounded capacity of the outgoing-mailbox 'TBQueue'.
+-- Sized generously relative to the number of replies a single bot turn can produce
+-- so that a burst of sends never blocks the performer thread on a full queue.
+outgoingMailboxSize :: Natural
+outgoingMailboxSize = 64
+
 -- | Build a Telegram mock with a fallback response and optional queued send responses.
 -- POST-CONTRACT: The returned 'TgMock' has empty request logs; queued responses are consumed FIFO by 'sendMessage'.
 createTgMock :: Response Message -> Maybe [OnSendMessageRequest] -> IO TgMock
@@ -319,12 +467,16 @@ createTgMock fallback queuedResponses = do
     responseQueue <- newSomeRef $ fromMaybe [] queuedResponses
     requestLog <- newSomeRef []
     scheduledLog <- newSomeRef []
+    mailbox <- newTBQueueIO outgoingMailboxSize
+    msgIdCounter <- newTVarIO 0
     pure
         TgMock
             { sendMessageResponses = responseQueue
             , sendMessageRequests = requestLog
             , scheduledMessageRequests = scheduledLog
             , defaultResponse = fallback
+            , outgoingMailbox = mailbox
+            , tgMockMessageIdCounter = msgIdCounter
             }
 
 -- | Build a Telegram mock that always returns the standard canned message response.
@@ -401,6 +553,24 @@ readTgRequests testMocks = reverse <$> readSomeRef (sendMessageRequests $ tgMock
 readScheduledTgRequests :: Mocks serviceLib -> IO [SendMessageRequest]
 readScheduledTgRequests testMocks = reverse <$> readSomeRef (scheduledMessageRequests $ tgMock testMocks)
 
+-- | Drain and return every 'OutgoingMessage' currently in the mailbox, earliest-first.
+--
+-- This is a /destructive/ snapshot: drained messages are removed from the
+-- 'outgoingMailbox' 'TBQueue'. The @tgTest@ DSL relies on blocking @waitFor*@
+-- reads (which consume as they match) rather than on this helper; it is provided
+-- for ad-hoc inspection and for the runner's final mailbox snapshot.
+-- POST-CONTRACT: The mailbox is left empty; result is ordered earliest-first.
+readOutgoingMailbox :: Mocks serviceLib -> IO [OutgoingMessage]
+readOutgoingMailbox testMocks = atomically $ drainQueue []
+  where
+    queue = outgoingMailbox (tgMock testMocks)
+    -- | Accumulate available messages preserving FIFO order.
+    drainQueue acc = do
+        next <- tryReadTBQueue queue
+        case next of
+            Nothing -> pure (reverse acc)
+            Just msg -> drainQueue (msg : acc)
+
 -- | Read captured log payloads in emission order.
 -- POST-CONTRACT: Result is ordered earliest-first (emission order).
 readLog :: Mocks serviceLib -> IO [AppLogMsg]
@@ -467,6 +637,16 @@ dequeueTgResponse request = do
             modifySomeRef (sendMessageResponses telegramMock) (const rest)
             pure $ nextResponse request
         [] -> pure $ defaultResponse telegramMock
+
+-- | Unwrap the 'SendMessageRequest' carried by a 'WithImportance' marker.
+importancePayload :: WithImportance SendMessageRequest -> SendMessageRequest
+importancePayload (Regular req) = req
+importancePayload (Important req) = req
+
+-- | Extract the numeric 'ChatId' from a 'SomeChatId' when it targets a chat (not a @username).
+someChatIdToChatId :: SomeChatId -> Maybe ChatId
+someChatIdToChatId (SomeChatId chatId) = Just chatId
+someChatIdToChatId (SomeChatUsername _) = Nothing
 
 -- | Fail fast when a test uses Telegram file loading without providing a dedicated mock path.
 getFileMock :: FileId -> TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib)) (Response File)

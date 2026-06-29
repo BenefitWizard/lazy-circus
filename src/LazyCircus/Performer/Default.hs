@@ -130,11 +130,19 @@ instance
 
     -- onEvalScript = evalScriptDefault
     throw' = throwIO
+    -- Async exceptions (ThreadKilled, UserInterrupt, Timeout, ...) are re-thrown
+    -- rather than returned as 'Left', so a 'runSafely @SomeException' call can
+    -- never silently absorb a thread-termination signal (which would leave the
+    -- underlying effect, e.g. a DB write, in an indeterminate state while the
+    -- action thread keeps running). Sync exceptions are returned as 'Left'.
+    -- LAW: @Left@ is never an async exception.
     runSafely' scenario = do
         v <- try $ run scenario
-        pure $ case v of
-            Left e -> Left e
-            Right a -> Right a
+        case v of
+            Right a -> pure (Right a)
+            Left e
+                | Just (_ :: SomeAsyncException) <- fromException (toException e) -> throwIO e
+                | otherwise -> pure (Left e)
     log' cs = sublangLog cs "Scenario"
 
     getDateTime' = liftIO getCurrentTime

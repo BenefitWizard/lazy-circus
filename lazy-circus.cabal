@@ -72,6 +72,8 @@ library
       LazyCircus.Telegram.Default
       LazyCircus.Telegram.Types
       LazyCircus.Testing.Performer
+      LazyCircus.Testing.TgTest
+      LazyCircus.Testing.Updates
   other-modules:
       Paths_lazy_circus
   autogen-modules:
@@ -114,9 +116,12 @@ library
     , servant-auth-server
     , servant-client
     , smtp-mail
+    , stm
     , telegram-bot-api
+    , telegram-bot-extra
     , template-haskell
     , text
+    , transformers
     , unordered-containers
     , uuid
   default-language: GHC2021
@@ -124,7 +129,9 @@ library
 library common-circus
   exposed-modules:
       BotApp
+      BotHandler
       BotScenarios
+      ChatStateStore
       Common
       DemoEnv
       SimpleService
@@ -173,10 +180,13 @@ library common-circus
     , servant-auth-server
     , servant-client
     , smtp-mail
+    , stm
     , telegram-bot-api
+    , telegram-bot-extra
     , telegram-bot-simple
     , template-haskell
     , text
+    , transformers
     , unordered-containers
     , uuid
   default-language: GHC2021
@@ -218,10 +228,13 @@ executable bot
     , servant-auth-server
     , servant-client
     , smtp-mail
+    , stm
     , telegram-bot-api
+    , telegram-bot-extra
     , telegram-bot-simple
     , template-haskell
     , text
+    , transformers
     , unordered-containers
     , uuid
   default-language: GHC2021
@@ -263,10 +276,13 @@ executable example
     , servant-auth-server
     , servant-client
     , smtp-mail
+    , stm
     , telegram-bot-api
+    , telegram-bot-extra
     , telegram-bot-simple
     , template-haskell
     , text
+    , transformers
     , unordered-containers
     , uuid
   default-language: GHC2021
@@ -276,14 +292,20 @@ test-suite lazy-circus-test
   main-is: Spec.hs
   other-modules:
       AIAgentSpec
-      BotAppSpec
+      BotHandlerSpec
       BotScenariosSpec
+      ChatStateStoreSpec
       DBLangSpec
       HTTPLangSpec
       LogSpec
       ServiceCallSpec
       TestDbSupport
+      TestHelpers.Bot
+      TgMockMailboxSpec
+      TgTestRunnerSpec
+      TgTestSpec
       ToolSchemaSpec
+      UpdateFactorySpec
       Paths_lazy_circus
   autogen-modules:
       Paths_lazy_circus
@@ -319,9 +341,12 @@ test-suite lazy-circus-test
     , servant-auth-server
     , servant-client
     , smtp-mail
+    , stm
     , telegram-bot-api
+    , telegram-bot-extra
     , template-haskell
     , text
+    , transformers
     , unordered-containers
     , uuid
   default-language: GHC2021

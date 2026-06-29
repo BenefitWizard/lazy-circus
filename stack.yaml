@@ -59,6 +59,8 @@ extra-deps:
     subdirs:
       - beam-core
       - beam-postgres
+  - github: BenefitWizard/telegram-bot-extra
+    commit: 1d8be5aff2668ca15f44417fc7352649f010909f
 # - acme-missiles-0.3
 # - git: https://github.com/commercialhaskell/stack.git
 #   commit: e7b331f14bcffb8367cd58fbfc8b40ec7642100a

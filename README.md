@@ -480,10 +480,12 @@ tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
 
 | Effect | Behavior in Tests |
 |--------|-------------------|
-| Telegram `sendMessage` | Capture requests, returns canned responses |
+| Telegram `sendMessage` | Captures requests, returns canned responses, and publishes an `OutgoingMessage` (with a fresh incremental `MessageId`) to the STM `outgoingMailbox` |
+| Telegram `sendDocument` | Publishes an `OutSendDocument` to the `outgoingMailbox` (incremental `MessageId`); not added to `readTgRequests` |
+| Telegram `setMessageReaction` | Publishes an `OutSetReaction` to the `outgoingMailbox` |
+| Telegram `editMessageText` | Publishes an `OutEditMessage`; still returns `Nothing` |
 | Telegram `scheduleMessages` | Captured in a separate list |
 | Missing Telegram bot | Throws `NoBotConfigured` during script dispatch |
-| Telegram `sendDocument` | Returns mock default response; not captured |
 | Telegram others | no-op / default |
 | Mail `sendMail` | Capture Mail values |
 | Mail `makeMail` | Actual creation via SMTP credentials from env |
@@ -497,9 +499,39 @@ tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
 
 - use `readTgRequests` to inspect immediate Telegram sends
 - use `readScheduledTgRequests` to inspect deferred Telegram sends
+- use `readOutgoingMailbox` + `OutgoingKind` (`OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage`) to assert on side-effect kinds and ordering, including the incremental `MessageId` stamped on each send
 - use `readScheduledScenarios` to inspect `runAsync` capture
 - use `readLogWithContext` when you need to assert `withLogContext`, `lang`, or call-site metadata
 - if needed, rerun a captured async scenario in the same test runtime to verify its downstream effects
+
+### End-to-End Telegram Bot Tests with `tgTest`
+
+`LazyCircus.Testing.TgTest` provides a higher-level runner for testing the bot's
+own update handler end-to-end. It drives the same `Update -> IO ()` seam
+production uses (via `runHeadlessBot`), with Telegram/AI/mail mocked by the test
+performer and replies landing in the shared STM `outgoingMailbox`. You write a
+`TelegramTestScript` that sends fake user input and waits for the bot's replies:
+
+```haskell
+import LazyCircus.Testing.TgTest
+    ( TelegramTestScript, sendMessage, waitForReply, guardWith )
+
+newactPilot :: TelegramTestScript ()
+newactPilot = do
+    _ <- sendMessage "/newact"
+    r1 <- waitForReply
+    guardWith "expected the act-name prompt" (r1 == "🎭 Enter act name:")
+    _ <- sendMessage "Fire Juggling"
+    -- ...continue the dialog
+```
+
+`waitFor*` operations block deterministically via STM (no polling) and fail with
+`TgTestTimeout` on timeout. For building fake `Update`s in synchronous handler
+tests, use `LazyCircus.Testing.Updates` (`mkTextUpdate`, `mkCallbackQueryUpdate`,
+the stateful `UpdateFactory`, etc.). See `test/TgTestSpec.hs`,
+`test/TgMockMailboxSpec.hs`, and `test/BotHandlerSpec.hs` for worked examples,
+and the skill reference ([runtime-testing.md](docs/skills/lazy-circus/reference/runtime-testing.md))
+for the full DSL.
 
 ---
 
@@ -646,8 +678,14 @@ A conversational Telegram bot that manages circus acts. Commands:
 | `/act <id>` | Shows act details |
 | `/react <id>` | Regenerates AI audience reaction for an act |
 | `/delete <id>` | Deletes an act |
+| _free text_ | Runs the AI agent (`solveWithAgentContinuing`) and replies |
 
-The bot uses `BotScenarios` for all business logic, keeping the Telegram layer thin.
+The Telegram layer lives in `BotHandler` (`handleScenario` / `updateAction` /
+`runUpdate`): it routes each `Update`, drives the dialog FSM, and delegates the
+business logic to `BotScenarios`. Replies go through the TelegramScript DSL
+(`tgScript "demo-bot"`), so they share the same routing, structured logging, and
+automatic timing as every other Lazy Circus Telegram effect. Per-chat
+serialization is provided by `ChatStateStore`.
 
 ### Prerequisites
 

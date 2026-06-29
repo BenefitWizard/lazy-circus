@@ -5,3 +5,6 @@ dist-newstyle/
 .worktrees/
 .DS_Store
 docs/plans/
+docs/Ideas/
+docs/execution-logs/
+docs/code-reviews/

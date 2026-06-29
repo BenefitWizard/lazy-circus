@@ -7,8 +7,10 @@ description: >
   TelegramScript, AIScript, MailScript, HTTPScript, evalScript, tgScript, mailScript,
   aiScript, httpScript, sendDocument, askContinuing, solveWithAgent,
   solveWithAgentContinuing, AgentRequest, Conversation, DefaultPerformer, DBScriptDef,
-  HasLogLang, or asks how to write scenarios, add new effects, define DB service
-  instances, or test Lazy Circus programs.
+  HasLogLang, tgTest, TelegramTestScript, waitForReply, waitForMatching, OutgoingMessage,
+  Mailboxes, UpdateFactory, mkTextUpdate, or asks how to write scenarios, add new effects,
+  define DB service instances, or test Lazy Circus programs (including end-to-end Telegram
+  bot tests).
 ---
 
 # Lazy Circus Skill
@@ -45,7 +47,7 @@ Default routing:
 |---|---|
 | `ScenarioProgram`, `evalScript`, `runSafely`, `runAsync`, scenario logging, extra context, or the architecture map | [reference/scenarios.md](reference/scenarios.md) |
 | DB/Telegram/AI/Mail/HTTP DSL operations, smart constructors, scene-level logging, or top-level wrappers like `tgScript` / `mailScript` / `aiScript` / `httpScript` | [reference/effects.md](reference/effects.md) |
-| `DefaultPerformer`, `evalScriptDefault`, environment projection, async queue behavior, test interpreter behavior, mocks, or DB test setup | [reference/runtime-testing.md](reference/runtime-testing.md) |
+| `DefaultPerformer`, `evalScriptDefault`, environment projection, async queue behavior, test interpreter behavior, mocks, DB test setup, end-to-end Telegram bot tests (`tgTest` / `TelegramTestScript`), or fake Telegram `Update`s | [reference/runtime-testing.md](reference/runtime-testing.md) |
 | DB service instances, service registration, adding a new public effect, integration checklists, or the detailed pitfalls/review checklist | [reference/extension.md](reference/extension.md) |
 | Where to place logs, what to log vs what not to log, debug vs prod, context propagation, or logging anti-patterns | [reference/logging.md](reference/logging.md) |
 
@@ -80,6 +82,10 @@ Read more than one reference file when a task crosses layers.
 - Do not manually edit `exposed-modules` in `package.yaml`.
 - Every exported function, type, typeclass, and non-trivial instance follows the repo Haddock style.
 - Use `makeServiceLib` (from `LazyCircus.App.Service.TH`) to generate service libraries from request/response/tool-spec triples.
+- `tgTest` (from `LazyCircus.Testing.TgTest`) drives the bot's own `Update -> IO ()` handler via `runHeadlessBot`; `buildAction` MUST wire the test performer (`runWithMocks`) against the same `Mocks` the runner hands it.
+- The `tgTest` DSL's `waitFor*` ops block deterministically via STM `retry` on the `outgoingMailbox`; never replace them with polling. Fail with `TgTestTimeout` on timeout, `TgTestGuardFailed` on a failed `guard`.
+- Every Telegram `sendMessage` / `sendDocument` / `setMessageReaction` / `editMessageText` publishes an `OutgoingMessage` (tagged with `OutgoingKind`) to the STM mailbox; `sendMessage`/`sendDocument` responses are stamped with a fresh incremental `MessageId`.
+- Use `LazyCircus.Testing.Updates` (`mkTextUpdate`, `mkCallbackQueryUpdate`, `UpdateFactory`) to build fake `Update`s for synchronous handler tests; use `tgTest` for end-to-end dialog tests.
 
 ## Inspect First
 
@@ -89,7 +95,9 @@ Read more than one reference file when a task crosses layers.
 - `src/LazyCircus/Performer/Default.hs`
 - `src/LazyCircus/AI.hs` and `src/LazyCircus/AI/Conversation.hs` for AI request types, the agent loop, and the `Conversation` transcript
 - the relevant `src/LazyCircus/Scene/*` module for the domain you are touching
-- `src/LazyCircus/Testing/Performer.hs` for tests
+- `src/LazyCircus/Testing/Performer.hs` for mock-backed scenario/script tests
+- `src/LazyCircus/Testing/TgTest.hs` for the end-to-end `tgTest` runner and `TelegramTestScript` DSL
+- `src/LazyCircus/Testing/Updates.hs` for fake Telegram `Update` factories
 - `src/LazyCircus/DB/Service.hs` plus the concrete table module for DB integration work
 - `src/LazyCircus/App/Service.hs` for service registration
 - `src/LazyCircus/App/Service/TH.hs` for TH-generated service libraries and tool plumbing
@@ -110,6 +118,10 @@ Prefer LSP navigation for Haskell modules when possible.
 - Adding a new public effect without the supporting `Script` dispatch and stable public facade when needed.
 - Using `makeServiceLib` with `(Name, Name)` pairs instead of `(Name, Name, [(Name, String, String)])` triples.
 - Forgetting `FromJSON`/`ToJSON` instances on request/response types when tool specs are provided to `makeServiceLib`.
+- Writing a custom Telegram-test wait that polls the mailbox instead of using the built-in `waitFor*` / `waitForMatching` (which block on STM `retry` and wake deterministically).
+- In `tgTest`, wiring `buildAction` against a different `Mocks` than the one the runner supplied, so replies never reach the mailbox the DSL observes.
+- Asserting on Telegram side effects from `runAsync` during tests — test `runAsync` only captures scheduled scenarios (assert via `readScheduledScenarios` / `mbScheduledScenarioCount`).
+- Expecting `waitForFile` to return the bot's real `FileId` — the mailbox capture returns a stable placeholder suitable only for ordering assertions.
 
 ## Review Checklist
 
