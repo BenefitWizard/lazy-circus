@@ -292,6 +292,7 @@ test-suite lazy-circus-test
   main-is: Spec.hs
   other-modules:
       AIAgentSpec
+      AiMockSpec
       BotHandlerSpec
       BotScenariosSpec
       ChatStateStoreSpec

@@ -1,3 +1,4 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -15,6 +16,7 @@ module LazyCircus.Testing.Performer (
     OnSendMessageRequest,
     TgMock (..),
     MailMock (..),
+    AiMock (..),
     Mocks (..),
     EnvWithMocks (..),
     TestInterpreter,
@@ -29,11 +31,16 @@ module LazyCircus.Testing.Performer (
     createTgMock,
     createSimpleTgMock,
     createSimpleMailMock,
+    createAiMock,
+    createSimpleAiMock,
     makeMocks,
+    makeMocksWithAi,
     runInsideWithMocks,
     runWithMocks,
     runInsideWithDefaultMocks,
     runWithDefaultMocks,
+    runInsideWithAiMocks,
+    runWithAiMocks,
     discardMocks,
     readTgRequests,
     readScheduledTgRequests,
@@ -41,12 +48,13 @@ module LazyCircus.Testing.Performer (
     readLog,
     readLogWithContext,
     readSentMails,
+    readAiRequests,
     readScheduledScenarios,
 )
 where
 
 import Database.PostgreSQL.Simple qualified as Simple
-import LazyCircus.AI (HasAIMethods (..), emptyConversation)
+import LazyCircus.AI (HasAIMethods (..), askAIContinuing, solveWithAgentLoopContinuing)
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
 import LazyCircus.App.Service (HasServiceLib (..), HasToolCallExec (..), HasToolDescriptions (..), callViaServiceLib)
@@ -76,10 +84,14 @@ import LazyCircus.Telegram qualified as TG
 import LazyCircus.Telegram.Default qualified as TGDefault
 import LazyCircus.Telegram.Types (AppWithBotEnv (..), WithImportance (..))
 import Network.Mail.Mime (Address, Mail)
+import OpenAI.V1 qualified as V1
+import OpenAI.V1.Chat.Completions qualified as Chat
+import OpenAI.V1.Usage (Usage (..))
 import RIO
 import RIO.Map qualified as M
 import RIO.Process (HasProcessContext (..))
 import RIO.Time (getCurrentTime)
+import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
 import Telegram.Bot.API (ChatId, Message, MessageId, Response, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, responseResult, sendDocumentCaption, sendDocumentChatId, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
 import Telegram.Bot.API.Types (File, FileId, MessageId (..))
@@ -152,6 +164,16 @@ data MailMock = MailMock
     -- ^ captured outgoing mail values
     }
 
+-- | AI mock state used by the test performer to inject canned chat-completion
+-- responses and capture rendered requests. Mirrors the FIFO-dequeue + capture-log
+-- structure of 'TgMock', but for the OpenAI transport seam.
+data AiMock = AiMock
+    { aiResponses :: SomeRef [Chat.ChatCompletionObject]
+    -- ^ queued canned completions consumed FIFO by 'createChatCompletion'
+    , aiRequests :: SomeRef [Chat.CreateChatCompletion]
+    -- ^ captured rendered requests (prepend-on-write, reverse-on-read)
+    }
+
 -- | Aggregate capture state collected while a test scenario runs.
 data Mocks serviceLib = Mocks
     { tgMock :: TgMock
@@ -164,6 +186,8 @@ data Mocks serviceLib = Mocks
     -- ^ private queue used to capture logs through the standard log-language path
     , mailMock :: MailMock
     -- ^ captured mail sends
+    , aiMock :: AiMock
+    -- ^ AI request capture and canned-response queue
     , scheduledScenarios :: SomeRef [ScenarioProgram Script serviceLib ()]
     -- ^ captured async control programs requested through 'runAsync'
     }
@@ -385,11 +409,31 @@ instance MailScriptPerformer (TestPerformer (EnvWithMocks serviceLib)) where
     sendMail' = logMailSend
     makeMail' = buildMail
 
--- | Returns no decoded AI answers in tests.
--- The continuing primitive is overridden so the stateless 'ask'' default (and
--- the 'solveWithAgentContinuing'' default) inherit the no-op behaviour.
+-- | Drives the production AI pipeline against a mock OpenAI transport.
+--
+-- Each 'askContinuing'' / 'solveWithAgentContinuing'' call runs the REAL
+-- 'askAIContinuing' / 'solveWithAgentLoopContinuing' with 'aiMethodsL'
+-- locally overridden to 'buildMockAiMethods', which captures every rendered
+-- request into 'Mocks.aiMock' and dequeues the next staged
+-- 'Chat.ChatCompletionObject' response FIFO. An empty queue yields
+-- 'emptyCompletion' (no choices), which the production decode path turns into
+-- 'Nothing' — preserving backward compatibility for tests that don't stage
+-- responses.
+--
+-- NOTE: production AI logs ('logReasoningContent', decode-error
+-- 'SensitiveLogMsg') flow to the 'DefaultApp' 'gLogFunc', NOT to the mock
+-- log queue, so 'readLog' will not observe them. Use 'readAiRequests' to
+-- inspect prompts/thinking/tools. Happy-path stubs (valid JSON) produce no
+-- such logs.
 instance AILangPerformer (TestPerformer (EnvWithMocks serviceLib)) where
-    askContinuing' _ _ = pure (Nothing, emptyConversation)
+    askContinuing' req conv = do
+        base <- view aiMethodsL
+        aiM <- asks (aiMock . mocks)
+        local (aiMethodsL .~ buildMockAiMethods base aiM) (askAIContinuing req conv)
+    solveWithAgentContinuing' req conv = do
+        base <- view aiMethodsL
+        aiM <- asks (aiMock . mocks)
+        local (aiMethodsL .~ buildMockAiMethods base aiM) (solveWithAgentLoopContinuing req conv)
 
 -- | Executes servant-client actions against the real HTTP backend using the client environment.
 instance HTTPPerformer (TestPerformer (AppWithClientEnv (EnvWithMocks serviceLib))) where
@@ -489,6 +533,22 @@ createSimpleMailMock = do
     mailLog <- newSomeRef []
     pure MailMock{sentMails = mailLog}
 
+-- | Build an AI mock with a queue of canned completions and an empty request log.
+-- POST-CONTRACT: The returned 'AiMock' has an empty request log; responses are consumed FIFO by 'buildMockAiMethods'.
+createAiMock :: [Chat.ChatCompletionObject] -> IO AiMock
+createAiMock responses = do
+    responseQueue <- newSomeRef responses
+    requestLog <- newSomeRef []
+    pure
+        AiMock
+            { aiResponses = responseQueue
+            , aiRequests = requestLog
+            }
+
+-- | Build an AI mock with no queued responses and an empty request log.
+createSimpleAiMock :: IO AiMock
+createSimpleAiMock = createAiMock []
+
 -- | Allocate a fresh set of empty mocks for one test run.
 makeMocks :: IO (Mocks serviceLib)
 makeMocks = do
@@ -497,6 +557,7 @@ makeMocks = do
     contextualLogMessages <- newSomeRef []
     logQueue <- newTQueueIO
     mockMail <- createSimpleMailMock
+    aiMockTest <- createSimpleAiMock
     asyncLog <- newSomeRef []
     pure
         Mocks
@@ -505,6 +566,7 @@ makeMocks = do
             , appLogWithContext = contextualLogMessages
             , mockLogQueue = logQueue
             , mailMock = mockMail
+            , aiMock = aiMockTest
             , scheduledScenarios = asyncLog
             }
 
@@ -537,6 +599,30 @@ runWithDefaultMocks :: App.DefaultApp serviceLib -> TestInterpreter serviceLib a
 runWithDefaultMocks app action = do
     testMocks <- makeMocks
     result <- runWithMocks app testMocks action
+    pure (testMocks, result)
+
+-- | Allocate a fresh mock set seeded with canned AI chat-completion responses.
+-- POST-CONTRACT: The returned 'Mocks' has the given responses queued FIFO in its 'aiMock'.
+makeMocksWithAi :: [Chat.ChatCompletionObject] -> IO (Mocks serviceLib)
+makeMocksWithAi responses = do
+    base <- makeMocks
+    aiM <- createAiMock responses
+    pure base{aiMock = aiM}
+
+-- | Run a test action from plain 'IO' with a caller-supplied application and a fresh mock set seeded with canned AI responses.
+-- POST-CONTRACT: The returned mocks reflect all side effects captured during the action, including AI requests.
+runWithAiMocks :: App.DefaultApp serviceLib -> [Chat.ChatCompletionObject] -> TestInterpreter serviceLib a -> IO (Mocks serviceLib, a)
+runWithAiMocks app responses action = do
+    testMocks <- makeMocksWithAi responses
+    result <- runWithMocks app testMocks action
+    pure (testMocks, result)
+
+-- | Run a test action inside 'RIO DefaultApp' after allocating a fresh mock set seeded with canned AI responses.
+-- POST-CONTRACT: The returned mocks reflect all side effects captured during the action, including AI requests.
+runInsideWithAiMocks :: [Chat.ChatCompletionObject] -> TestInterpreter serviceLib a -> RIO (App.DefaultApp serviceLib) (Mocks serviceLib, a)
+runInsideWithAiMocks responses action = do
+    testMocks <- liftIO $ makeMocksWithAi responses
+    result <- runInsideWithMocks testMocks action
     pure (testMocks, result)
 
 -- | Drop the collected mocks from a combined result returned inside 'RIO DefaultApp'.
@@ -585,6 +671,11 @@ readLogWithContext testMocks = reverse <$> readSomeRef (appLogWithContext testMo
 -- POST-CONTRACT: Result is ordered earliest-first (send order).
 readSentMails :: Mocks serviceLib -> IO [Mail]
 readSentMails testMocks = reverse <$> readSomeRef (sentMails $ mailMock testMocks)
+
+-- | Read captured AI chat-completion requests in call order.
+-- POST-CONTRACT: Result is ordered earliest-first (call order).
+readAiRequests :: Mocks serviceLib -> IO [Chat.CreateChatCompletion]
+readAiRequests testMocks = reverse <$> readSomeRef (aiRequests $ aiMock testMocks)
 
 -- | Read captured async scenarios in request order.
 -- POST-CONTRACT: Result is ordered earliest-first (request order).
@@ -637,6 +728,48 @@ dequeueTgResponse request = do
             modifySomeRef (sendMessageResponses telegramMock) (const rest)
             pure $ nextResponse request
         [] -> pure $ defaultResponse telegramMock
+
+-- | A canned 'Chat.ChatCompletionObject' with no choices, used as the fallback
+-- when the mock response queue is empty. Yields 'Nothing' in production code
+-- paths that read @choices !? 0@.
+emptyCompletion :: Chat.ChatCompletionObject
+emptyCompletion =
+    Chat.ChatCompletionObject
+        { Chat.id = "empty"
+        , Chat.choices = V.empty
+        , Chat.created = 0
+        , Chat.model = "empty"
+        , Chat.reasoning_effort = Nothing
+        , Chat.service_tier = Nothing
+        , Chat.system_fingerprint = Nothing
+        , Chat.object = "chat.completion"
+        , Chat.usage = Usage 0 0 0 Nothing Nothing
+        }
+
+-- | Capture one rendered AI request by prepending it to the request log.
+captureAiRequest :: AiMock -> Chat.CreateChatCompletion -> IO ()
+captureAiRequest aiM req = modifySomeRef (aiRequests aiM) (req :)
+
+-- | Return the next queued AI completion, or 'emptyCompletion' when the queue is drained.
+-- POST-CONTRACT: The returned value is the head of the response queue, and the queue advances by one; never blocks.
+dequeueAiCompletion :: AiMock -> IO Chat.ChatCompletionObject
+dequeueAiCompletion aiM = do
+    queuedResponses <- readSomeRef (aiResponses aiM)
+    case queuedResponses of
+        nextResponse : rest -> do
+            modifySomeRef (aiResponses aiM) (const rest)
+            pure nextResponse
+        [] -> pure emptyCompletion
+
+-- | Override the 'V1.createChatCompletion' method of a base 'V1.Methods' handle so
+-- that each call captures the rendered request and returns the next queued mock
+-- completion. Other methods are left untouched.
+buildMockAiMethods :: V1.Methods -> AiMock -> V1.Methods
+buildMockAiMethods base aiM =
+    base
+        { V1.createChatCompletion = \req ->
+            captureAiRequest aiM req >> dequeueAiCompletion aiM
+        }
 
 -- | Unwrap the 'SendMessageRequest' carried by a 'WithImportance' marker.
 importancePayload :: WithImportance SendMessageRequest -> SendMessageRequest
