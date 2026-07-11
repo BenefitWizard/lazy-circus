@@ -18,6 +18,9 @@ module LazyCircus.Testing.Performer (
     MailMock (..),
     AiMock (..),
     Mocks (..),
+    Mode (..),
+    TestConfig (..),
+    defaultTestConfig,
     EnvWithMocks (..),
     TestInterpreter,
     OutgoingMessage (..),
@@ -27,7 +30,7 @@ module LazyCircus.Testing.Performer (
     runScript,
     runScenarioProgram,
     runDBWithMockLogging,
-    runTelegramWithMockLogging,
+    runTelegramScript,
     createTgMock,
     createSimpleTgMock,
     createSimpleMailMock,
@@ -41,6 +44,11 @@ module LazyCircus.Testing.Performer (
     runWithDefaultMocks,
     runInsideWithAiMocks,
     runWithAiMocks,
+    runWithConfigEngine,
+    runWithConfig,
+    runWithDefaultConfig,
+    runInsideWithConfig,
+    runInsideWithDefaultConfig,
     discardMocks,
     readTgRequests,
     readScheduledTgRequests,
@@ -76,6 +84,7 @@ import LazyCircus.Scene.AI.Class (AILangPerformer (..), runAI)
 import LazyCircus.Scene.DB.Class (HasDbConnection (..), runDB)
 import LazyCircus.Scene.DB.Lang (DBScript)
 import LazyCircus.Scene.HTTP.Class (HTTPPerformer (..), runHTTP)
+import LazyCircus.Scene.Log (timedAndLog)
 import LazyCircus.Scene.Mail.Class (MailScriptPerformer (..), runMail)
 import LazyCircus.Scene.Telegram.Class (TelegramScriptPerformer (..), runTelegram)
 import LazyCircus.Scene.Telegram.Lang (TelegramScript)
@@ -192,12 +201,34 @@ data Mocks serviceLib = Mocks
     -- ^ captured async control programs requested through 'runAsync'
     }
 
+-- | Runtime mode controlling whether a test sub-language is mocked or real.
+data Mode = Mocked | Real
+    deriving (Eq, Show)
+
+-- | Per-sub-language configuration for the test performer.
+-- Controls whether Telegram, AI, and Mail-send are mocked (capture/intercept)
+-- or real (delegate to production implementations).
+data TestConfig = TestConfig
+    { tcTelegram :: !Mode
+    -- ^ Telegram send/receive mode: Mocked = mailbox capture, Real = TG.* API calls
+    , tcAI :: !Mode
+    -- ^ AI mode: Mocked = transport intercept via buildMockAiMethods, Real = real OpenAI client
+    , tcMailSend :: !Mode
+    -- ^ Mail send mode: Mocked = capture in sentMails ref, Real = SMTP via Mail.sendMail
+    }
+
+-- | Default config: everything that can be mocked IS mocked (backward-compatible).
+defaultTestConfig :: TestConfig
+defaultTestConfig = TestConfig{tcTelegram = Mocked, tcAI = Mocked, tcMailSend = Mocked}
+
 -- | Test runtime environment that combines mocks with the real application environment.
 data EnvWithMocks serviceLib = EnvWithMocks
     { mocks :: Mocks serviceLib
     -- ^ mutable capture state for the current test run
     , defaultApp :: App.DefaultApp serviceLib
     -- ^ real runtime dependencies used for DB access, config, and mail construction
+    , testConfig :: TestConfig
+    -- ^ per-sub-language mock/real mode selection
     }
 
 -- | Thin RIO-backed shell used internally by the test performer.
@@ -307,59 +338,98 @@ changeEnv :: (outer -> inner) -> TestPerformer inner a -> TestPerformer outer a
 changeEnv f (TestPerformer action) = TestPerformer (mapRIO f action)
 
 -- | Captures Telegram operations while relying on the projected bot environment for bot metadata.
+--
+-- Each IO method reads 'tcTelegram' from 'testConfig' and branches:
+--
+--   * @Mocked@ — current mailbox-capture behavior (publishes an 'OutgoingMessage',
+--     stamps a fresh incremental id, dequeues a canned response).
+--   * @Real@   — delegates to the production 'TG.*' client call wrapped in
+--     'timedAndLog' (mirrors 'LazyCircus.Performer.Default').
 instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib))) where
-    getFile' = getFileMock
+    getFile' fid = do
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> getFileMock fid
+            Real -> timedAndLog "Telegram" "GetFile" $ TG.getFile fid
     getBotName' = TG.getBotName
     sendMessage' request = do
-        logTgRequests [request]
-        tg <- askTgMock
-        let req = importancePayload request
-        assignedId <- liftIO $ publishWithFreshId tg $ \mid ->
-            outgoingSendMessage
-                mid
-                (someChatIdToChatId (sendMessageChatId req))
-                (Just (sendMessageText req))
-                (sendMessageReplyMarkup req)
-        resp <- dequeueTgResponse request
-        pure (stampMessageId assignedId resp)
-    scheduleMessages' = logScheduledTgRequests
-    setBotCommands' _ = pure ()
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> do
+                logTgRequests [request]
+                tg <- askTgMock
+                let req = importancePayload request
+                assignedId <- liftIO $ publishWithFreshId tg $ \mid ->
+                    outgoingSendMessage
+                        mid
+                        (someChatIdToChatId (sendMessageChatId req))
+                        (Just (sendMessageText req))
+                        (sendMessageReplyMarkup req)
+                resp <- dequeueTgResponse request
+                pure (stampMessageId assignedId resp)
+            Real -> timedAndLog "Telegram" "SendMessage" $ TG.sendMessage request
+    scheduleMessages' = \requests -> do
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> logScheduledTgRequests requests
+            Real -> timedAndLog "Telegram" "ScheduleMessages" $ TG.scheduleMessages requests
+    setBotCommands' cmd = do
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> pure ()
+            Real -> timedAndLog "Telegram" "SetBotCommands" $ TG.setBotCommands cmd
     setMessageReaction' req = do
-        tg <- askTgMock
-        liftIO $
-            publishOutgoing tg $
-                OutgoingMessage
-                    { omKind = OutSetReaction
-                    , omChatId = someChatIdToChatId (setMessageReactionRequestChatId req)
-                    , omText = Nothing
-                    , omMessageId = Just (setMessageReactionRequestMessageId req)
-                    , omReplyMarkup = Nothing
-                    }
-    answerCallbackQuery' _ = pure ()
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> do
+                tg <- askTgMock
+                liftIO $
+                    publishOutgoing tg $
+                        OutgoingMessage
+                            { omKind = OutSetReaction
+                            , omChatId = someChatIdToChatId (setMessageReactionRequestChatId req)
+                            , omText = Nothing
+                            , omMessageId = Just (setMessageReactionRequestMessageId req)
+                            , omReplyMarkup = Nothing
+                            }
+            Real -> timedAndLog "Telegram" "SetMessageReaction" $ TG.setMessageReaction req
+    answerCallbackQuery' req = do
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> pure ()
+            Real -> timedAndLog "Telegram" "AnswerCallbackQuery" $ TG.answerCallbackQuery req
     editMessageText' req = do
-        tg <- askTgMock
-        liftIO $
-            publishOutgoing tg $
-                OutgoingMessage
-                    { omKind = OutEditMessage
-                    , omChatId = someChatIdToChatId =<< editMessageTextChatId req
-                    , omText = Just (editMessageTextText req)
-                    , omMessageId = editMessageTextMessageId req
-                    , omReplyMarkup = Nothing
-                    }
-        pure Nothing
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> do
+                tg <- askTgMock
+                liftIO $
+                    publishOutgoing tg $
+                        OutgoingMessage
+                            { omKind = OutEditMessage
+                            , omChatId = someChatIdToChatId =<< editMessageTextChatId req
+                            , omText = Just (editMessageTextText req)
+                            , omMessageId = editMessageTextMessageId req
+                            , omReplyMarkup = Nothing
+                            }
+                pure Nothing
+            Real -> timedAndLog "Telegram" "EditMessageText" $ TG.editMessageText req
     sendDocument' req = do
-        tg <- askTgMock
-        assignedId <- liftIO $ publishWithFreshId tg $ \mid ->
-            OutgoingMessage
-                { omKind = OutSendDocument
-                , omChatId = someChatIdToChatId (sendDocumentChatId req)
-                , omText = sendDocumentCaption req
-                , omMessageId = Just mid
-                , omReplyMarkup = Nothing
-                }
-        resp <- asks (defaultResponse . tgMock . mocks . app)
-        pure (stampMessageId assignedId resp)
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> do
+                tg <- askTgMock
+                assignedId <- liftIO $ publishWithFreshId tg $ \mid ->
+                    OutgoingMessage
+                        { omKind = OutSendDocument
+                        , omChatId = someChatIdToChatId (sendDocumentChatId req)
+                        , omText = sendDocumentCaption req
+                        , omMessageId = Just mid
+                        , omReplyMarkup = Nothing
+                        }
+                resp <- asks (defaultResponse . tgMock . mocks . app)
+                pure (stampMessageId assignedId resp)
+            Real -> timedAndLog "Telegram" "SendDocument" $ TG.sendDocument req
 
 -- | Project the current 'TgMock' out of the bot-environment-wrapped test environment.
 askTgMock :: TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib)) TgMock
@@ -405,35 +475,60 @@ stampMessageId msgId resp =
     resp{responseResult = (responseResult resp){messageMessageId = msgId}}
 
 -- | Captures mail sends while reusing production mail construction.
+--
+-- 'sendMail'' reads 'tcMailSend' from 'testConfig' and branches:
+--
+--   * @Mocked@ — captures the mail into 'sentMails' via 'logMailSend'.
+--   * @Real@   — delegates to SMTP via 'Mail.sendMail', wrapped in 'timedAndLog'.
+--
+-- 'makeMail'' always builds the mail locally via 'buildMail' (no IO either way).
 instance MailScriptPerformer (TestPerformer (EnvWithMocks serviceLib)) where
-    sendMail' = logMailSend
+    sendMail' mail = do
+        mode <- asks (tcMailSend . testConfig)
+        case mode of
+            Mocked -> logMailSend mail
+            Real -> timedAndLog "Mail" "SendMail" $ Mail.sendMail mail
     makeMail' = buildMail
 
--- | Drives the production AI pipeline against a mock OpenAI transport.
+-- | Drives the production AI pipeline against either a mock OpenAI transport or the real client.
 --
--- Each 'askContinuing'' / 'solveWithAgentContinuing'' call runs the REAL
--- 'askAIContinuing' / 'solveWithAgentLoopContinuing' with 'aiMethodsL'
--- locally overridden to 'buildMockAiMethods', which captures every rendered
--- request into 'Mocks.aiMock' and dequeues the next staged
--- 'Chat.ChatCompletionObject' response FIFO. An empty queue yields
--- 'emptyCompletion' (no choices), which the production decode path turns into
--- 'Nothing' — preserving backward compatibility for tests that don't stage
--- responses.
+-- Each 'askContinuing'' / 'solveWithAgentContinuing'' call reads 'tcAI' from
+-- 'testConfig' and branches:
+--
+--   * @Mocked@ — runs the REAL 'askAIContinuing' / 'solveWithAgentLoopContinuing'
+--     with 'aiMethodsL' locally overridden to 'buildMockAiMethods', which captures
+--     every rendered request into 'Mocks.aiMock' and dequeues the next staged
+--     'Chat.ChatCompletionObject' response FIFO. An empty queue yields
+--     'emptyCompletion' (no choices), which the production decode path turns into
+--     'Nothing' — preserving backward compatibility for tests that don't stage
+--     responses.
+--   * @Real@   — delegates to 'askAIContinuing' / 'solveWithAgentLoopContinuing'
+--     WITHOUT overriding 'aiMethodsL', so the real OpenAI client from
+--     'DefaultApp.aiMethods' is used. 'readAiRequests' will be empty in this mode;
+--     requires a real 'aiMethods' in 'DefaultApp' (cfgAiApiKey /= Nothing).
 --
 -- NOTE: production AI logs ('logReasoningContent', decode-error
 -- 'SensitiveLogMsg') flow to the 'DefaultApp' 'gLogFunc', NOT to the mock
 -- log queue, so 'readLog' will not observe them. Use 'readAiRequests' to
--- inspect prompts/thinking/tools. Happy-path stubs (valid JSON) produce no
--- such logs.
+-- inspect prompts/thinking/tools (Mocked mode only). Happy-path stubs
+-- (valid JSON) produce no such logs.
 instance AILangPerformer (TestPerformer (EnvWithMocks serviceLib)) where
     askContinuing' req conv = do
-        base <- view aiMethodsL
-        aiM <- asks (aiMock . mocks)
-        local (aiMethodsL .~ buildMockAiMethods base aiM) (askAIContinuing req conv)
+        mode <- asks (tcAI . testConfig)
+        case mode of
+            Mocked -> do
+                base <- view aiMethodsL
+                aiM <- asks (aiMock . mocks)
+                local (aiMethodsL .~ buildMockAiMethods base aiM) (askAIContinuing req conv)
+            Real -> askAIContinuing req conv
     solveWithAgentContinuing' req conv = do
-        base <- view aiMethodsL
-        aiM <- asks (aiMock . mocks)
-        local (aiMethodsL .~ buildMockAiMethods base aiM) (solveWithAgentLoopContinuing req conv)
+        mode <- asks (tcAI . testConfig)
+        case mode of
+            Mocked -> do
+                base <- view aiMethodsL
+                aiM <- asks (aiMock . mocks)
+                local (aiMethodsL .~ buildMockAiMethods base aiM) (solveWithAgentLoopContinuing req conv)
+            Real -> solveWithAgentLoopContinuing req conv
 
 -- | Executes servant-client actions against the real HTTP backend using the client environment.
 instance HTTPPerformer (TestPerformer (AppWithClientEnv (EnvWithMocks serviceLib))) where
@@ -469,7 +564,7 @@ instance ScenarioPerformer Script serviceLib (TestPerformer (EnvWithMocks servic
 -- | Run one top-level 'Script' using the production-style test performer dispatch.
 -- PRE-CONTRACT: The bot name in a 'TelegramScriptDef' must be configured in 'App.botEnvsL'.
 runScript :: Script a -> TestInterpreter serviceLib a
-runScript (TelegramScriptDef botName script) = runTelegramWithMockLogging botName script
+runScript (TelegramScriptDef botName script) = runTelegramScript botName script
 runScript (MailScriptDef script) = runMail script
 runScript (AIScriptDef descs script) = local (toolDescriptionsL .~ descs) $ runAI script
 runScript (DBScriptDef db mode script) = runDBWithMockLogging db mode script
@@ -490,9 +585,13 @@ runDBWithMockLogging db mode script = do
     changeEnv (AppWithConnection conn) (runDB db mode script)
 
 -- | Run a Telegram script using the same bot-environment projection as production.
+--
+-- Branches on 'tcTelegram' from 'testConfig': the underlying performer instance
+-- decides per-operation whether to mock (mailbox capture) or to call the real
+-- Telegram client. Either way the bot-environment projection below is identical.
 -- PRE-CONTRACT: The bot name must be present in 'App.botEnvsL'; throws 'NoBotConfigured' otherwise.
-runTelegramWithMockLogging :: Text -> TelegramScript a -> TestInterpreter serviceLib a
-runTelegramWithMockLogging botName script = do
+runTelegramScript :: Text -> TelegramScript a -> TestInterpreter serviceLib a
+runTelegramScript botName script = do
     botEnvs <- view App.botEnvsL
     case M.lookup botName botEnvs of
         Nothing -> throwIO $ Default.NoBotConfigured botName
@@ -576,14 +675,21 @@ runInsideWithMocks testMocks action = do
     app <- ask
     liftIO $ runWithMocks app testMocks action
 
--- | Run a test action from plain 'IO' using a caller-supplied application and mock set.
+-- | Shared engine for running a test interpreter with explicit config.
+-- PRE-CONTRACT: The supplied DefaultApp and Mocks are compatible (same serviceLib).
 -- POST-CONTRACT: Queued logs are drained into mock refs before returning; exceptions re-throw with original stack.
-runWithMocks :: App.DefaultApp serviceLib -> Mocks serviceLib -> TestInterpreter serviceLib a -> IO a
-runWithMocks app testMocks action = do
-    let env = EnvWithMocks{mocks = testMocks, defaultApp = app}
+runWithConfigEngine :: App.DefaultApp serviceLib -> TestConfig -> Mocks serviceLib -> TestInterpreter serviceLib a -> IO a
+runWithConfigEngine app cfg testMocks action = do
+    let env = EnvWithMocks{mocks = testMocks, defaultApp = app, testConfig = cfg}
     result <- tryAny $ runRIO env $ runTestInterpreter action
     drainQueuedLogs env
     either throwIO pure result
+
+-- | Run a test action from plain 'IO' using a caller-supplied application and mock set.
+-- Uses 'defaultTestConfig' (all-mocked) for backward compatibility.
+-- POST-CONTRACT: Queued logs are drained into mock refs before returning; exceptions re-throw with original stack.
+runWithMocks :: App.DefaultApp serviceLib -> Mocks serviceLib -> TestInterpreter serviceLib a -> IO a
+runWithMocks app = runWithConfigEngine app defaultTestConfig
 
 -- | Run a test action inside 'RIO DefaultApp' after allocating a fresh mock set.
 -- POST-CONTRACT: The returned mocks reflect all side effects captured during the action.
@@ -599,6 +705,33 @@ runWithDefaultMocks :: App.DefaultApp serviceLib -> TestInterpreter serviceLib a
 runWithDefaultMocks app action = do
     testMocks <- makeMocks
     result <- runWithMocks app testMocks action
+    pure (testMocks, result)
+
+-- | Run a test action from plain IO with an explicit 'TestConfig' and caller-supplied mocks.
+-- POST-CONTRACT: Queued logs are drained into mock refs before returning; exceptions re-throw with original stack.
+runWithConfig :: App.DefaultApp serviceLib -> TestConfig -> Mocks serviceLib -> TestInterpreter serviceLib a -> IO a
+runWithConfig app cfg = runWithConfigEngine app cfg
+
+-- | Run a test action from plain IO with an explicit 'TestConfig' after allocating a fresh mock set.
+-- POST-CONTRACT: The returned mocks reflect all side effects captured during the action.
+runWithDefaultConfig :: App.DefaultApp serviceLib -> TestConfig -> TestInterpreter serviceLib a -> IO (Mocks serviceLib, a)
+runWithDefaultConfig app cfg action = do
+    testMocks <- makeMocks
+    result <- runWithConfig app cfg testMocks action
+    pure (testMocks, result)
+
+-- | Run a test action inside RIO DefaultApp with explicit config and caller-supplied mocks.
+runInsideWithConfig :: TestConfig -> Mocks serviceLib -> TestInterpreter serviceLib a -> RIO (App.DefaultApp serviceLib) a
+runInsideWithConfig cfg testMocks action = do
+    app <- ask
+    liftIO $ runWithConfig app cfg testMocks action
+
+-- | Run a test action inside RIO DefaultApp with explicit config after allocating fresh mocks.
+-- POST-CONTRACT: The returned mocks reflect all side effects captured during the action.
+runInsideWithDefaultConfig :: TestConfig -> TestInterpreter serviceLib a -> RIO (App.DefaultApp serviceLib) (Mocks serviceLib, a)
+runInsideWithDefaultConfig cfg action = do
+    testMocks <- liftIO makeMocks
+    result <- runInsideWithConfig cfg testMocks action
     pure (testMocks, result)
 
 -- | Allocate a fresh mock set seeded with canned AI chat-completion responses.

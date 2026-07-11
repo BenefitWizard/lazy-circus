@@ -14,13 +14,22 @@ DSL's @waitFor*@ operations consume that mailbox deterministically via STM, with
 a 'registerDelay' timeout as the only non-deterministic safety net.
 
 The runner is /generic/: it knows nothing about your handler. You supply a
-@buildAction :: Mocks serviceLib -> IO (Update -> IO ())@ that wires your bot's
-ordinary update-driver under the test performer (so Telegram\/AI\/mail are
-mocked and replies land in the shared mailbox). The runner feeds fake updates
-the DSL produces and observes the replies. A typical @buildAction@ runs the very
-same driver production uses, only with 'LazyCircus.Testing.Performer.runWithMocks'
-substituted for the production performer — the bot executes its ordinary script,
-everything is mocked as expected.
+@buildAction :: TestConfig -> Mocks serviceLib -> IO (Update -> IO ())@ that
+wires your bot's ordinary update-driver under the test performer (so
+Telegram\/AI\/mail are mocked and replies land in the shared mailbox). The
+runner feeds fake updates the DSL produces and observes the replies. A typical
+@buildAction@ runs the very same driver production uses, only with
+'LazyCircus.Testing.Performer.runWithConfig' (or the all-mocked
+'LazyCircus.Testing.Performer.runWithMocks') substituted for the production
+performer — the bot executes its ordinary script, everything is mocked as
+expected.
+
+'tgTest' refuses to start if the performer config requests real Telegram
+('LazyCircus.Testing.Performer.tcTelegram' = 'LazyCircus.Testing.Performer.Real')
+and throws 'TgTestConfigError' before spawning the headless bot, because it
+observes replies only through the STM outgoing mailbox that a real Telegram API
+never populates. AI and Mail MAY still be 'LazyCircus.Testing.Performer.Real'
+inside a 'tgTest' run.
 
 The design is "one more source for the same handler": production runs
 'runPollingBot', webhook runs @serverWithAction@, tests run 'runHeadlessBot'.
@@ -32,6 +41,7 @@ module LazyCircus.Testing.TgTest (
     -- * Configuration
     TgTestConfig (..),
     defaultTgTestConfig,
+    TgTestConfigError (..),
     -- * The runner
     tgTest,
     makeTestRuntime,
@@ -80,8 +90,11 @@ import Telegram.Bot.Extra.Headless (feedUpdates, runHeadlessBot)
 
 import LazyCircus.Testing.Performer
     ( Mocks
+    , Mode (..)
     , OutgoingKind (..)
     , OutgoingMessage (..)
+    , TestConfig (..)
+    , defaultTestConfig
     , makeMocks
     , outgoingMailbox
     , readOutgoingMailbox
@@ -102,11 +115,29 @@ import LazyCircus.Testing.Updates
 data TgTestConfig = TgTestConfig
     { ttgTimeout :: !Int
       -- ^ microseconds a @waitFor*@ waits before failing with 'TgTestTimeout'
+    , ttgPerformerConfig :: !TestConfig
+      -- ^ per-sub-language performer config (Telegram MUST be 'Mocked' for
+      -- 'tgTest'; see 'TgTestConfigError')
     }
 
--- | Default config: a 2-second @waitFor*@ timeout (generous to absorb CI jitter).
+-- | Default config: a 2-second @waitFor*@ timeout (generous to absorb CI jitter),
+-- with the default all-mocked performer config.
 defaultTgTestConfig :: TgTestConfig
-defaultTgTestConfig = TgTestConfig{ttgTimeout = 2_000_000}
+defaultTgTestConfig =
+    TgTestConfig
+        { ttgTimeout = 2_000_000
+        , ttgPerformerConfig = defaultTestConfig
+        }
+
+-- | Raised by 'tgTest' when the performer config requests real Telegram.
+-- 'tgTest' observes bot replies through the STM outgoing mailbox, which a real
+-- Telegram API never populates — so a real-Telegram 'tgTest' would hang forever
+-- on the first @waitFor*@.
+newtype TgTestConfigError = TgTestConfigError Text
+    deriving stock (Show)
+
+-- | Enables throwing and catching 'TgTestConfigError' as a typed exception.
+instance Exception TgTestConfigError
 
 -- | Why a 'tgTest' run terminated without producing a result.
 data TgTestError
@@ -202,17 +233,30 @@ ttsThrow e = TelegramTestScript $ lift (throwE e)
 {- | Run a 'TelegramTestScript' end-to-end.
 
 The runner owns the observable state: it allocates a fresh 'Mocks' (and thus a
-fresh mailbox), builds a 'TgTestRuntime' via 'makeTestRuntime', and hands the
-@Mocks@ to @buildAction@ so your bot driver can run under the test performer
-against the /same/ mocks. It then spawns 'runHeadlessBot' in a background
-thread, feeds the DSL's @send*@ updates into the bot, and observes replies
-through the mailbox. Returns the final 'Mailboxes' and either the DSL result or
-a 'TgTestError'.
+fresh mailbox), builds a 'TgTestRuntime' via 'makeTestRuntime', and hands both
+the per-sub-language 'TestConfig' and the @Mocks@ to @buildAction@ so your bot
+driver can run under the test performer against the /same/ mocks. It then spawns
+'runHeadlessBot' in a background thread, feeds the DSL's @send*@ updates into
+the bot, and observes replies through the mailbox. Returns the final 'Mailboxes'
+and either the DSL result or a 'TgTestError'.
 
-@buildAction@ receives the mocks and returns the bot's @Update -> IO ()@ action —
-normally your production update-driver with the test performer substituted for
-the production performer (e.g. via 'LazyCircus.Testing.Performer.runWithMocks').
-That is how the test runs the bot's ordinary script with everything mocked.
+@buildAction@ receives the 'TestConfig' ('ttgPerformerConfig') and the mocks,
+and returns the bot's @Update -> IO ()@ action — normally your production
+update-driver with the test performer substituted for the production performer
+(e.g. via 'LazyCircus.Testing.Performer.runWithConfig', or
+'LazyCircus.Testing.Performer.runWithMocks' if you want the all-mocked default).
+That is how the test runs the bot's ordinary script with Telegram\/AI\/mail
+mocked.
+
+= Runtime guard
+
+Before starting the headless bot, 'tgTest' checks that the supplied
+'TestConfig' mocks Telegram ('tcTelegram' == 'Mocked'). If Telegram is requested
+as 'Real', it throws 'TgTestConfigError' immediately: 'tgTest' observes bot
+replies exclusively through the STM outgoing mailbox, which a real Telegram API
+never populates, so a real-Telegram run would hang forever on the first
+@waitFor*@. AI and Mail MAY still be 'Real' inside 'tgTest' — only Telegram is
+required to be mocked.
 
 = Teardown / quiescence
 
@@ -227,19 +271,29 @@ short grace covers the microsecond dequeue→spawn window of @asyncLink@.
 
 PRE-CONTRACT: @buildAction@ wires the test performer against the supplied
 @Mocks@, and its returned action is safe to run concurrently (the runner
-dispatches updates fire-and-forget).
+dispatches updates fire-and-forget). 'ttgPerformerConfig' MUST set
+'tcTelegram' = 'Mocked' (otherwise 'TgTestConfigError' is thrown).
 POST-CONTRACT: The headless drain loop is cancelled; the returned 'Mailboxes'
 reflect all side effects observable once in-flight work has settled.
 -}
 tgTest ::
     TgTestConfig ->
-    (Mocks serviceLib -> IO (Update -> IO ())) ->
+    (TestConfig -> Mocks serviceLib -> IO (Update -> IO ())) ->
     TelegramTestScript a ->
     IO (Mailboxes, Either TgTestError a)
 tgTest cfg buildAction script = do
+    let performerCfg = ttgPerformerConfig cfg
+    case tcTelegram performerCfg of
+        Real ->
+            throwIO $
+                TgTestConfigError $
+                    "tgTest observes bot replies via the STM outgoing mailbox, which real Telegram does not populate. "
+                        <> "Set tcTelegram = Mocked (default) for tgTest, or use runScenarioProgram/runWithConfig for "
+                        <> "real-Telegram tests. (AI and Mail may still be Real inside tgTest.)"
+        Mocked -> pure ()
     mocks <- makeMocks
     runtime <- makeTestRuntime cfg mocks
-    action <- buildAction mocks
+    action <- buildAction performerCfg mocks
     let onActionError e = atomically $ writeTVar (ttrError runtime) (Just e)
         trackedAction update = bracketInflight (ttrInflight runtime) (action update)
     withAsync (runHeadlessBot onActionError (ttrQueue runtime) trackedAction) $ \botThread -> do

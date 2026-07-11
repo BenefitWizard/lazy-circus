@@ -116,15 +116,19 @@ shared-runner architecture as production:
 - top-level `Script` dispatch still chooses DB, Telegram, Mail, AI, and HTTP branches the same way
 - environment projection still happens through wrappers like `AppWithConnection` and `AppWithBotEnv`
 
-The main difference is the capability layer behind that runner:
+The main difference is the capability layer behind that runner. By default (via `defaultTestConfig`),
+all mockable sub-languages are mocked:
 
-- DB capability uses the real configured connection
-- Telegram capability is replaced with capture-oriented mocks
-- Mail capability reuses real mail construction but captures sends
-- AI capability returns mock values (`Nothing` by default)
-- HTTP capability executes real servant-client requests via the configured manager and base URL
+- DB capability uses the real configured connection (always real — no mock)
+- Telegram capability is replaced with capture-oriented mocks (`tcTelegram = Mocked`)
+- Mail capability reuses real mail construction but captures sends (`tcMailSend = Mocked`)
+- AI capability uses a transport-level mock with FIFO canned responses (`tcAI = Mocked`)
+- HTTP capability executes real servant-client requests via the configured manager and base URL (always real)
 - async capability captures scheduled scenarios instead of executing them
 - logging capability captures structured entries instead of draining the production queue
+
+Each mockable sub-language (Telegram, AI, Mail-send) can be switched to `Real` mode individually via
+`TestConfig` — see [Configurable TestPerformer](#configurable-testperformer) below.
 
 This means tests exercise the same orchestration path as production while swapping effectful
 capabilities at the edges.
@@ -138,7 +142,9 @@ capabilities at the edges.
 | `OutgoingMessage` | one captured outgoing Telegram side effect (kind, chat id, text, message id, reply markup) |
 | `OutgoingKind` | tag on `OutgoingMessage`: `OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` |
 | `MailMock` | Mail mock for capturing sent mails |
-| `EnvWithMocks serviceLib` | environment extended with mock state |
+| `Mode` | runtime mode for a sub-language: `Mocked` or `Real` |
+| `TestConfig` | per-sub-language mode selection (`tcTelegram`, `tcAI`, `tcMailSend`) |
+| `EnvWithMocks serviceLib` | environment extended with mock state and `TestConfig` |
 | `TestInterpreter serviceLib a` | the test-performer monad |
 | `OnSendMessageRequest` | callback type for custom Telegram send handling |
 
@@ -147,8 +153,12 @@ capabilities at the edges.
 | Function | Purpose |
 |---|---|
 | `makeMocks` | allocate a fresh mock state (including an empty `outgoingMailbox`) |
-| `runWithMocks` | run with caller-supplied app and mocks |
-| `runWithDefaultMocks` | allocate mocks and run |
+| `runWithMocks` | run with caller-supplied app and mocks (uses `defaultTestConfig`: all-mocked) |
+| `runWithDefaultMocks` | allocate mocks and run (uses `defaultTestConfig`: all-mocked) |
+| `runWithConfig` | run with explicit `TestConfig` and caller-supplied mocks |
+| `runWithDefaultConfig` | allocate mocks and run with explicit `TestConfig` |
+| `runInsideWithConfig` | run inside `RIO DefaultApp` with explicit `TestConfig` and caller-supplied mocks |
+| `runInsideWithDefaultConfig` | run inside `RIO DefaultApp` with explicit `TestConfig` after allocating fresh mocks |
 | `runScenarioProgram` | execute a `ScenarioProgram Script` in `TestInterpreter` |
 | `runScript` | execute one top-level `Script` |
 | `runTestInterpreter` | unwrap a `TestInterpreter` action into the underlying `RIO (EnvWithMocks serviceLib)` |
@@ -158,6 +168,7 @@ capabilities at the edges.
 | `readLog` | read captured log payloads |
 | `readLogWithContext` | read contextualized log messages |
 | `readSentMails` | read outgoing mails |
+| `readAiRequests` | read captured AI chat-completion requests (Mocked mode only) |
 | `readScheduledScenarios` | read captured async scenario requests |
 
 Also useful for custom harnesses:
@@ -173,28 +184,31 @@ These run one sub-language in isolation with mock logging:
 | Function | Scope |
 |---|---|
 | `runDBWithMockLogging` | DB script with captured logs |
-| `runTelegramWithMockLogging` | Telegram script with captured logs |
+| `runTelegramScript` | Telegram script with mode-aware dispatch (Mocked = mailbox capture, Real = TG.* API) |
 
 ### Mock Behavior Summary
 
-| Effect | Test behavior |
-|---|---|
-| Telegram `sendMessage` | captures `WithImportance SendMessageRequest` in the `SomeRef` log (`readTgRequests`) AND publishes an `OutSendMessage` to the STM `outgoingMailbox` carrying a fresh incremental `MessageId`; returns the canned/default response stamped with that id |
-| Telegram `sendDocument` | publishes an `OutSendDocument` to the `outgoingMailbox` (with a fresh incremental `MessageId`) and returns the mock `defaultResponse` stamped with that id; not added to the `readTgRequests` log |
-| Telegram `setMessageReaction` | publishes an `OutSetReaction` to the `outgoingMailbox` carrying the target `MessageId` |
-| Telegram `editMessageText` | publishes an `OutEditMessage` to the `outgoingMailbox`; still always returns `Nothing` |
-| Telegram `setBotCommands` / `answerCallbackQuery` | no-op (return unit) |
-| Telegram scheduled sends | captured in a separate `SomeRef` list (`readScheduledTgRequests`) |
-| Telegram missing bot | throws `NoBotConfigured` exactly like production dispatch |
-| Telegram `getBotName` | returns the supplied bot name |
-| Telegram file loading | not implemented and throws |
-| Mail `sendMail` | captures mail values |
-| Mail `makeMail` | uses real mail construction from env creds |
-| AI `ask` / `askContinuing` / `solveWithAgent` / `solveWithAgentContinuing` | always returns `Nothing` paired with an unchanged (empty) `Conversation` |
-| HTTP `runClient` | real execution via servant-client against target base URL |
-| DB | runs against a real DB connection |
-| Logging | captured in refs, not pushed to shared queue |
-| `runAsync` | captures scenario without executing it |
+The `tcXxx` column shows which `TestConfig` field controls each sub-language. `Mocked` (default)
+captures side effects; `Real` delegates to production implementations without capturing.
+
+| Effect | `TestConfig` field | Mocked behavior (default) | Real behavior |
+|---|---|---|---|
+| Telegram `sendMessage` | `tcTelegram` | captures `WithImportance SendMessageRequest` in the `SomeRef` log (`readTgRequests`) AND publishes an `OutSendMessage` to the STM `outgoingMailbox` carrying a fresh incremental `MessageId`; returns the canned/default response stamped with that id | delegates to `TG.sendMessage` via `timedAndLog`; mailbox/request log stay empty |
+| Telegram `sendDocument` | `tcTelegram` | publishes an `OutSendDocument` to the `outgoingMailbox` (with a fresh incremental `MessageId`) and returns the mock `defaultResponse` stamped with that id; not added to the `readTgRequests` log | delegates to `TG.sendDocument` via `timedAndLog` |
+| Telegram `setMessageReaction` | `tcTelegram` | publishes an `OutSetReaction` to the `outgoingMailbox` carrying the target `MessageId` | delegates to `TG.setMessageReaction` via `timedAndLog` |
+| Telegram `editMessageText` | `tcTelegram` | publishes an `OutEditMessage` to the `outgoingMailbox`; still always returns `Nothing` | delegates to `TG.editMessageText` via `timedAndLog` (returns real response) |
+| Telegram `setBotCommands` / `answerCallbackQuery` | `tcTelegram` | no-op (return unit) | delegates to `TG.*` via `timedAndLog` |
+| Telegram scheduled sends | `tcTelegram` | captured in a separate `SomeRef` list (`readScheduledTgRequests`) | delegates to `TG.scheduleMessages` via `timedAndLog` |
+| Telegram missing bot | `tcTelegram` | throws `NoBotConfigured` exactly like production dispatch | same |
+| Telegram `getBotName` | — (always real) | returns the supplied bot name | same |
+| Telegram file loading | `tcTelegram` | Mocked: throws `getFileMock` (not implemented for tests) | Real: delegates to `TG.getFile` via `timedAndLog` |
+| Mail `sendMail` | `tcMailSend` | captures mail values in `readSentMails` | delegates to `Mail.sendMail` (real SMTP) via `timedAndLog`; capture stays empty |
+| Mail `makeMail` | — (always real) | uses real mail construction from env creds | same |
+| AI `ask` / `askContinuing` / `solveWithAgent` / `solveWithAgentContinuing` | `tcAI` | transport-level intercept: overrides `aiMethodsL` with `buildMockAiMethods`, which captures every rendered request (`readAiRequests`) and dequeues FIFO canned `ChatCompletionObject` responses; empty queue yields `emptyCompletion` → `Nothing` | delegates to real `askAIContinuing` / `solveWithAgentLoopContinuing` WITHOUT overriding `aiMethodsL` (real OpenAI client); `readAiRequests` stays empty |
+| HTTP `runClient` | — (always real) | real execution via servant-client against target base URL | same |
+| DB | — (always real) | runs against a real DB connection | same |
+| Logging | — (always captured) | captured in refs, not pushed to shared queue | same |
+| `runAsync` | — (always captured) | captures scenario without executing it | same |
 
 ### Typical Test Pattern
 
@@ -271,6 +285,66 @@ When a bot is configured in the app env:
 When no bot is configured for a requested name, tests should assert `NoBotConfigured` rather than
 expecting a silent no-op.
 
+### Configurable TestPerformer
+
+Module: `LazyCircus.Testing.Performer`
+
+By default, every mockable sub-language (Telegram, AI, Mail-send) runs in `Mocked` mode — this is
+the backward-compatible behavior that all existing specs rely on. For rare end-to-end tests that
+need real external services (e.g. E2E against live OpenAI), each sub-language can be individually
+switched to `Real` via `TestConfig`:
+
+```haskell
+data Mode = Mocked | Real
+
+data TestConfig = TestConfig
+    { tcTelegram :: Mode   -- Telegram send/receive
+    , tcAI       :: Mode   -- AI ask / solveWithAgent
+    , tcMailSend :: Mode   -- Mail send (SMTP)
+    }
+
+defaultTestConfig :: TestConfig   -- all Mocked (backward-compatible)
+```
+
+**Mode semantics:**
+
+| Sub-language | `Mocked` (default) | `Real` |
+|---|---|---|
+| Telegram | mailbox capture + canned responses | `TG.*` API calls (real bot token required) |
+| AI | transport intercept via `buildMockAiMethods` with FIFO canned responses | real `askAIContinuing` without override (real `cfgAiApiKey` required) |
+| Mail send | capture in `readSentMails` | real SMTP via `Mail.sendMail` |
+
+DB and HTTP are **always real** — there is no mock for them.
+
+**Configurable runners:**
+
+```haskell
+runWithConfig        :: DefaultApp sl -> TestConfig -> Mocks sl -> TestInterpreter sl a -> IO a
+runWithDefaultConfig :: DefaultApp sl -> TestConfig -> TestInterpreter sl a -> IO (Mocks sl, a)
+```
+
+The existing `runWithMocks` / `runWithDefaultMocks` use `defaultTestConfig` (all-mocked) and remain
+unchanged — no existing spec needs modification.
+
+**Example: real-AI E2E test (requires real `cfgAiApiKey`):**
+
+```haskell
+import LazyCircus.Testing.Performer (defaultTestConfig, runWithDefaultConfig, TestConfig(..), Mode(..))
+
+let realAiConfig = defaultTestConfig{tcAI = Real}
+(mocks, result) <- runWithDefaultConfig app realAiConfig $
+    runScenarioProgram (evalScript myAiScript)
+-- result comes from the real OpenAI client; readAiRequests is empty (no transport intercept)
+```
+
+**`runWithAiMocks` compatibility:** `runWithAiMocks` seeds canned AI responses into `Mocks.aiMock`
+and delegates to `runWithMocks` (which uses `defaultTestConfig` → `tcAI = Mocked`). This remains
+fully compatible — the AI mock seeding works because the `Mocked` branch reads `aiMock.mocks`.
+
+**Important:** in `Real` mode, side effects are **not** captured in mock refs. `readAiRequests`,
+`readSentMails`, `readTgRequests`, and `readOutgoingMailbox` will all be empty for their respective
+Real-mode sub-languages. An observe mode (real + simultaneous capture) is deferred to a separate plan.
+
 ## End-to-End Telegram Bot Tests (`tgTest`)
 
 Module: `LazyCircus.Testing.TgTest`
@@ -302,46 +376,60 @@ FSM bugs that a hand-built scenario cannot.
 ```haskell
 tgTest ::
     TgTestConfig ->
-    (Mocks serviceLib -> IO (Update -> IO ())) ->
+    (TestConfig -> Mocks serviceLib -> IO (Update -> IO ())) ->
     TelegramTestScript a ->
     IO (Mailboxes, Either TgTestError a)
 ```
 
 `tgTest` owns the observable state: it allocates a fresh `Mocks` (and thus a
-fresh mailbox), builds a `TgTestRuntime`, and hands the `Mocks` to `buildAction`
-so your bot driver can run under the test performer against the **same** mocks.
-It then spawns `runHeadlessBot` in a background thread, feeds the DSL's `send*`
-updates into the bot, observes replies through the mailbox, and returns the final
+fresh mailbox), builds a `TgTestRuntime`, and hands the `TestConfig` (from
+`ttgPerformerConfig`) plus the `Mocks` to `buildAction` so your bot driver can
+run under the test performer against the **same** mocks. It then spawns
+`runHeadlessBot` in a background thread, feeds the DSL's `send*` updates into
+the bot, observes replies through the mailbox, and returns the final
 `Mailboxes` snapshot together with either the DSL result or a `TgTestError`.
 
-`buildAction` receives the mocks and returns the bot's `Update -> IO ()` action —
-normally your production update-driver with `runWithMocks` substituted for the
+`buildAction` receives the performer `TestConfig` and the mocks, and returns
+the bot's `Update -> IO ()` action — normally your production update-driver
+with `runWithConfig` (honoring the supplied config) substituted for the
 production performer. That is how the test runs the bot's ordinary script with
-everything mocked.
+the configured mock/real modes.
 
 ```haskell
-defaultTgTestConfig :: TgTestConfig   -- 2-second waitFor* timeout
+data TgTestConfig = TgTestConfig
+    { ttgTimeout         :: Int         -- microseconds for waitFor* timeout
+    , ttgPerformerConfig :: TestConfig  -- per-sub-language mock/real mode
+    }
+
+defaultTgTestConfig :: TgTestConfig   -- 2-second timeout, all-mocked performer config
 ```
+
+**Runtime guard:** `tgTest` throws `TgTestConfigError` **before** starting the
+headless bot if `tcTelegram` (from `ttgPerformerConfig`) is `Real`. This is
+because `tgTest` observes bot replies through the STM outgoing mailbox, which a
+real Telegram API never populates — a real-Telegram `tgTest` would hang forever
+on the first `waitFor*`. AI and Mail may still be `Real` inside `tgTest` (they
+do not interfere with the mailbox mechanism).
 
 ### The `buildAction` seam
 
 The only application-specific obligation is `buildAction`. It wires the bot's
 ordinary update-driver under the test performer. A typical `buildAction` runs the
-very same driver production uses, only with `runWithMocks` substituted for the
-production performer:
+very same driver production uses, only with `runWithConfig` (honoring the
+supplied `TestConfig`) substituted for the production performer:
 
 ```haskell
 import LazyCircus.App.Default (DefaultApp)
-import LazyCircus.Testing.Performer (Mocks, runScenarioProgram, runWithMocks)
+import LazyCircus.Testing.Performer (Mocks, TestConfig, runScenarioProgram, runWithConfig)
 import LazyCircus.Testing.TgTest (tgTest, defaultTgTestConfig)
 import Telegram.Bot.API (Update)
 
 -- | Your bot's update-driver, identical to production except the performer is
 -- the test performer. 'runYourDriver' is whatever turns an @Update@ into an
 -- @IO ()@ by running the handler's ScenarioProgram.
-buildAction :: DefaultApp serviceLib -> Mocks serviceLib -> IO (Update -> IO ())
-buildAction app mocks =
-    pure $ runYourDriver (runWithMocks app mocks . runScenarioProgram) cfg
+buildAction :: DefaultApp serviceLib -> TestConfig -> Mocks serviceLib -> IO (Update -> IO ())
+buildAction app cfg mocks =
+    pure $ runYourDriver (runWithConfig app cfg mocks . runScenarioProgram) handlerCfg
 
 runTgTest :: DefaultApp serviceLib -> TelegramTestScript a -> IO (Mailboxes, Either TgTestError a)
 runTgTest app = tgTest defaultTgTestConfig (buildAction app)
