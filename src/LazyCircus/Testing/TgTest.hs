@@ -162,7 +162,10 @@ data Mailboxes = Mailboxes
     -- ^ all outgoing Telegram side effects still observable after the DSL
     -- finished (deferred non-matches plus anything left in the mailbox)
     , mbScheduledScenarioCount :: !Int
-    -- ^ number of @runAsync@ control programs captured (not executed) during the run
+    -- ^ number of @runAsync@ control programs captured (not executed) during the
+    -- run. Reflects only 'tcAsync = Mocked' scheduling; with 'tcAsync = Real'
+    -- async workers are spawned (their side effects land in 'mbOutgoing') and
+    -- this count stays 0
     }
 
 -- | Mutable per-run state shared between the DSL and the headless dispatch loop.

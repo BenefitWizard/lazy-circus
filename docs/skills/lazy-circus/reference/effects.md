@@ -34,6 +34,8 @@ Main operations:
 | `createAsIs` / `createManyAsIs` | `Maybe` first inserted row / all inserted rows |
 | `find` | `Maybe row` |
 | `findAll` | `[row]` |
+| `findLocked` | `Maybe row` while acquiring a row lock |
+| `findAllLocked` | `[row]` while acquiring a row lock |
 | `update` / `updateMany` | updated rows |
 | `delete` | `()` |
 | `runQuery` | Beam query result |
@@ -68,6 +70,45 @@ Important DB semantics:
 - write operations are blocked in `ReadOnly` mode by `DbReadOnlyViolation`
 - `withTransactionRLS` applies `SET LOCAL rls.<key> = ?` inside the transaction
 - `withQSTransaction` is a convenience wrapper around `withTransactionRLS (rlsQSId qsId)`
+
+### Row Locking
+
+`findLocked` and `findAllLocked` acquire a row lock (the Postgres `FOR UPDATE` family) on the matched rows. They take a `LockSpec` that pairs a lock strength with a waiting policy:
+
+```haskell
+data LockStrength
+    = LockUpdate       -- ^ FOR UPDATE
+    | LockNoKeyUpdate  -- ^ FOR NO KEY UPDATE
+    | LockShare        -- ^ FOR SHARE
+    | LockKeyShare     -- ^ FOR KEY SHARE
+
+data LockWaiting
+    = WaitDefault     -- ^ block until the lock holder commits/aborts
+    | WaitNoWait      -- ^ NOWAIT
+    | WaitSkipLocked  -- ^ SKIP LOCKED
+
+data LockSpec = LockSpec
+    { lockSpecStrength :: LockStrength
+    , lockSpecWaiting  :: LockWaiting
+    }
+
+defaultLock :: LockSpec   -- LockUpdate + WaitDefault
+```
+
+Locking semantics:
+
+- PRE-CONTRACT: a locking read MUST run inside `withTransaction`; `FOR UPDATE` locks are released at COMMIT/ROLLBACK. Outside a transaction Postgres auto-commits each statement and the lock is a no-op.
+- `WaitNoWait` surfaces a contended row as a thrown `SqlError` (Postgres error `55P03`), not as an empty result.
+- `WaitSkipLocked` makes an empty result ambiguous: it means either "no such row" OR "row exists but was skipped because another transaction holds a conflicting lock".
+- locking reads are allowed in `ReadOnly` mode (they do not mutate); they reuse `HasReadService`, so no extra service instances are required.
+
+Example:
+
+```haskell
+reserveAct :: Int32 -> DBScript SimpleDb (Maybe CircusAct)
+reserveAct actId = withTransaction $ do
+    findLocked defaultLock (CircusActId actId)
+```
 
 Embedding into a scenario:
 

@@ -3,12 +3,14 @@
 module DBLangSpec (spec) where
 
 import Common
-import Database.PostgreSQL.Simple (Only (..), query_)
+import Database.PostgreSQL.Simple (Connection, Only (..), SqlError, query_)
+import Database.PostgreSQL.Simple qualified as Simple
 import Database.PostgreSQL.Simple.ToField qualified as ToField
 import Database.PostgreSQL.Simple.Types (Query (..))
 import LazyCircus.Scene.DB
 import LazyCircus.Scenario (DbMode (..))
 import RIO
+import RIO.Time (UTCTime, getCurrentTime)
 import Test.Hspec
 import TestDbSupport
 
@@ -44,6 +46,31 @@ spec = aroundAll withFreshTestDb $ do
 
             found <- runDbScript simpleDb ReadWrite (findCircusAct $ circusActId created) env
             found `shouldBe` Just created
+
+        it "findLocked returns Nothing for an absent id" $ \env -> do
+            result <- runDbScript simpleDb ReadWrite (withTransaction $ findLockedCircusAct 999) env
+            result `shouldBe` Nothing
+
+        it "findLocked returns the same row as find for an existing id" $ \env -> do
+            created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
+
+            locked <- runDbScript simpleDb ReadWrite (withTransaction $ findLockedCircusAct (circusActId created)) env
+            found <- runDbScript simpleDb ReadWrite (findCircusAct (circusActId created)) env
+
+            locked `shouldBe` Just created
+            locked `shouldBe` found
+
+        it "findAllLocked returns the row for an existing id" $ \env -> do
+            created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
+
+            locked <- runDbScript simpleDb ReadWrite (withTransaction $ findAllLockedCircusAct (circusActId created)) env
+            locked `shouldBe` [created]
+
+        it "findLocked is allowed in ReadOnly mode" $ \env -> do
+            created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
+
+            locked <- runDbScript simpleDb ReadOnly (withTransaction $ findLockedCircusAct (circusActId created)) env
+            locked `shouldBe` Just created
 
         it "update changes only provided fields" $ \env -> do
             created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
@@ -166,6 +193,58 @@ spec = aroundAll withFreshTestDb $ do
             map testRowCircusId rows `shouldBe` replicate (length rows) 7
             map testRowName rows `shouldSatisfy` ("Acrobats" `elem`)
             map testRowName rows `shouldSatisfy` (not . elem "Jugglers")
+
+    describe "findLocked / findAllLocked row locking (FOR UPDATE concurrency)" $ do
+        it "findLocked blocks a second locking reader until the holder commits" $ \env -> do
+            created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
+            let rowId = circusActId created
+            bracket
+                ((,) <$> openTestConn <*> openTestConn)
+                (\(connA, connB) -> Simple.close connA >> Simple.close connB)
+                $ \(connA, connB) -> do
+                    let envB = env{testDbConn = connB}
+                    lockHeld <- newEmptyMVar
+                    a <- async (holdRowLock connA lockHeld rowId)
+                    takeMVar lockHeld
+                    b <- async $ do
+                        res <- runDbScript simpleDb ReadWrite (withTransaction $ findLockedCircusAct rowId) envB
+                        tBfinish <- getCurrentTime
+                        pure (res, tBfinish)
+                    (tAcommit, (res, tBfinish)) <- waitBoth a b
+                    res `shouldBe` Just created
+                    tBfinish `shouldSatisfy` (>= tAcommit)
+
+        it "findAllLocked with WaitSkipLocked skips a row held by another transaction" $ \env -> do
+            created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
+            let rowId = circusActId created
+            bracket
+                ((,) <$> openTestConn <*> openTestConn)
+                (\(connA, connB) -> Simple.close connA >> Simple.close connB)
+                $ \(connA, connB) -> do
+                    let envB = env{testDbConn = connB}
+                    lockHeld <- newEmptyMVar
+                    a <- async (holdRowLock connA lockHeld rowId)
+                    takeMVar lockHeld
+                    mResult <-
+                        timeout 2000000 $
+                            runDbScript simpleDb ReadWrite (withTransaction $ findAllLockedSpec (LockSpec LockUpdate WaitSkipLocked) rowId) envB
+                    void (wait a)
+                    mResult `shouldBe` (Just [] :: Maybe [CircusAct])
+
+        it "findLocked with WaitNoWait throws when the row is already locked" $ \env -> do
+            created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
+            let rowId = circusActId created
+            bracket
+                ((,) <$> openTestConn <*> openTestConn)
+                (\(connA, connB) -> Simple.close connA >> Simple.close connB)
+                $ \(connA, connB) -> do
+                    let envB = env{testDbConn = connB}
+                    lockHeld <- newEmptyMVar
+                    a <- async (holdRowLock connA lockHeld rowId)
+                    takeMVar lockHeld
+                    runDbScript simpleDb ReadWrite (withTransaction $ findLockedSpec (LockSpec LockUpdate WaitNoWait) rowId) envB
+                        `shouldThrow` anySqlError
+                    void (wait a)
   where
     rawSelect = Query "SELECT name FROM circus_acts WHERE circus_id = ? ORDER BY id"
 
@@ -218,6 +297,18 @@ badQuery = rawQuery (Query "SELECT definitely_missing_column FROM circus_acts") 
 findCircusAct :: Int32 -> DBScript SimpleDb (Maybe CircusAct)
 findCircusAct actId = find (CircusActId actId :: CircusActId)
 
+findLockedCircusAct :: Int32 -> DBScript SimpleDb (Maybe CircusAct)
+findLockedCircusAct actId = findLocked defaultLock (CircusActId actId :: CircusActId)
+
+findAllLockedCircusAct :: Int32 -> DBScript SimpleDb [CircusAct]
+findAllLockedCircusAct actId = findAllLocked defaultLock (CircusActId actId :: CircusActId)
+
+findLockedSpec :: LockSpec -> Int32 -> DBScript SimpleDb (Maybe CircusAct)
+findLockedSpec lockSpec actId = findLocked lockSpec (CircusActId actId :: CircusActId)
+
+findAllLockedSpec :: LockSpec -> Int32 -> DBScript SimpleDb [CircusAct]
+findAllLockedSpec lockSpec actId = findAllLocked lockSpec (CircusActId actId :: CircusActId)
+
 deleteCircusAct :: Int32 -> DBScript SimpleDb ()
 deleteCircusAct actId = delete (CircusActId actId :: CircusActId)
 
@@ -226,3 +317,25 @@ updateCircusAct patch actId = update patch (CircusActId actId :: CircusActId)
 
 isReadOnlyViolation :: Selector DbError
 isReadOnlyViolation DbReadOnlyViolation = True
+
+anySqlError :: Selector SqlError
+anySqlError = const True
+
+-- | Drives the given connection as a row-lock holder for the concurrency tests.
+-- Opens a transaction, acquires a raw 'FOR UPDATE' lock on the seeded row,
+-- signals via the 'MVar' that the lock is held, sleeps to keep the lock open,
+-- and returns the timestamp captured just before the transaction commits.
+-- PRE-CONTRACT: 'rowId' must identify an existing 'circus_acts' row.
+-- POST-CONTRACT: The 'MVar' is filled exactly once, after the FOR UPDATE lock is
+-- acquired; the lock stays held until the surrounding transaction commits.
+holdRowLock :: Connection -> MVar () -> Int32 -> IO UTCTime
+holdRowLock conn lockHeld rowId =
+    Simple.withTransaction conn $ do
+        _ :: [Only Int] <-
+            Simple.query
+                conn
+                "SELECT 1 FROM circus_acts WHERE id = ? FOR UPDATE"
+                (Only rowId)
+        putMVar lockHeld ()
+        threadDelay 300000
+        getCurrentTime

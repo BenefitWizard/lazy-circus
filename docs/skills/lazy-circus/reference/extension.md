@@ -105,6 +105,10 @@ CircusAct
 
 The default method uses `generateFiltration`, so an empty instance is enough in many cases.
 
+#### Locking Reads Reuse `HasReadService`
+
+`findLocked` and `findAllLocked` (the `SELECT ... FOR UPDATE` family) dispatch through the same `generateFiltration` used by `find` / `findAll`. No extra service instance is needed — once a table has `HasReadService`, locking reads work automatically. Just remember they must run inside `withTransaction` (see [effects.md](effects.md#row-locking)).
+
 #### Use `DBScriptDef` With An Explicit `DbMode`
 
 ```haskell

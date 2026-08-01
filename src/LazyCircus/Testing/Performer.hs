@@ -80,6 +80,9 @@ import LazyCircus.Scenario
     , ScenarioProgram
     , run
     )
+
+import Control.Concurrent.STM (retry)
+import GHC.Stack (HasCallStack, callStack)
 import LazyCircus.Scene.AI.Class (AILangPerformer (..), runAI)
 import LazyCircus.Scene.DB.Class (HasDbConnection (..), runDB)
 import LazyCircus.Scene.DB.Lang (DBScript)
@@ -198,7 +201,10 @@ data Mocks serviceLib = Mocks
     , aiMock :: AiMock
     -- ^ AI request capture and canned-response queue
     , scheduledScenarios :: SomeRef [ScenarioProgram Script serviceLib ()]
-    -- ^ captured async control programs requested through 'runAsync'
+    -- ^ captured async control programs requested through 'runAsync' ('tcAsync = Mocked')
+    , asyncInflight :: !(TVar Int)
+    -- ^ count of 'tcAsync = Real' spawned async workers currently running; awaited at
+    -- 'runWithConfigEngine' teardown so spawned work settles before the run returns
     }
 
 -- | Runtime mode controlling whether a test sub-language is mocked or real.
@@ -206,8 +212,8 @@ data Mode = Mocked | Real
     deriving (Eq, Show)
 
 -- | Per-sub-language configuration for the test performer.
--- Controls whether Telegram, AI, and Mail-send are mocked (capture/intercept)
--- or real (delegate to production implementations).
+-- Controls whether Telegram, AI, Mail-send, and async work are mocked
+-- (capture/intercept) or real (delegate to production implementations).
 data TestConfig = TestConfig
     { tcTelegram :: !Mode
     -- ^ Telegram send/receive mode: Mocked = mailbox capture, Real = TG.* API calls
@@ -215,11 +221,17 @@ data TestConfig = TestConfig
     -- ^ AI mode: Mocked = transport intercept via buildMockAiMethods, Real = real OpenAI client
     , tcMailSend :: !Mode
     -- ^ Mail send mode: Mocked = capture in sentMails ref, Real = SMTP via Mail.sendMail
+    , tcAsync :: !Mode
+    -- ^ 'LazyCircus.Scenario.runAsync' mode: Mocked = capture scenario in
+    -- 'scheduledScenarios' (assert via 'readScheduledScenarios'); Real = spawn
+    -- the scenario on a background thread so its side effects genuinely run and
+    -- land in the usual capture buffers / outgoing mailbox (no capture in
+    -- 'scheduledScenarios')
     }
 
 -- | Default config: everything that can be mocked IS mocked (backward-compatible).
 defaultTestConfig :: TestConfig
-defaultTestConfig = TestConfig{tcTelegram = Mocked, tcAI = Mocked, tcMailSend = Mocked}
+defaultTestConfig = TestConfig{tcTelegram = Mocked, tcAI = Mocked, tcMailSend = Mocked, tcAsync = Mocked}
 
 -- | Test runtime environment that combines mocks with the real application environment.
 data EnvWithMocks serviceLib = EnvWithMocks
@@ -556,7 +568,7 @@ instance ScenarioPerformer Script serviceLib (TestPerformer (EnvWithMocks servic
     getDateTime' = liftIO getCurrentTime
     log' cs = sublangLog cs "Scenario"
     getExtraContext' = view App.extraContextL
-    runAsync' = captureAsyncScenario
+    runAsync' = runAsyncTest
     callService' = callViaServiceLib
     withLogContext' values action =
         local (logContextL %~ (`putInLoggingContext` values)) (run action)
@@ -658,6 +670,7 @@ makeMocks = do
     mockMail <- createSimpleMailMock
     aiMockTest <- createSimpleAiMock
     asyncLog <- newSomeRef []
+    asyncCounter <- newTVarIO 0
     pure
         Mocks
             { tgMock = telegramMock
@@ -667,6 +680,7 @@ makeMocks = do
             , mailMock = mockMail
             , aiMock = aiMockTest
             , scheduledScenarios = asyncLog
+            , asyncInflight = asyncCounter
             }
 
 -- | Run a test action inside 'RIO DefaultApp' using a caller-supplied mock set.
@@ -675,6 +689,24 @@ runInsideWithMocks testMocks action = do
     app <- ask
     liftIO $ runWithMocks app testMocks action
 
+-- | Upper bound (microseconds) 'runWithConfigEngine' waits for 'tcAsync = Real'
+-- spawned workers to settle before draining logs and returning. Mirrors the
+-- @tgTest@ 'quiescenceTimeout' rationale; on expiry the run proceeds best-effort.
+asyncInflightTimeout :: Int
+asyncInflightTimeout = 5_000_000
+
+-- | Block (bounded by 'asyncInflightTimeout') until no 'tcAsync = Real' spawned
+-- async worker is still running.
+-- POST-CONTRACT: Returns once 'asyncInflight' reads 0, or the timeout fires
+-- (best-effort; mirrors the @tgTest@ quiescence safety net).
+waitForAsyncInflight :: Mocks serviceLib -> IO ()
+waitForAsyncInflight testMocks = do
+    delay <- registerDelay asyncInflightTimeout
+    atomically $ do
+        expired <- readTVar delay
+        n <- readTVar (asyncInflight testMocks)
+        unless (expired || n == 0) retry
+
 -- | Shared engine for running a test interpreter with explicit config.
 -- PRE-CONTRACT: The supplied DefaultApp and Mocks are compatible (same serviceLib).
 -- POST-CONTRACT: Queued logs are drained into mock refs before returning; exceptions re-throw with original stack.
@@ -682,6 +714,10 @@ runWithConfigEngine :: App.DefaultApp serviceLib -> TestConfig -> Mocks serviceL
 runWithConfigEngine app cfg testMocks action = do
     let env = EnvWithMocks{mocks = testMocks, defaultApp = app, testConfig = cfg}
     result <- tryAny $ runRIO env $ runTestInterpreter action
+    -- Await 'tcAsync = Real' spawned workers (bounded) before draining logs so
+    -- their side effects and log emissions settle into capture buffers. In Mocked
+    -- mode the counter stays 0 and this returns immediately.
+    waitForAsyncInflight testMocks
     drainQueuedLogs env
     either throwIO pure result
 
@@ -918,11 +954,55 @@ someChatIdToChatId (SomeChatUsername _) = Nothing
 getFileMock :: FileId -> TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib)) (Response File)
 getFileMock _ = throwString "LazyCircus.Testing.Performer: getFile is not implemented for tests"
 
--- | Record an async scenario request without executing it.
+-- | Record an async scenario request without executing it ('tcAsync = Mocked').
 captureAsyncScenario :: ScenarioProgram Script serviceLib () -> TestInterpreter serviceLib ()
 captureAsyncScenario action = do
     asyncLog <- asks (scheduledScenarios . mocks)
     modifySomeRef asyncLog (action :)
+
+-- | Dispatch a 'LazyCircus.Scenario.runAsync' control program according to 'tcAsync'.
+-- 'Mocked' captures the scenario (no execution); 'Real' spawns it on a background
+-- thread so its side effects genuinely run and land in the usual capture buffers.
+runAsyncTest ::
+    ScenarioProgram Script serviceLib () ->
+    TestInterpreter serviceLib ()
+runAsyncTest action = do
+    mode <- asks (tcAsync . testConfig)
+    case mode of
+        Mocked -> captureAsyncScenario action
+        Real -> spawnAsyncScenario action
+
+-- | Spawn an async control program on a background thread ('tcAsync = Real').
+--
+-- The worker runs the scenario through the same test interpreter (same mocks,
+-- mailbox, and DB connection), so a @sendMessage@ inside it publishes an
+-- 'OutgoingMessage' to the shared 'outgoingMailbox' that @waitFor*@ observes
+-- exactly like a synchronous reply. The 'asyncInflight' counter is incremented
+-- synchronously (before the spawn returns) and decremented when the worker
+-- finishes, so 'runWithConfigEngine' can await all spawned workers before
+-- returning, which in @tgTest@ transitively gates 'waitForQuiescent' (a per-update
+-- action does not return until its spawned workers finish).
+--
+-- Worker exceptions are caught and logged via 'sublangLog' (mirroring production
+-- 'runAsyncWorker'); they never crash the test harness. A failed worker yields no
+-- reply, so @waitFor*@ then fails with 'TgTestTimeout' — disambiguate via 'readLog'.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: 'asyncInflight' is incremented synchronously (before this
+-- returns) and decremented once the worker finishes (or throws).
+spawnAsyncScenario :: HasCallStack => ScenarioProgram Script serviceLib () -> TestInterpreter serviceLib ()
+spawnAsyncScenario action = do
+    counter <- asks (asyncInflight . mocks)
+    -- Increment BEFORE spawning so 'waitForAsyncInflight' cannot observe a false
+    -- zero between this function returning and the worker thread starting.
+    atomically $ modifyTVar' counter (+ 1)
+    let dec = atomically $ modifyTVar' counter (subtract 1)
+        runWorker = do
+            result <- tryAny (run action)
+            case result of
+                Left e ->
+                    sublangLog callStack "Scenario" (ErrorLogMsg ("Async worker action failed: " <> tshow e))
+                Right _ -> pure ()
+    void $ async $ finally runWorker dec
 
 -- | Drain queued contextual logs into the mock refs while preserving emission order.
 drainQueuedLogs :: EnvWithMocks serviceLib -> IO ()

@@ -5,6 +5,10 @@
 
 module LazyCircus.Scene.DB.Lang (
     DBLangF (..),
+    LockStrength (..),
+    LockWaiting (..),
+    LockSpec (..),
+    defaultLock,
     create,
     createMany,
     createAsIs,
@@ -14,6 +18,8 @@ module LazyCircus.Scene.DB.Lang (
     updateMany,
     findAll,
     find,
+    findAllLocked,
+    findLocked,
     runQuery,
     rawQuery,
     withTransaction,
@@ -43,6 +49,32 @@ import RIO
 liftFC :: (Functor f, MF.MonadFree f m) => f a -> m a
 liftFC = CF.liftF
 
+-- | Strength of the row lock that 'findLocked' / 'findAllLocked' acquire on the matched rows.
+data LockStrength
+    = LockUpdate  -- ^ maps to Postgres 'FOR UPDATE'
+    | LockNoKeyUpdate  -- ^ maps to Postgres 'FOR NO KEY UPDATE'
+    | LockShare  -- ^ maps to Postgres 'FOR SHARE'
+    | LockKeyShare  -- ^ maps to Postgres 'FOR KEY SHARE'
+    deriving (Show, Eq)
+
+-- | Behaviour of a locking read when a contended row is already locked by another transaction.
+data LockWaiting
+    = WaitDefault  -- ^ default blocking wait until the lock holder commits/aborts
+    | WaitNoWait  -- ^ maps to Postgres 'NOWAIT'
+    | WaitSkipLocked  -- ^ maps to Postgres 'SKIP LOCKED'
+    deriving (Show, Eq)
+
+-- | Full specification of a row lock: its strength and its waiting policy.
+data LockSpec = LockSpec
+    { lockSpecStrength :: LockStrength  -- ^ the lock strength to acquire
+    , lockSpecWaiting :: LockWaiting  -- ^ the policy when a matched row is already locked
+    }
+    deriving (Show, Eq)
+
+-- | The common case: 'LockUpdate' with 'WaitDefault' blocking wait until the lock holder commits.
+defaultLock :: LockSpec
+defaultLock = LockSpec LockUpdate WaitDefault
+
 data DBLangF db a where
     Update :: (HasUpdateService db table) => table Maybe -> LId table -> ([table Identity] -> a) -> DBLangF db a
     UpdateMany :: (HasUpdateService db table) => table Maybe -> [LId table] -> ([table Identity] -> a) -> DBLangF db a
@@ -50,6 +82,7 @@ data DBLangF db a where
     Delete :: (HasDeleteService db table) => LId table -> a -> DBLangF db a
     CreateAsIs :: (HasCreateService db table) => [table Identity] -> ([table Identity] -> a) -> DBLangF db a
     Find :: (HasReadService db table) => LId table -> ([table Identity] -> a) -> DBLangF db a
+    LockAndFind :: (HasReadService db table) => LockSpec -> LId table -> ([table Identity] -> a) -> DBLangF db a
     RunQuery :: (PgDB db -> Pg b) -> (b -> a) -> DBLangF db a
     RawQuery :: (Simple.FromRow b) => Simple.Query -> [ToField.Action] -> ([b] -> a) -> DBLangF db a
     WithTransaction :: Maybe RLSContext -> DBScript db b -> (b -> a) -> DBLangF db a
@@ -61,6 +94,7 @@ instance Functor (DBLangF db) where
     fmap f (CreateAsIs table next) = CreateAsIs table (f . next)
     fmap f (Update table lid next) = Update table lid (f . next)
     fmap f (Find lid next) = Find lid (f . next)
+    fmap f (LockAndFind spec lid next) = LockAndFind spec lid (f . next)
     fmap f (RunQuery pg next) = RunQuery pg (f . next)
     fmap f (RawQuery q params next) = RawQuery q params (f . next)
     fmap f (WithTransaction ctx db next) = WithTransaction ctx db (f . next)
@@ -132,6 +166,26 @@ POST-CONTRACT: Produces a script that returns 'Nothing' when the interpreter rep
 -}
 find :: (HasReadService db table) => LId table -> F (DBLangF db) (Maybe (table Identity))
 find lid = liftFC $ Find lid listToMaybe
+
+{- | Lifts a lookup that returns all rows matched by a lookup key, while acquiring a row lock on the matched rows.
+PRE-CONTRACT: The target table must provide a read service for the selected database.
+PRE-CONTRACT: Must be called inside 'withTransaction'; a 'FOR UPDATE' lock is released at COMMIT/ROLLBACK. Outside a transaction Postgres auto-commits each statement and the lock is a no-op.
+POST-CONTRACT: Produces a script that returns every matching locked row reported by the interpreter.
+NOTE: With 'WaitNoWait', a contended row surfaces as a thrown 'SqlError' (Postgres error 55P03), not as an empty result.
+NOTE: With 'WaitSkipLocked', an empty result is ambiguous: it means either "no such row" OR "row exists but was skipped because another transaction holds a conflicting lock".
+-}
+findAllLocked :: (HasReadService db table) => LockSpec -> LId table -> F (DBLangF db) [table Identity]
+findAllLocked spec lid = liftFC $ LockAndFind spec lid id
+
+{- | Lifts a lookup that keeps only the first matched row, while acquiring a row lock on the matched rows.
+PRE-CONTRACT: The target table must provide a read service for the selected database.
+PRE-CONTRACT: Must be called inside 'withTransaction'; a 'FOR UPDATE' lock is released at COMMIT/ROLLBACK. Outside a transaction Postgres auto-commits each statement and the lock is a no-op.
+POST-CONTRACT: Produces a script that returns the first matching locked row, or 'Nothing' when the interpreter reports no matches.
+NOTE: With 'WaitNoWait', a contended row surfaces as a thrown 'SqlError' (Postgres error 55P03), not as 'Nothing'.
+NOTE: With 'WaitSkipLocked', 'Nothing' is ambiguous: it means either "no such row" OR "row exists but was skipped because another transaction holds a conflicting lock". Callers that must distinguish these should use 'findAllLocked' with a sentinel or choose 'WaitDefault'.
+-}
+findLocked :: (HasReadService db table) => LockSpec -> LId table -> F (DBLangF db) (Maybe (table Identity))
+findLocked spec lid = liftFC $ LockAndFind spec lid listToMaybe
 
 {- | Lifts a raw Beam query into the database script language.
 PRE-CONTRACT: The query must be valid for the selected database schema.

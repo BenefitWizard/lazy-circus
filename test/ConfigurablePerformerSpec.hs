@@ -29,7 +29,7 @@ import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.Scene.AI qualified as Scene (ask)
 import LazyCircus.Scene.Mail.Lang qualified as Mail (makeMail, sendMail)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg (sendMessage)
-import LazyCircus.Scenario (ScenarioProgram, evalScript)
+import LazyCircus.Scenario (ScenarioProgram, evalScript, runAsync)
 import LazyCircus.Script (Script (..))
 import LazyCircus.Testing.Performer
     ( Mode (..)
@@ -38,6 +38,7 @@ import LazyCircus.Testing.Performer
     , makeMocks
     , readAiRequests
     , readOutgoingMailbox
+    , readScheduledScenarios
     , readSentMails
     , readTgRequests
     , runScenarioProgram
@@ -97,6 +98,10 @@ tgSendScenario =
             tgScript "demo-bot" $
                 Tg.sendMessage (defSendMessage (SomeChatId (ChatId 1)) "hello")
 
+-- | Schedule a Telegram send as background work via 'runAsync'.
+asyncTgSendScenario :: ScenarioProgram Script serviceLib ()
+asyncTgSendScenario = runAsync tgSendScenario
+
 spec :: Spec
 spec = do
     aroundAll withBotTestApp $ do
@@ -119,6 +124,31 @@ spec = do
                 (mocks, _) <-
                     runWithDefaultConfig app defaultTestConfig $
                         runScenarioProgram tgSendScenario
+                outgoing <- readOutgoingMailbox mocks
+                length outgoing `shouldBe` 1
+                tgReqs <- readTgRequests mocks
+                length tgReqs `shouldBe` 1
+
+        describe "runAsync mode (Mocked capture vs Real execution)" $ do
+            it "Async Mocked captures the scenario without executing it" $ \app -> do
+                (mocks, _) <-
+                    runWithDefaultConfig app defaultTestConfig $
+                        runScenarioProgram asyncTgSendScenario
+                scheduled <- readScheduledScenarios mocks
+                length scheduled `shouldBe` 1
+                -- Mocked mode does not execute the worker, so no send happened.
+                outgoing <- readOutgoingMailbox mocks
+                length outgoing `shouldBe` 0
+
+            it "Async Real executes the worker and fills the outgoing mailbox" $ \app -> do
+                let cfg = defaultTestConfig{tcAsync = Real}
+                (mocks, _) <-
+                    runWithDefaultConfig app cfg $
+                        runScenarioProgram asyncTgSendScenario
+                -- Real mode spawns instead of capturing.
+                scheduled <- readScheduledScenarios mocks
+                length scheduled `shouldBe` 0
+                -- The spawned worker ran sendMessage, which published to the mailbox.
                 outgoing <- readOutgoingMailbox mocks
                 length outgoing `shouldBe` 1
                 tgReqs <- readTgRequests mocks

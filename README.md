@@ -35,7 +35,7 @@ Balancing these concerns often leads to messy codebases. As developers, we actua
 Lazy Circus ships with a rich set of built-in capabilities ready for production use:
 
 * **Orchestration Framework:** A robust control layer (`ScenarioProgram`) for executing sub-scenarios, spawning asynchronous background tasks, managing environment state, handling errors gracefully, and calling registered services. You can orchestrate the built-in effects or plug in your own.
-* **Database Effect DSL (via `beam`):** A comprehensive database language supporting both typed CRUD operations and raw queries. Advanced features like separate Read-Only connections, Row-Level Security (RLS), and transaction management are supported out-of-the-box.
+* **Database Effect DSL (via `beam`):** A comprehensive database language supporting both typed CRUD operations and raw queries. Advanced features like separate Read-Only connections, Row-Level Security (RLS), transaction management, and pessimistic row locking (`findLocked` / `findAllLocked` with `SELECT ... FOR UPDATE` semantics) are supported out-of-the-box.
 * **Telegram Bot Integration:** A ready-to-use effect for sending messages, documents, and reactions. It natively supports running multiple bots from a single application seamlessly.
 * **Mail Integration:** A robust email effect for composing and sending transactional emails.
 * **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses, an XML-like prompt templating language which significantly improves prompt adherence, a multi-turn `Conversation` handle that threads context across calls, and an agent loop (`solveWithAgent`) that runs a ReAct cycle with tool use against registered services.
@@ -432,7 +432,7 @@ What changes is the capability layer underneath that runner:
 - Mail uses real mail building but mocked send capture
 - AI returns mock answers (`Nothing` by default)
 - HTTP executes real servant-client requests via the configured manager and base URL
-- `runAsync` records deferred scenarios instead of executing them
+- `runAsync` records deferred scenarios instead of executing them (default; with `tcAsync = Real` the worker is spawned through the same test interpreter)
 - logging is captured as structured messages with context and call-site metadata
 
 This shared-runner design lets tests validate orchestration behavior very close to production while
@@ -493,7 +493,7 @@ tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
 | HTTP `runClient` | Real execution via servant-client against target base URL |
 | DB | Real execution against DB (requires test database) |
 | Logging | Capture in ref-lists (no production queue writes) |
-| `runAsync` | Capture ScenarioProgram without execution |
+| `runAsync` | Capture ScenarioProgram without execution (default `tcAsync = Mocked`; `tcAsync = Real` spawns the worker so its side effects land in the capture buffers) |
 
 ### Common Assertions
 

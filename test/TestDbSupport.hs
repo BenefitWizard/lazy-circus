@@ -6,7 +6,8 @@ module TestDbSupport (
     withFreshTestDb,
     runDbScript,
     queryActs,
-) where
+    openTestConn,
+    ) where
 
 import Common (migration)
 import Database.PostgreSQL.Simple (Connection, Only (..), close, connectPostgreSQL, execute_, query_)
@@ -76,6 +77,17 @@ queryActs env =
     query_
         (testDbConn env)
         (Query "SELECT id, name, circus_id, description, audience_reaction FROM circus_acts ORDER BY id")
+
+-- | Opens a fresh connection to the test database.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: The returned connection is open, authenticated as
+-- @lazy_circus_app@ against @lazy_circus_test@, and must be 'close'd by the
+-- caller (typically via 'bracket'). Intended for multi-connection concurrency
+-- tests that need an independent second/third connection to the same database
+-- (e.g. holding a @FOR UPDATE@ row lock on one connection while a Lazy Circus
+-- @findLocked@ / @findAllLocked@ read runs on another).
+openTestConn :: IO Connection
+openTestConn = connectPostgreSQL testConnectionString
 
 recreateTestDatabase :: Connection -> IO ()
 recreateTestDatabase conn = do

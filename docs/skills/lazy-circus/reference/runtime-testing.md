@@ -124,10 +124,10 @@ all mockable sub-languages are mocked:
 - Mail capability reuses real mail construction but captures sends (`tcMailSend = Mocked`)
 - AI capability uses a transport-level mock with FIFO canned responses (`tcAI = Mocked`)
 - HTTP capability executes real servant-client requests via the configured manager and base URL (always real)
-- async capability captures scheduled scenarios instead of executing them
+- async capability captures scheduled scenarios instead of executing them (`tcAsync = Mocked`, the default); with `tcAsync = Real` it spawns the scenario on a background thread through the same test interpreter
 - logging capability captures structured entries instead of draining the production queue
 
-Each mockable sub-language (Telegram, AI, Mail-send) can be switched to `Real` mode individually via
+Each mockable sub-language (Telegram, AI, Mail-send, async) can be switched to `Real` mode individually via
 `TestConfig` — see [Configurable TestPerformer](#configurable-testperformer) below.
 
 This means tests exercise the same orchestration path as production while swapping effectful
@@ -143,7 +143,7 @@ capabilities at the edges.
 | `OutgoingKind` | tag on `OutgoingMessage`: `OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` |
 | `MailMock` | Mail mock for capturing sent mails |
 | `Mode` | runtime mode for a sub-language: `Mocked` or `Real` |
-| `TestConfig` | per-sub-language mode selection (`tcTelegram`, `tcAI`, `tcMailSend`) |
+| `TestConfig` | per-sub-language mode selection (`tcTelegram`, `tcAI`, `tcMailSend`, `tcAsync`) |
 | `EnvWithMocks serviceLib` | environment extended with mock state and `TestConfig` |
 | `TestInterpreter serviceLib a` | the test-performer monad |
 | `OnSendMessageRequest` | callback type for custom Telegram send handling |
@@ -174,6 +174,9 @@ capabilities at the edges.
 Also useful for custom harnesses:
 
 - `runInsideWithMocks` and `runInsideWithDefaultMocks` run tests inside `RIO DefaultApp`
+- `runWithAiMocks`, `runInsideWithAiMocks`, and `makeMocksWithAi` allocate a mock set pre-seeded with canned AI chat-completion responses
+- `createAiMock` and `createSimpleAiMock` build custom AI mock state
+- `runWithConfigEngine` is the shared engine beneath `runWithConfig` / `runWithMocks`; it awaits in-flight `tcAsync = Real` workers and drains queued logs before returning
 - `discardMocks` drops the collected capture state when only the result matters
 - `createTgMock`, `createSimpleTgMock`, and `createSimpleMailMock` help build custom mock setups
 
@@ -208,7 +211,7 @@ captures side effects; `Real` delegates to production implementations without ca
 | HTTP `runClient` | — (always real) | real execution via servant-client against target base URL | same |
 | DB | — (always real) | runs against a real DB connection | same |
 | Logging | — (always captured) | captured in refs, not pushed to shared queue | same |
-| `runAsync` | — (always captured) | captures scenario without executing it | same |
+| `runAsync` | `tcAsync` | captures scenario without executing it (`readScheduledScenarios`) | spawns the scenario on a background thread through the same test interpreter; side effects land in the usual capture buffers / mailbox (no capture in `readScheduledScenarios`) |
 
 ### Typical Test Pattern
 
@@ -301,6 +304,7 @@ data TestConfig = TestConfig
     { tcTelegram :: Mode   -- Telegram send/receive
     , tcAI       :: Mode   -- AI ask / solveWithAgent
     , tcMailSend :: Mode   -- Mail send (SMTP)
+    , tcAsync    :: Mode   -- runAsync (capture vs spawn)
     }
 
 defaultTestConfig :: TestConfig   -- all Mocked (backward-compatible)
@@ -313,8 +317,11 @@ defaultTestConfig :: TestConfig   -- all Mocked (backward-compatible)
 | Telegram | mailbox capture + canned responses | `TG.*` API calls (real bot token required) |
 | AI | transport intercept via `buildMockAiMethods` with FIFO canned responses | real `askAIContinuing` without override (real `cfgAiApiKey` required) |
 | Mail send | capture in `readSentMails` | real SMTP via `Mail.sendMail` |
+| Async (`runAsync`) | capture in `readScheduledScenarios` (no execution) | spawn on a background thread through the same test interpreter; side effects land in the usual capture buffers / mailbox |
 
-DB and HTTP are **always real** — there is no mock for them.
+DB and HTTP are **always real** — there is no mock for them. Async (`runAsync`) is the only
+sub-language whose `Real` mode still captures side effects, because the spawned worker runs
+through the same test interpreter.
 
 **Configurable runners:**
 
@@ -337,13 +344,31 @@ let realAiConfig = defaultTestConfig{tcAI = Real}
 -- result comes from the real OpenAI client; readAiRequests is empty (no transport intercept)
 ```
 
+**Example: real-async test (worker genuinely runs, side effects captured):**
+
+```haskell
+import LazyCircus.Testing.Performer (defaultTestConfig, runWithDefaultConfig, TestConfig(..), Mode(..))
+
+let realAsyncConfig = defaultTestConfig{tcAsync = Real}
+(mocks, _) <- runWithDefaultConfig app realAsyncConfig $
+    runScenarioProgram $ runAsync $ evalScript $ tgScript "demo-bot" $ sendMessage req
+-- the spawned worker ran sendMessage through the same test interpreter, so it published an
+-- OutgoingMessage to the outgoing mailbox (readOutgoingMailbox is NON-empty).
+-- readScheduledScenarios is empty (Real mode does not capture the scenario).
+```
+
 **`runWithAiMocks` compatibility:** `runWithAiMocks` seeds canned AI responses into `Mocks.aiMock`
 and delegates to `runWithMocks` (which uses `defaultTestConfig` → `tcAI = Mocked`). This remains
 fully compatible — the AI mock seeding works because the `Mocked` branch reads `aiMock.mocks`.
 
 **Important:** in `Real` mode, side effects are **not** captured in mock refs. `readAiRequests`,
 `readSentMails`, `readTgRequests`, and `readOutgoingMailbox` will all be empty for their respective
-Real-mode sub-languages. An observe mode (real + simultaneous capture) is deferred to a separate plan.
+Real-mode sub-languages. The exception is `tcAsync = Real`: the spawned worker runs through the
+*same* test interpreter (same mocks, mailbox, and DB connection), so its side effects genuinely land
+in the usual capture buffers and `readOutgoingMailbox` — only `readScheduledScenarios` stays empty.
+`runWithConfigEngine` awaits all in-flight `tcAsync = Real` workers (bounded by a 5s timeout) before
+draining logs and returning, so their side effects settle. An observe mode (real + simultaneous
+capture) for the other sub-languages is deferred to a separate plan.
 
 ## End-to-End Telegram Bot Tests (`tgTest`)
 
@@ -443,7 +468,10 @@ See `test/TestHelpers/Bot.hs` for the canonical wiring against the demo bot's
 `TelegramTestScript` is a `ReaderT TgTestRuntime (ExceptT TgTestError IO)`. A
 failing `guard` or `waitFor*` short-circuits to `Left`.
 
-**Sending fake user input** (each returns the update's `UpdateId`):
+**Sending fake user input.** The message-sending ops (`sendMessage`, `sendMessageIn`,
+`sendMessageByUser`, `sendFile`, `sendFileByUser`) return `(UpdateId, MessageId)` — the
+`MessageId` is the sent user message's id, suitable for passing to `waitForReaction` or
+`sendKeypress`. The `sendKeypress*` ops return just `UpdateId`.
 
 | Operation | Input produced |
 |---|---|
@@ -556,7 +584,7 @@ The returned `Mailboxes` is a final observable snapshot:
 ```haskell
 data Mailboxes = Mailboxes
     { mbOutgoing              :: [OutgoingMessage]   -- deferred non-matches + leftover mailbox
-    , mbScheduledScenarioCount :: Int                -- runAsync programs captured (not executed)
+    , mbScheduledScenarioCount :: Int                -- runAsync programs captured (not executed); reflects only 'tcAsync = Mocked' (Real mode spawns workers whose side effects land in 'mbOutgoing')
     }
 ```
 
@@ -607,9 +635,11 @@ snapshot reflects all side effects once in-flight work has settled.
 - **Forgetting to share the mocks.** `buildAction` MUST wire the test performer
   against the *same* `Mocks` the runner handed it, or replies never reach the
   mailbox the DSL observes.
-- **Asserting on side effects from `runAsync`.** Test `runAsync` only captures
-  scheduled scenarios — assert via `mbScheduledScenarioCount` or
-  `readScheduledScenarios`, never via observed Telegram traffic.
+- **Asserting on side effects from `runAsync` in Mocked mode.** Test `runAsync` with
+  `tcAsync = Mocked` (the default) only captures scheduled scenarios — assert via
+  `mbScheduledScenarioCount` or `readScheduledScenarios`, never via observed Telegram traffic.
+  With `tcAsync = Real` the worker is spawned and its side effects DO appear in the mailbox /
+  capture buffers, so that assertion no longer holds.
 - **Expecting `waitForFile` to return the bot's real `FileId`.** The MVP mailbox
   capture does not retain the full `SendDocumentRequest`; the returned id is a
   stable placeholder suitable only for ordering assertions.
