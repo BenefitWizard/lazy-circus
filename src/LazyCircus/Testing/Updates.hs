@@ -174,7 +174,10 @@ fileMessagePayload uid (UserId userNum) (ChatId chatNum) fileId =
             , "date" .= (0 :: Int)
             , "from" .= userObject userNum
             , "chat" .= chatObject chatNum
-            , "document" .= object ["file_id" .= fileId]
+            , "document" .= object
+                [ "file_id" .= fileId
+                , "file_unique_id" .= fileId
+                ]
             ]
         ]
 

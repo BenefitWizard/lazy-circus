@@ -83,7 +83,7 @@ import Control.Monad.Trans.Reader qualified as Reader
 import RIO hiding (guard)
 import RIO.Text qualified as Text
 
-import Telegram.Bot.API (ChatId (..), Update, UserId (..))
+import Telegram.Bot.API (ChatId (..), Update, UserId (..), messageMessageId, updateMessage)
 import Telegram.Bot.API.GettingUpdates (UpdateId, updateUpdateId)
 import Telegram.Bot.API.Types (FileId (..), MessageId (..))
 import Telegram.Bot.Extra.Headless (feedUpdates, runHeadlessBot)
@@ -361,31 +361,40 @@ graceAfterQuiescence = 100_000
 --------------------------------------------------------------------------------
 
 -- | Send a text message from the default user in the default chat; returns the
--- update's 'UpdateId'.
-sendMessage :: Text -> TelegramTestScript UpdateId
+-- update's 'UpdateId' and the 'MessageId' of the sent user message (suitable for
+-- passing to 'waitForReaction').
+sendMessage :: Text -> TelegramTestScript (UpdateId, MessageId)
 sendMessage = sendMessageByUser defaultTestUserId defaultTestChatId
 
--- | Send a text message from a specific user in a specific chat.
-sendMessageByUser :: UserId -> ChatId -> Text -> TelegramTestScript UpdateId
+-- | Send a text message from a specific user in a specific chat; returns the
+-- update's 'UpdateId' and the 'MessageId' of the sent user message (suitable for
+-- passing to 'waitForReaction').
+sendMessageByUser :: UserId -> ChatId -> Text -> TelegramTestScript (UpdateId, MessageId)
 sendMessageByUser userId chatId txt = do
     rt <- ttsAsk
     upd <- liftIO $ mkTextUpdateByUser (ttrFactory rt) userId chatId txt
-    feedAndReturnId rt upd
+    feedAndReturn rt upd
 
--- | Send a text message in a specific chat from the default user.
-sendMessageIn :: ChatId -> Text -> TelegramTestScript UpdateId
+-- | Send a text message in a specific chat from the default user; returns the
+-- update's 'UpdateId' and the 'MessageId' of the sent user message (suitable for
+-- passing to 'waitForReaction').
+sendMessageIn :: ChatId -> Text -> TelegramTestScript (UpdateId, MessageId)
 sendMessageIn chatId txt = sendMessageByUser defaultTestUserId chatId txt
 
--- | Send a file upload from the default user in the default chat.
-sendFile :: FileId -> TelegramTestScript UpdateId
+-- | Send a file upload from the default user in the default chat; returns the
+-- update's 'UpdateId' and the 'MessageId' of the sent user message (suitable for
+-- passing to 'waitForReaction').
+sendFile :: FileId -> TelegramTestScript (UpdateId, MessageId)
 sendFile = sendFileByUser defaultTestUserId defaultTestChatId
 
--- | Send a file upload from a specific user in a specific chat.
-sendFileByUser :: UserId -> ChatId -> FileId -> TelegramTestScript UpdateId
+-- | Send a file upload from a specific user in a specific chat; returns the
+-- update's 'UpdateId' and the 'MessageId' of the sent user message (suitable for
+-- passing to 'waitForReaction').
+sendFileByUser :: UserId -> ChatId -> FileId -> TelegramTestScript (UpdateId, MessageId)
 sendFileByUser userId chatId fileId = do
     rt <- ttsAsk
     upd <- liftIO $ mkFileUpdate (ttrFactory rt) userId chatId fileId
-    feedAndReturnId rt upd
+    feedAndReturn rt upd
 
 -- | Press an inline-keyboard button (a @callback_query@) attached to a message
 -- the bot previously sent, from the default user/chat.
@@ -404,6 +413,25 @@ feedAndReturnId :: TgTestRuntime -> Update -> TelegramTestScript UpdateId
 feedAndReturnId rt upd = do
     liftIO $ feedUpdates (ttrQueue rt) [upd]
     pure (updateUpdateId upd)
+
+-- | Feed a constructed update and return both its 'UpdateId' and the
+-- 'MessageId' of the user message it carries. The 'MessageId' is extracted
+-- from the update value itself (via 'updateMessage' / 'messageMessageId'),
+-- not from the factory invariant, so it stays correct regardless of how the
+-- factory assigns ids.
+-- PRE-CONTRACT: the update must carry a @message@ (as all message-sending
+-- builders do); a message-less update (e.g. a callback_query) aborts the DSL
+-- with 'TgTestGuardFailed' — use 'feedAndReturnId' for those.
+feedAndReturn :: TgTestRuntime -> Update -> TelegramTestScript (UpdateId, MessageId)
+feedAndReturn rt upd = do
+    liftIO $ feedUpdates (ttrQueue rt) [upd]
+    let uid = updateUpdateId upd
+    mid <- case updateMessage upd of
+        Just msg -> pure (messageMessageId msg)
+        Nothing  -> ttsThrow $ TgTestGuardFailed
+            "feedAndReturn: update carries no message; cannot derive a MessageId \
+            \(use feedAndReturnId for callback_query / message-less updates)"
+    pure (uid, mid)
 
 --------------------------------------------------------------------------------
 -- Waiting for bot replies
