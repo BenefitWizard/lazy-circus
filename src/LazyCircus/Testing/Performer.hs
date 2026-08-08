@@ -569,6 +569,7 @@ instance ScenarioPerformer Script serviceLib (TestPerformer (EnvWithMocks servic
     log' cs = sublangLog cs "Scenario"
     getExtraContext' = view App.extraContextL
     runAsync' = runAsyncTest
+    runArbitraryIO' = liftIO
     callService' = callViaServiceLib
     withLogContext' values action =
         local (logContextL %~ (`putInLoggingContext` values)) (run action)

@@ -1,8 +1,8 @@
 --   PURPOSE: Provide a top-level facade that re-exports the Script coproduct and
 --   smart constructors for wrapping domain-specific scripts into the unified
 --   interpreter dispatch used by ScenarioProgram.
---   SCOPE: Script coproduct re-export and smart constructors (tgScript, mailScript, aiScript, httpScript).
---   DEPENDS: LazyCircus.Script, LazyCircus.Scene.AI.Lang, LazyCircus.Scene.Mail.Lang, LazyCircus.Scene.Telegram.Lang, LazyCircus.Scene.HTTP.Lang
+--   SCOPE: Script coproduct re-export and smart constructors (tgScript, mailScript, aiScript, httpScript, dbScript).
+--   DEPENDS: LazyCircus.Script, LazyCircus.Scene.AI.Lang, LazyCircus.Scene.DB.Lang, LazyCircus.Scene.Mail.Lang, LazyCircus.Scene.Telegram.Lang, LazyCircus.Scene.HTTP.Lang
 module LazyCircus (
     -- * Script coproduct
     Script (..),
@@ -11,12 +11,16 @@ module LazyCircus (
     mailScript,
     aiScript,
     httpScript,
+    dbScript,
 ) where
 
+import LazyCircus.DB.Types (PgDB)
 import LazyCircus.Scene.AI.Lang (AIScript)
+import LazyCircus.Scene.DB.Lang (DBScript)
 import LazyCircus.Scene.HTTP.Lang (HTTPScript)
 import LazyCircus.Scene.Mail.Lang (MailScript)
 import LazyCircus.Scene.Telegram.Lang (TelegramScript)
+import LazyCircus.Scenario (DbMode)
 import LazyCircus.Script (Script (..))
 import RIO
 import Servant.Client (BaseUrl)
@@ -45,3 +49,11 @@ POST-CONTRACT: Produces a Script value tagged for the HTTP interpreter.
 -}
 httpScript :: BaseUrl -> HTTPScript b -> Script b
 httpScript = HTTPScriptDef
+
+{- | Wrap a database script together with its connection descriptor and
+read\/write mode so it can be evaluated by ScenarioProgram.
+POST-CONTRACT: Produces a Script value tagged for the DB interpreter, to be
+run against @db@ in the given 'DbMode' ('ReadWrite' or 'ReadOnly').
+-}
+dbScript :: PgDB db -> DbMode -> DBScript db b -> Script b
+dbScript = DBScriptDef

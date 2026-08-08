@@ -8,4 +8,11 @@ and this project adheres to the
 
 ## Unreleased
 
+### Added
+- `runArbitraryIO :: IO a -> ScenarioProgram script serviceLib a`: escape-hatch
+  scenario operation that runs an arbitrary `IO` action. Documented as a
+  last-resort fallback when no structured effect (DB, Telegram, AI, Mail, HTTP,
+  or a registered service) fits. Runs for real in both production and test
+  interpreters — it cannot be mocked.
+
 ## 0.1.0.0 - YYYY-MM-DD

@@ -83,6 +83,7 @@ multiple effects and control concerns.
 | `withLogContext` / `withLogEntry` / `with2LogEntries` | enrich logging context |
 | `getExtraContext` / `readFromExtraContext` / `getFeatureFlag` | read runtime config |
 | `runAsync` | schedule async work |
+| `runArbitraryIO` | **fallback** escape hatch — run an arbitrary `IO` when no structured effect fits (see below) |
 | `callService` | call a registered service via the service library |
 
 ### Rule Of Thumb
@@ -181,3 +182,30 @@ Avoid:
 
 - wrapping the whole scenario by default
 - swallowing errors without logging or handling them
+
+### When To Use `runArbitraryIO`
+
+`runArbitraryIO` is an **escape hatch / last resort**. It lifts a raw `IO a` into the
+scenario and is intended only for one-off side effects that fit nowhere else.
+
+Reach for it ONLY after ruling out:
+
+- a scene language (`DB`, `Telegram`, `AI`, `Mail`, `HTTP`)
+- a registered service (`callService`)
+- a new scene language / service if the operation is worth keeping
+
+Caveats:
+
+- the `IO` runs for real in BOTH the production and the test interpreter — it
+  cannot be mocked, captured, or asserted on the way Telegram/AI/Mail sends can
+- it is invisible to `timedAndLog` automatic timing and to structured
+  observability
+- anything non-trivial run through it becomes a testing and maintenance burden
+
+```haskell
+-- Discouraged but available:
+result <- runArbitraryIO someOneOffIO
+```
+
+If you find yourself using `runArbitraryIO` repeatedly for the same kind of
+operation, that is a signal to promote it to a proper scene language or service.

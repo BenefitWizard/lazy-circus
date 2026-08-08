@@ -275,6 +275,7 @@ DBScriptDef myDb ReadWrite myDbScript :: Script b
 - `withLogContext`, `withLogEntry`, `with2LogEntries` — logging context
 - `getExtraContext`, `readFromExtraContext`, `getFeatureFlag` — configuration
 - `runAsync` — asynchronous execution
+- `runArbitraryIO` — last-resort escape hatch that runs an arbitrary `IO`; runs for real in both production and tests (cannot be mocked), so prefer a scene language or service
 - `callService` — call a registered service via the service library
 
 ### Example: Full Scenario

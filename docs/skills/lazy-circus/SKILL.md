@@ -72,6 +72,7 @@ Read more than one reference file when a task crosses layers.
 - For multi-turn AI, thread a `Conversation` with `askContinuing` / `solveWithAgentContinuing`. Stateless `ask` / `solveWithAgent` inject `emptyConversation` and discard the transcript.
 - A `Conversation` never holds a `Chat.System` message; build it only via `emptyConversation` or `conversationFromTurns`.
 - Use `callService` to invoke registered services from `ScenarioProgram`.
+- `runArbitraryIO` is a **last-resort escape hatch** for one-off `IO` that fits no scene language or service. It runs for real in BOTH production and tests (no mocking/capture) and is invisible to automatic timing — prefer a scene language / service instead.
 - `ScenarioProgram` has two type parameters: `ScenarioProgram script serviceLib a`.
 - `DefaultApp` is parameterized by the service library type: `DefaultApp serviceLib`. Use `NoServiceLib` when no services are needed.
 - `create` and `createAsIs` return `Maybe row`.

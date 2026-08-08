@@ -24,7 +24,7 @@ import RIO hiding (ask, log, logError, logInfo, logWarn)
 import Common hiding (migration)
 import Control.Exception (ErrorCall (..))
 import Data.Aeson
-import LazyCircus (aiScript, mailScript)
+import LazyCircus (aiScript, dbScript, mailScript)
 import LazyCircus.AI (AgentRequest (..), AIRequest (..), Conversation, emptyConversation)
 import LazyCircus.AI.POML.Types (
     POML,
@@ -49,7 +49,7 @@ import LazyCircus.Scene.DB.Lang (
     update,
  )
 import LazyCircus.Scene.Mail.Lang (makeMail, sendMail)
-import LazyCircus.Script (Script (..))
+import LazyCircus.Script (Script)
 import Network.Mail.Mime (Address (..))
 
 -- | AI response type for audience reaction generation.
@@ -217,7 +217,7 @@ createActWithReaction name desc notificationEmail = do
                     , circusActDescription = Just desc
                     , circusActAudienceReaction = Nothing
                     }
-        mAct <- evalScript $ DBScriptDef simpleDb ReadWrite $ create newAct
+        mAct <- evalScript $ dbScript simpleDb ReadWrite $ create newAct
         act <- case mAct of
             Nothing -> do
                 logError "DB create returned no rows"
@@ -246,7 +246,7 @@ createActWithReaction name desc notificationEmail = do
                             , circusActDescription = Nothing
                             , circusActAudienceReaction = Just (Just reaction)
                             }
-                _ <- evalScript $ DBScriptDef simpleDb ReadWrite $ update patch (CircusActId $ circusActId act)
+                _ <- evalScript $ dbScript simpleDb ReadWrite $ update patch (CircusActId $ circusActId act)
                 pure act{circusActAudienceReaction = Just reaction}
         -- 4. Send email notification asynchronously
         runAsync $ do
@@ -262,7 +262,7 @@ POST-CONTRACT: Returns all acts in id order.
 listActs :: ScenarioProgram Script serviceLib [CircusAct]
 listActs = do
     evalScript
-        $ DBScriptDef simpleDb ReadOnly
+        $ dbScript simpleDb ReadOnly
         $ rawQuery "SELECT id, name, circus_id, description, audience_reaction FROM circus_acts ORDER BY id" []
 
 {- | Look up a single circus act by its id.
@@ -271,7 +271,7 @@ POST-CONTRACT: Returns Just the act when found, Nothing otherwise.
 -}
 getAct :: Int32 -> ScenarioProgram Script serviceLib (Maybe CircusAct)
 getAct actId = do
-    evalScript $ DBScriptDef simpleDb ReadOnly $ find (CircusActId actId :: CircusActId)
+    evalScript $ dbScript simpleDb ReadOnly $ find (CircusActId actId :: CircusActId)
 
 {- | Generate (or regenerate) an AI audience reaction for an existing act.
 PRE-CONTRACT: The act with the given id must exist.
@@ -279,7 +279,7 @@ POST-CONTRACT: Returns Just the reaction text when successful, Nothing otherwise
 -}
 generateReaction :: Int32 -> ScenarioProgram Script serviceLib (Maybe Text)
 generateReaction actId = do
-    mAct <- evalScript $ DBScriptDef simpleDb ReadOnly $ find (CircusActId actId :: CircusActId)
+    mAct <- evalScript $ dbScript simpleDb ReadOnly $ find (CircusActId actId :: CircusActId)
     case mAct of
         Nothing -> do
             logWarn $ "Act not found for id: " <> tshow actId
@@ -303,7 +303,7 @@ generateReaction actId = do
                                 , circusActDescription = Nothing
                                 , circusActAudienceReaction = Just (Just reaction)
                                 }
-                    _ <- evalScript $ DBScriptDef simpleDb ReadWrite $ update patch (CircusActId actId :: CircusActId)
+                    _ <- evalScript $ dbScript simpleDb ReadWrite $ update patch (CircusActId actId :: CircusActId)
                     pure (Just reaction)
 
 {- | Delete a circus act by its id.
@@ -312,4 +312,4 @@ POST-CONTRACT: The act is removed from the database.
 -}
 deleteAct :: Int32 -> ScenarioProgram Script serviceLib ()
 deleteAct actId = do
-    evalScript $ DBScriptDef simpleDb ReadWrite $ delete (CircusActId actId :: CircusActId)
+    evalScript $ dbScript simpleDb ReadWrite $ delete (CircusActId actId :: CircusActId)

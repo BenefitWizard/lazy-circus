@@ -148,6 +148,7 @@ instance
     getDateTime' = liftIO getCurrentTime
 
     runAsync' = scheduleAsyncAction
+    runArbitraryIO' = liftIO
     getExtraContext' = view extraContextL
 
     callService' = callViaServiceLib

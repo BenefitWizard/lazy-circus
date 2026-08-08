@@ -22,6 +22,7 @@ module LazyCircus.Scenario (
   withLogEntry,
   with2LogEntries,
   runAsync,
+  runArbitraryIO,
   callService,
   KnownHowToEval (..),
 ) where
@@ -50,6 +51,7 @@ data Scenario script serviceLib a where
   ScenarioWithLogCtx :: [(Text, Text)] -> ScenarioProgram script serviceLib b -> (b -> a) -> Scenario script serviceLib a
   GetExtraContext :: (HashMap Text Text -> a) -> Scenario script serviceLib a
   RunAsync :: ScenarioProgram script serviceLib () -> a -> Scenario script serviceLib a
+  RunArbitraryIO :: IO b -> (b -> a) -> Scenario script serviceLib a
   CallService ::
     (S.IsInServiceLib serviceLib request response) =>
     request -> (response -> a) -> Scenario script serviceLib a
@@ -63,6 +65,7 @@ instance Functor (Scenario script serviceLib) where
   fmap f (GetExtraContext g) = GetExtraContext (f . g)
   fmap f (ScenarioWithLogCtx values act g) = ScenarioWithLogCtx values act (f . g)
   fmap f (RunAsync act g) = RunAsync act (f g)
+  fmap f (RunArbitraryIO io g) = RunArbitraryIO io (f . g)
   fmap f (CallService req g) = CallService req (f . g)
 
 -- | Church-encoded free program over the Scenario instruction set.
@@ -78,6 +81,7 @@ class (Monad m) => ScenarioPerformer script serviceLib m where
   getExtraContext' :: m (HashMap Text Text)
   withLogContext' :: [(Text, Text)] -> ScenarioProgram script serviceLib a -> m a
   runAsync' :: ScenarioProgram script serviceLib () -> m ()
+  runArbitraryIO' :: IO a -> m a
   callService' :: (S.IsInServiceLib serviceLib request response) => request -> m response
 
 {- | Fold a ScenarioProgram into any monad that implements ScenarioPerformer.
@@ -112,6 +116,9 @@ run = FC.iterM go
   go (RunAsync act next) = do
     runAsync' act
     next
+  go (RunArbitraryIO io next) = do
+    b <- runArbitraryIO' @script @serviceLib io
+    next b
   go (CallService req next) = do
     res <- callService' @script @serviceLib req
     next res
@@ -238,6 +245,27 @@ POST-CONTRACT: Returns a program that delegates asynchronous scheduling to the a
 -}
 runAsync :: ScenarioProgram script serviceLib () -> ScenarioProgram script serviceLib ()
 runAsync act = FC.liftF $ RunAsync act ()
+
+{- | Escape hatch that runs an arbitrary 'IO' action inside a scenario.
+
+This is a FALLBACK for cases where none of the structured effects fit:
+'LazyCircus.Scene.DB', 'LazyCircus.Scene.Telegram', 'LazyCircus.Scene.AI',
+'LazyCircus.Scene.Mail', 'LazyCircus.Scene.HTTP', or a registered service
+('callService'). Before reaching for this, consider whether the operation
+deserves its own scene language or a 'ServiceHandler'.
+
+WARNING: the supplied 'IO' is executed for real by every interpreter,
+including the test performer, so it CANNOT be mocked or captured the way
+Telegram/AI/Mail sends are. Anything run through here is opaque to the
+test infrastructure, observability, and automatic timing ('timedAndLog').
+Pre-allocate a structured effect whenever the side effect is worth testing.
+
+PRE-CONTRACT: None
+POST-CONTRACT: The returned program yields the result of the supplied 'IO'
+action, executed through the active interpreter.
+-}
+runArbitraryIO :: IO a -> ScenarioProgram script serviceLib a
+runArbitraryIO io = FC.liftF $ RunArbitraryIO io id
 
 {- | Enable LogLangF smart constructors to work directly in ScenarioProgram.
 Maps LogLangF operations to the unified Scenario constructors.

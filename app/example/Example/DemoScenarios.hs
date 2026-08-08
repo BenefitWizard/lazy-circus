@@ -26,7 +26,7 @@ import LazyCircus.Scenario
     , throw, runSafely, runAsync
     )
 import LazyCircus.Scenario (DbMode(..))
-import LazyCircus.Script (Script(..))
+import LazyCircus.Script (Script)
 import LazyCircus.Scene.DB.Lang
     ( create, createMany, find, findAll, update, delete
     , rawQuery, withTransaction, withTransactionRLS
@@ -39,7 +39,7 @@ import LazyCircus.Scene.Mail.Lang (sendMail, makeMail)
 import LazyCircus.Scene.AI.Lang (ask)
 import LazyCircus.Scene.Log (slogInfo, swithLogCtx)
 
-import LazyCircus (tgScript, mailScript, aiScript)
+import LazyCircus (tgScript, mailScript, aiScript, dbScript)
 import LazyCircus.AI (AIRequest(..))
 import LazyCircus.AI.POML.Types
     ( POML, cp_, role_, task_, list_, examples_, exampleInput_, exampleOutput_
@@ -136,13 +136,13 @@ dbCrudScenario = do
           , circusActDescription = Just "A daring aerial performance"
           , circusActAudienceReaction = Nothing
           }
-    mAct <- evalScript $ DBScriptDef simpleDb ReadWrite $ create demoAct
+    mAct <- evalScript $ dbScript simpleDb ReadWrite $ create demoAct
     case mAct of
         Nothing -> logError "DB create returned no rows"
         Just act -> do
             logInfo $ "Created act with id: " <> tshow (circusActId act)
             -- Find by id
-            found <- evalScript $ DBScriptDef simpleDb ReadWrite $ find (CircusActId (circusActId act) :: CircusActId)
+            found <- evalScript $ dbScript simpleDb ReadWrite $ find (CircusActId (circusActId act) :: CircusActId)
             logInfo $ "Found: " <> tshow (circusActName <$> found)
             -- Update
             let patch = CircusAct
@@ -152,12 +152,12 @@ dbCrudScenario = do
                   , circusActDescription = Just "Updated: An even more daring performance"
                   , circusActAudienceReaction = Just (Just "wow")
                   }
-            _ <- evalScript $ DBScriptDef simpleDb ReadWrite $ update patch (CircusActId (circusActId act) :: CircusActId)
+            _ <- evalScript $ dbScript simpleDb ReadWrite $ update patch (CircusActId (circusActId act) :: CircusActId)
             -- FindAll
-            all_ <- evalScript $ DBScriptDef simpleDb ReadWrite $ findAll (CircusActId (circusActId act) :: CircusActId)
+            all_ <- evalScript $ dbScript simpleDb ReadWrite $ findAll (CircusActId (circusActId act) :: CircusActId)
             logInfo $ "findAll returned " <> tshow (length all_) <> " rows"
             -- Delete
-            evalScript $ DBScriptDef simpleDb ReadWrite $ delete (CircusActId (circusActId act) :: CircusActId)
+            evalScript $ dbScript simpleDb ReadWrite $ delete (CircusActId (circusActId act) :: CircusActId)
             logInfo "DB CRUD: done"
 
 -- | Advanced DB scenario: createMany, withTransaction, rawQuery, withTransactionRLS.
@@ -169,23 +169,23 @@ dbAdvancedScenario = do
           [ CircusAct Nothing (Just "Juggling") (Just 2) (Just "Fire juggling") Nothing
           , CircusAct Nothing (Just "Acrobatics") (Just 2) (Just "Contortion") Nothing
           ]
-    created <- evalScript $ DBScriptDef simpleDb ReadWrite $ createMany acts
+    created <- evalScript $ dbScript simpleDb ReadWrite $ createMany acts
     logInfo $ "Created " <> tshow (length created) <> " acts"
     -- WithTransaction
-    result <- evalScript $ DBScriptDef simpleDb ReadWrite $ withTransaction $ do
+    result <- evalScript $ dbScript simpleDb ReadWrite $ withTransaction $ do
         slogInfo "Inside transaction"
         rows <- rawQuery "SELECT name FROM circus_acts WHERE circus_id = ?" [toField (2 :: Int32)]
         pure (rows :: [Only Text])
     logInfo $ "Transaction found " <> tshow (length result) <> " rows"
     -- WithTransactionRLS
-    _ <- evalScript $ DBScriptDef simpleDb ReadWrite $ withTransactionRLS (rlsCircusId 7) $ do
+    _ <- evalScript $ dbScript simpleDb ReadWrite $ withTransactionRLS (rlsCircusId 7) $ do
         slogInfo "Inside RLS transaction for circus_id=7"
         _ <- findAll (CircusActId 0 :: CircusActId)
         pure ()
     logInfo "DB Advanced: RLS transaction completed"
     -- Cleanup: delete the created acts
     forM_ created $ \act ->
-        evalScript $ DBScriptDef simpleDb ReadWrite $ delete (CircusActId (circusActId act) :: CircusActId)
+        evalScript $ dbScript simpleDb ReadWrite $ delete (CircusActId (circusActId act) :: CircusActId)
     logInfo "DB Advanced: done"
 
 -- | Telegram scenario: demonstrates bot-name lookup and message operations.
@@ -277,7 +277,7 @@ loggingScenario = do
     withLogEntry "timestamp" now $ do
         logInfo "With timestamp context"
     -- swithLogCtx inside a DB script
-    _ <- evalScript $ DBScriptDef simpleDb ReadWrite $
+    _ <- evalScript $ dbScript simpleDb ReadWrite $
         swithLogCtx [("db_log_test", "true")] $ do
             slogInfo "DB sub-language log with context"
             pure ()
@@ -316,7 +316,7 @@ fullCircusLifecycleScenario :: ScenarioProgram Script serviceLib ()
 fullCircusLifecycleScenario = do
     logInfo "Full Lifecycle: starting"
     -- 1. DB: Create in transaction
-    mAct <- evalScript $ DBScriptDef simpleDb ReadWrite $ withTransaction $ do
+    mAct <- evalScript $ dbScript simpleDb ReadWrite $ withTransaction $ do
         let demoAct = CircusAct Nothing (Just "Grand Finale") (Just 3) (Just "The ultimate show") Nothing
         create demoAct
     case mAct of
@@ -338,11 +338,11 @@ fullCircusLifecycleScenario = do
             -- 5. Async background task
             runAsync $ do
                 logInfo "Background cleanup task started"
-                evalScript $ DBScriptDef simpleDb ReadWrite $ delete (CircusActId (circusActId act) :: CircusActId)
+                evalScript $ dbScript simpleDb ReadWrite $ delete (CircusActId (circusActId act) :: CircusActId)
                 logInfo "Background cleanup task done"
             -- 6. runSafely for graceful error handling
             _ <- runSafely @SomeException $ do
                 logInfo "Safe section: attempting risky operation"
-                _ <- evalScript $ DBScriptDef simpleDb ReadWrite $ findAll (CircusActId (circusActId act) :: CircusActId)
+                _ <- evalScript $ dbScript simpleDb ReadWrite $ findAll (CircusActId (circusActId act) :: CircusActId)
                 logInfo "Safe section completed"
             logInfo "Full Lifecycle: done"
