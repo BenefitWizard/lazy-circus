@@ -266,6 +266,101 @@ AIScriptDef :: [ToolDescription] -> AIScript b -> Script b
 
 This lets the AI runtime know which tools (services) it can call.
 
+### Prompt Templates (POML)
+
+The `prompt` and `systemPrompt` fields of `AIRequest` / `AgentRequest` are `[POML]` lists. A
+`POML` value is a node of the Prompt-Oriented Markup Language AST. There are three ways to
+build one, in increasing order of type safety:
+
+| Approach | Module | When to use |
+|---|---|---|
+| Hand-built AST + smart constructors | `LazyCircus.AI.POML.Types` | small, static, programmatic prompts |
+| Pure parse of `.poml` text | `LazyCircus.AI.POML.Parser` (`parsePomlText`) | runtime/test construction from a template string |
+| Compile-time TH macro | `LazyCircus.AI.POML.TH` (`makePoml`) | authored `.poml` files with template variables (preferred for real prompts) |
+
+`renderPOMLtoPrompt :: [POML] -> Text` (from `LazyCircus.AI.POML`) flattens any `[POML]` into the
+prompt text handed to the model. It is called internally by the AI interpreter; you normally do
+not call it yourself.
+
+#### Hand-Built AST
+
+The `POML` constructors group into:
+
+- **Leaf / inline:** `Text`, `Var` (smart: `text`, `var`; `IsString` instance makes string literals coerce to `Text`)
+- **Basic block / inline tags:** `Paragraph`, `Heading`, `Code`, `Strong`, `Italic`, `Underline`, `Strikethrough`, `Span`, `Br` (smart: `p_`, `h_`, `hLvl_`, `code_`, `b_`, `i_`, `u_`, `s_`, `span_`, `br`)
+- **Semantic prompt blocks:** `CP`, `List`, `Role`, `Task`, `Example`, `ExampleSet`, `ExampleInput`, `ExampleOutput`, `Table` (smart: `cp_`/`cp`, `list_`/`list`, `role_`/`role`, `task_`/`task`, `example_`/`example`, `examples_`/`examples`, `exampleInput_`/`exampleInput`, `exampleOutput_`/`exampleOutput`, `csvTable_`/`csvTable`)
+
+Each semantic block takes a `*Params` record with a `default*Params` base (e.g. `defaultCPParams`, `defaultListParams`). The `_`-suffixed smart constructors use the defaults; the non-suffixed variants take explicit params.
+
+```haskell
+import LazyCircus.AI.POML.Types (POML, p_, cp_, text)
+
+myPrompt :: [POML]
+myPrompt =
+    [ p_ ["Summarize the following:"]
+    , cp_ "Input" [text someUserText]
+    ]
+```
+
+#### Pure Parser
+
+`parsePomlText :: Text -> Either String POML` parses a `.poml` document (XML root `<poml>`,
+whitelisted body tags) directly into a `POML` AST in one step. Static text lowers to `Text`; a
+bare `{{name}}` placeholder lowers to `Var "name"`. Template concatenations
+(`{{a + " " + b}}`) and templated `<cp caption="{{...}}">` cannot be expressed in the AST and
+return `Left` — use the TH macro for those.
+
+```haskell
+import LazyCircus.AI.POML.Parser (parsePomlText)
+
+parsed :: Either String POML
+parsed = parsePomlText "<poml><p>Hello</p></poml>"
+```
+
+#### Compile-Time TH Macro
+
+`makePoml :: String -> FilePath -> Q [Dec]` (from `LazyCircus.AI.POML.TH`) reads a `.poml` file at
+compile time and generates:
+
+- a record type `{Base}Input` (only when the document has `<let name="…" type="…"/>` declarations), with one typed field per variable (`string` → `Text`, `boolean` → `Bool`, `number` → `Float`, `poml` → `POML`);
+- a function `{base} :: {Base}Input -> POML` (or a nullary `{base} :: POML` when there are no `<let>` declarations) whose body constructs a single `POML` node.
+
+The `base` argument drives the generated names; the file is registered with `addDependentFile`
+so edits trigger recompilation.
+
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell    #-}
+
+import LazyCircus.AI.POML (renderPOMLtoPrompt)
+import LazyCircus.AI.POML.TH (makePoml)
+import LazyCircus.AI.POML.Types (POML (..), defaultListParams)  -- must stay in scope
+
+-- prompts/hello.poml:
+--   <poml>
+--     <let name="name" type="string"/>
+--     <p>Hello, {{name}}!</p>
+--   </poml>
+$(makePoml "hello" "prompts/hello.poml")
+-- generates: data HelloInput = HelloInput { name :: Text }
+--             hello :: HelloInput -> POML
+
+greeting :: Text
+greeting = renderPOMLtoPrompt [hello HelloInput{ name = "World" }]
+```
+
+Concatenations (`{{firstName + " " + lastName}}`) and templated `<cp caption="{{topic}}">` are
+only representable through the macro — they are spliced at the AST level inside the generated
+function. A `poml`-typed variable may appear as a subtree but cannot participate in a text
+concatenation (the splice fails with a clear message).
+
+Consumer requirements for `makePoml`: keep `POML(..)` and the referenced `default*Params` values
+in scope, and enable `OverloadedStrings` (already a library default). If two splices in the same
+module produce record types that share a field name, also enable `DuplicateRecordFields`.
+
+See `app/example/Example/PomlDemo.hs` and the `app/example/prompts/*.poml` templates
+(`hello.poml`, `greeting.poml`, `contact.poml`) for the canonical worked example.
+
 ## Mail
 
 Module: `LazyCircus.Scene.Mail.Lang`

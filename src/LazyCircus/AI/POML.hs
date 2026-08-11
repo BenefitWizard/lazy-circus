@@ -28,6 +28,8 @@ renderPOMLTag (ExampleOutput ExampleOutputParams{} content) =
     renderTag "output" [] (concatMap renderPOMLTag content)
 renderPOMLTag (ExampleSet ExampleSetParams{} examples) =
     renderTag "examples" [] (renderItems "example" [] examples)
+renderPOMLTag (Example ExampleParams{} content) =
+    renderTag "example" [] (concatMap renderPOMLTag content)
 renderPOMLTag (Role RoleParams{} content) =
     renderTag "role" [] (concatMap renderPOMLTag content)
 renderPOMLTag (Task TaskParams{} content) =

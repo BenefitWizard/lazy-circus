@@ -1,0 +1,4 @@
+<poml>
+  <let name="topic" type="string"/>
+  <cp caption="{{topic}}">Describe it.</cp>
+</poml>

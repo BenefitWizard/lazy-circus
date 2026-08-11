@@ -1,3 +1,5 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+
 module LazyCircus.AI.POML.Types
     ( POML(..)
       -- * Smart constructors
@@ -14,6 +16,8 @@ module LazyCircus.AI.POML.Types
     , exampleOutput
     , examples_
     , examples
+    , example_
+    , example
     , role_
     , role
     , task_
@@ -53,6 +57,8 @@ module LazyCircus.AI.POML.Types
     , defaultRoleParams
     , TaskParams(..)
     , defaultTaskParams
+    , ExampleParams(..)
+    , defaultExampleParams
     , ColumnDef(..)
     , ParserType(..)
     , TableSyntax(..)
@@ -76,6 +82,8 @@ data POML
     | ExampleInput ExampleInputParams [POML]
     | ExampleOutput ExampleOutputParams [POML]
     | ExampleSet ExampleSetParams [[POML]]
+    -- | Standalone example block (@<example>@ outside @<examples>@).
+    | Example ExampleParams [POML]
     | Role RoleParams [POML]
     | Task TaskParams [POML]
     | Table TableParams T.Table
@@ -113,6 +121,7 @@ instance Eq POML where
     ExampleInput pa ca == ExampleInput pb cb = pa == pb && ca == cb
     ExampleOutput pa ca == ExampleOutput pb cb = pa == pb && ca == cb
     ExampleSet pa ia == ExampleSet pb ib = pa == pb && ia == ib
+    Example pa ca == Example pb cb = pa == pb && ca == cb
     Role pa ca == Role pb cb = pa == pb && ca == cb
     Task pa ca == Task pb cb = pa == pb && ca == cb
     Table pa ta == Table pb tb = pa == pb && T.renderTable ta == T.renderTable tb
@@ -139,6 +148,7 @@ instance Show POML where
     show (ExampleInput ps cs) = "ExampleInput " <> show ps <> " " <> show cs
     show (ExampleOutput ps cs) = "ExampleOutput " <> show ps <> " " <> show cs
     show (ExampleSet ps items) = "ExampleSet " <> show ps <> " " <> show items
+    show (Example ps cs) = "Example " <> show ps <> " " <> show cs
     show (Role ps cs) = "Role " <> show ps <> " " <> show cs
     show (Task ps cs) = "Task " <> show ps <> " " <> show cs
     show (Table ps t) = "Table " <> show ps <> " (rendered: " <> show (T.renderTable t) <> ")"
@@ -204,6 +214,14 @@ examples_ = ExampleSet defaultExampleSetParams
 -- | Build an example-set block with explicit example-set parameters.
 examples :: ExampleSetParams -> [[POML]] -> POML
 examples = ExampleSet
+
+-- | Build a standalone example block with default example parameters.
+example_ :: [POML] -> POML
+example_ = Example defaultExampleParams
+
+-- | Build a standalone example block with explicit example parameters.
+example :: ExampleParams -> [POML] -> POML
+example = Example
 
 -- | Build a role block with default role parameters.
 role_ :: [POML] -> POML
@@ -524,6 +542,40 @@ defaultTaskParams =
         , taskSpeaker = Nothing
         , taskName = Nothing
         , taskType = Nothing
+        }
+
+-- | Serialization parameters for a standalone example block (@<example>@).
+data ExampleParams = ExampleParams
+    { exampleSyntax :: ContentSyntax
+    , exampleCaption :: Text
+    , exampleCaptionSerialized :: Maybe Text
+    , exampleCaptionStyle :: Maybe CaptionStyle
+    , exampleCaptionTextTransform :: Maybe CaptionTextTransform
+    , exampleCaptionEnding :: Maybe CaptionEnding
+    , exampleBlankLine :: Maybe Bool
+    , exampleClassName :: Maybe Text
+    , exampleSpeaker :: Maybe Speaker
+    , exampleName :: Maybe Text
+    , exampleType :: Maybe Text
+    }
+    deriving (Eq, Show)
+
+-- | Default standalone-example serialization parameters.
+-- Per the Microsoft spec, an example's default 'exampleCaptionStyle' is 'Hidden'.
+defaultExampleParams :: ExampleParams
+defaultExampleParams =
+    ExampleParams
+        { exampleSyntax = PlainText
+        , exampleCaption = "Example"
+        , exampleCaptionSerialized = Just "example"
+        , exampleCaptionStyle = Just Hidden
+        , exampleCaptionTextTransform = Nothing
+        , exampleCaptionEnding = Nothing
+        , exampleBlankLine = Nothing
+        , exampleClassName = Nothing
+        , exampleSpeaker = Nothing
+        , exampleName = Nothing
+        , exampleType = Nothing
         }
 
 -- | Column selection and labeling metadata for rendered tables.

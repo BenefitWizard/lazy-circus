@@ -11,14 +11,19 @@ import LazyCircus.AI.POML.Types
     , b_
     , br
     , code_
+    , cp_
+    , example_
     , exampleInput_
     , exampleOutput_
+    , examples_
     , h_
     , hLvl_
     , i_
     , p_
+    , role_
     , s_
     , span_
+    , task_
     , u_
     , var
     )
@@ -67,6 +72,23 @@ spec = describe "renderPOMLtoPrompt" $ do
     it "uses standardized tag names <input>/<output> for example blocks" $ do
         renderPOMLtoPrompt [exampleInput_ ["q"]] `shouldBe` "<input>q</input>"
         renderPOMLtoPrompt [exampleOutput_ ["a"]] `shouldBe` "<output>a</output>"
+
+    it "renders the standalone <example> node (Example constructor)" $
+        renderPOMLtoPrompt [example_ ["x"]] `shouldBe` "<example>x</example>"
+
+    it "renders the <role> tag" $
+        renderPOMLtoPrompt [role_ ["kind"]] `shouldBe` "<role>kind</role>"
+
+    it "renders the <task> tag" $
+        renderPOMLtoPrompt [task_ ["do it"]] `shouldBe` "<task>do it</task>"
+
+    it "renders <cp> with its caption attribute" $
+        renderPOMLtoPrompt [cp_ "C" ["x"]] `shouldBe` "<cp caption=\"C\">x</cp>"
+
+    it "renders <examples> wrapping each example in <example>" $
+        renderPOMLtoPrompt
+            [examples_ [[exampleInput_ ["q"], exampleOutput_ ["a"]]]]
+            `shouldBe` "<examples><example><input>q</input><output>a</output></example></examples>"
 
     it "renders nested inline content" $
         renderPOMLtoPrompt [p_ [b_ ["bold"], " and ", i_ ["italic"]]]

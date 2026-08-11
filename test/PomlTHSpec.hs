@@ -13,11 +13,12 @@
 -- generates a record type (when the document declares @<let>@ variables) plus
 -- a function that builds a 'POML' AST node from the record's fields.
 --
--- These tests splice three documents — string substitution (@hello@), a
--- no-input static value (@greeting@), and string concatenation (@contact@) —
--- and assert that the generated functions render to the expected prompt text
--- via 'renderPOMLtoPrompt'. They also confirm that the generated input records
--- carry the documented 'Eq' and 'Show' derivations.
+-- These tests splice four documents — string substitution (@hello@), a
+-- no-input static value (@greeting@), string concatenation (@contact@), and a
+-- templated @<cp caption>@ (@caption@) — and assert that the generated
+-- functions render to the expected prompt text via 'renderPOMLtoPrompt'. They
+-- also confirm that the generated input records carry the documented 'Eq' and
+-- 'Show' derivations.
 module PomlTHSpec (spec) where
 
 import Data.List (isInfixOf)
@@ -39,6 +40,10 @@ $(makePoml "greeting" "app/example/prompts/greeting.poml")
 -- @app/example/prompts/contact.poml@.
 $(makePoml "contact" "app/example/prompts/contact.poml")
 
+-- | Generates @CaptionInput@ and @caption :: CaptionInput -> POML@ from
+-- @app/example/prompts/caption.poml@ (a templated <cp caption>).
+$(makePoml "caption" "app/example/prompts/caption.poml")
+
 spec :: Spec
 spec = describe "makePoml" $ do
     it "substitutes a string <let> variable into the rendered prompt" $
@@ -56,6 +61,14 @@ spec = describe "makePoml" $ do
         renderPOMLtoPrompt
             [contact (ContactInput{firstName = "Jane", lastName = "Doe"})]
             `shouldBe` "<p>Contact: Jane Doe</p>"
+
+    it "substitutes a templated <cp caption> variable into the rendered caption" $
+        renderPOMLtoPrompt [caption (CaptionInput{topic = "Cats"})]
+            `shouldBe` "<cp caption=\"Cats\">Describe it.</cp>"
+
+    it "uses the supplied input field to change the rendered caption" $
+        renderPOMLtoPrompt [caption (CaptionInput{topic = "Dogs"})]
+            `shouldBe` "<cp caption=\"Dogs\">Describe it.</cp>"
 
     it "derives Eq on the generated input record" $
         HelloInput{name = "A"} `shouldBe` HelloInput{name = "A"}

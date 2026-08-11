@@ -9,6 +9,7 @@
 module PomlParserSpec (spec) where
 
 import Data.Either (isLeft)
+import Data.List (isInfixOf)
 import LazyCircus.AI.POML.Parser
     ( LetDecl (..)
     , PomlDoc (..)
@@ -18,7 +19,17 @@ import LazyCircus.AI.POML.Parser
     , parsePoml
     , parsePomlText
     )
-import LazyCircus.AI.POML.Types (POML, p_, var)
+import LazyCircus.AI.POML.Types
+    ( POML
+    , cp_
+    , exampleInput_
+    , exampleOutput_
+    , examples_
+    , p_
+    , role_
+    , task_
+    , var
+    )
 import Test.Hspec
 
 spec :: Spec
@@ -66,3 +77,66 @@ spec = do
 
         it "rejects multiple top-level elements with Left" $
             parsePomlText "<poml><p>A</p><p>B</p></poml>" `shouldSatisfy` isLeft
+
+    describe "semantic tags" $ do
+        it "parses <role> into a Role node" $
+            parsePomlText "<poml><role>Be kind</role></poml>"
+                `shouldBe` Right (role_ ["Be kind" :: POML])
+
+        it "parses <task> into a Task node" $
+            parsePomlText "<poml><task>T</task></poml>"
+                `shouldBe` Right (task_ ["T" :: POML])
+
+        it "parses <cp caption=\"C\"> into a CP node" $
+            parsePomlText "<poml><cp caption=\"C\">x</cp></poml>"
+                `shouldBe` Right (cp_ "C" ["x" :: POML])
+
+        it "parses <input> into an ExampleInput node" $
+            parsePomlText "<poml><input>q</input></poml>"
+                `shouldBe` Right (exampleInput_ ["q" :: POML])
+
+        it "parses <output> into an ExampleOutput node" $
+            parsePomlText "<poml><output>a</output></poml>"
+                `shouldBe` Right (exampleOutput_ ["a" :: POML])
+
+        it "parses <examples><example> into an ExampleSet node" $
+            parsePomlText
+                "<poml><examples><example><input>q</input><output>a</output></example></examples></poml>"
+                `shouldBe` Right
+                    ( examples_
+                        [ [ exampleInput_ ["q" :: POML]
+                          , exampleOutput_ ["a" :: POML]
+                          ]
+                        ]
+                    )
+
+        it "parses a standalone <example> into an Example node" $
+            parsePomlText "<poml><example><input>i</input></example></poml>"
+                `shouldSatisfy` \r -> case r of
+                    Right p -> "Example" `isInfixOf` show p
+                    Left _ -> False
+
+        it "rejects <cp> without a caption attribute with Left" $
+            parsePomlText "<poml><cp>x</cp></poml>" `shouldSatisfy` isLeft
+
+        it "rejects a templated <cp caption=\"{{v}}\"> with Left on the static path" $
+            parsePomlText "<poml><cp caption=\"{{v}}\">x</cp></poml>"
+                `shouldSatisfy` isLeft
+
+        it "rejects a non-<example> child of <examples> with Left" $
+            parsePomlText "<poml><examples><p>not an example</p></examples></poml>"
+                `shouldSatisfy` isLeft
+
+        it "rejects direct text inside <examples> with Left" $
+            parsePomlText "<poml><examples>direct text</examples></poml>"
+                `shouldSatisfy` isLeft
+
+        it "lowers <cp caption=\"C\"> to a NodeElement with a TLit caption in the intermediate PomlDoc" $
+            case parsePoml "<poml><cp caption=\"C\">x</cp></poml>" of
+                Left err -> expectationFailure ("expected Right, got Left: " <> err)
+                Right PomlDoc{pdBody} ->
+                    pdBody
+                        `shouldBe` [ NodeElement "cp"
+                                        [("caption", Just (TLit "C"))]
+                                        [NodeText [TLit "x"]]
+                                   ]

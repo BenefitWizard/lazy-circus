@@ -18,6 +18,7 @@ build-type:     Simple
 extra-source-files:
     README.md
     CHANGELOG.md
+    app/example/prompts/caption.poml
     app/example/prompts/contact.poml
     app/example/prompts/greeting.poml
     app/example/prompts/hello.poml

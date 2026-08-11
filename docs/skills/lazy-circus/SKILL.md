@@ -8,9 +8,10 @@ description: >
   aiScript, httpScript, sendDocument, askContinuing, solveWithAgent,
   solveWithAgentContinuing, AgentRequest, Conversation, DefaultPerformer, DBScriptDef,
   findLocked, findAllLocked, LockSpec, HasLogLang, tgTest, TelegramTestScript, waitForReply, waitForMatching, OutgoingMessage,
-  Mailboxes, UpdateFactory, mkTextUpdate, or asks how to write scenarios, add new effects,
-  define DB service instances, or test Lazy Circus programs (including end-to-end Telegram
-  bot tests).
+  Mailboxes, UpdateFactory, mkTextUpdate, POML, makePoml, parsePoml, parsePomlText,
+  POML.TH, POML.Parser, PomlDemo, or asks how to write scenarios, add new effects,
+  define DB service instances, author prompt templates (.poml files), or test Lazy Circus
+  programs (including end-to-end Telegram bot tests).
 ---
 
 # Lazy Circus Skill
@@ -46,7 +47,7 @@ Default routing:
 | If the task is about | Read |
 |---|---|
 | `ScenarioProgram`, `evalScript`, `runSafely`, `runAsync`, scenario logging, extra context, or the architecture map | [reference/scenarios.md](reference/scenarios.md) |
-| DB/Telegram/AI/Mail/HTTP DSL operations, smart constructors, scene-level logging, or top-level wrappers like `tgScript` / `mailScript` / `aiScript` / `httpScript` | [reference/effects.md](reference/effects.md) |
+| DB/Telegram/AI/Mail/HTTP DSL operations, smart constructors, scene-level logging, top-level wrappers like `tgScript` / `mailScript` / `aiScript` / `httpScript`, or prompt templates (`POML`, `makePoml`, `.poml` files) | [reference/effects.md](reference/effects.md) |
 | `DefaultPerformer`, `evalScriptDefault`, environment projection, async queue behavior, test interpreter behavior, mocks, DB test setup, end-to-end Telegram bot tests (`tgTest` / `TelegramTestScript`), or fake Telegram `Update`s | [reference/runtime-testing.md](reference/runtime-testing.md) |
 | DB service instances, service registration, adding a new public effect, integration checklists, or the detailed pitfalls/review checklist | [reference/extension.md](reference/extension.md) |
 | Where to place logs, what to log vs what not to log, debug vs prod, context propagation, or logging anti-patterns | [reference/logging.md](reference/logging.md) |
@@ -71,6 +72,8 @@ Read more than one reference file when a task crosses layers.
 - `AIScriptDef` takes a `[ToolDescription]` as its first argument; `aiScript` passes `[]` for backward compatibility.
 - For multi-turn AI, thread a `Conversation` with `askContinuing` / `solveWithAgentContinuing`. Stateless `ask` / `solveWithAgent` inject `emptyConversation` and discard the transcript.
 - A `Conversation` never holds a `Chat.System` message; build it only via `emptyConversation` or `conversationFromTurns`.
+- Author prompts as `[POML]` fragments (the `prompt` / `systemPrompt` fields of `AIRequest` / `AgentRequest`). Prefer the `makePoml` TH macro (`LazyCircus.AI.POML.TH`) over hand-built AST: it reads a `.poml` file at compile time, emits a typed `Input` record (from `<let>` declarations) plus an `Input -> POML` function, and registers the file with `addDependentFile` so edits trigger recompilation. The consumer module must keep `POML(..)` + the `default*Params` values in scope and enable `OverloadedStrings`.
+- `parsePomlText` (`LazyCircus.AI.POML.Parser`) is the pure, TH-free path from `.poml` text to a `POML` AST (for tests / runtime). It cannot represent template concatenations (`{{a + " " + b}}`) or templated `<cp caption="{{...}}">` — those require the `makePoml` macro, which lowers them at the AST level. `renderPOMLtoPrompt :: [POML] -> Text` turns any `POML` value into the prompt text sent to the model.
 - Use `callService` to invoke registered services from `ScenarioProgram`.
 - `runArbitraryIO` is a **last-resort escape hatch** for one-off `IO` that fits no scene language or service. It runs for real in BOTH production and tests (no mocking/capture) and is invisible to automatic timing — prefer a scene language / service instead.
 - `ScenarioProgram` has two type parameters: `ScenarioProgram script serviceLib a`.
@@ -97,6 +100,7 @@ Read more than one reference file when a task crosses layers.
 - `src/LazyCircus/Performer.hs`
 - `src/LazyCircus/Performer/Default.hs`
 - `src/LazyCircus/AI.hs` and `src/LazyCircus/AI/Conversation.hs` for AI request types, the agent loop, and the `Conversation` transcript
+- `src/LazyCircus/AI/POML/Types.hs` for the `POML` AST and smart constructors, `src/LazyCircus/AI/POML.hs` for `renderPOMLtoPrompt`, `src/LazyCircus/AI/POML/Parser.hs` for `parsePoml` / `parsePomlText`, and `src/LazyCircus/AI/POML/TH.hs` for the `makePoml` macro, when authoring or reviewing prompt templates
 - the relevant `src/LazyCircus/Scene/*` module for the domain you are touching
 - `src/LazyCircus/Testing/Performer.hs` for mock-backed scenario/script tests
 - `src/LazyCircus/Testing/TgTest.hs` for the end-to-end `tgTest` runner and `TelegramTestScript` DSL
@@ -126,6 +130,9 @@ Prefer LSP navigation for Haskell modules when possible.
 - In `tgTest`, wiring `buildAction` against a different `Mocks` than the one the runner supplied, so replies never reach the mailbox the DSL observes.
 - Asserting on Telegram side effects from `runAsync` during tests — with `tcAsync = Mocked` (default) `runAsync` only captures scheduled scenarios (assert via `readScheduledScenarios` / `mbScheduledScenarioCount`); with `tcAsync = Real` the spawned worker's side effects DO appear in the mailbox, so that assertion no longer holds.
 - Expecting `waitForFile` to return the bot's real `FileId` — the mailbox capture returns a stable placeholder suitable only for ordering assertions.
+- Expecting `parsePomlText` to handle template concatenations (`{{a + " " + b}}`) or a templated `<cp caption="{{name}}">` — these are not representable in the `POML` AST and return `Left`; use the `makePoml` TH macro, which splices them at the AST level.
+- Calling `makePoml` without keeping `POML(..)` and the `default*Params` values (e.g. `defaultListParams`) in scope, or without `OverloadedStrings` enabled — the generated splice references these names directly.
+- Expecting `.poml` edits to be picked up without `addDependentFile` recompilation — `makePoml` registers the source file so GHC rebuilds on change; a stale build means the splice did not re-run.
 
 ## Review Checklist
 
@@ -139,3 +146,4 @@ Prefer LSP navigation for Haskell modules when possible.
 8. If a new effect was added, was dispatch updated everywhere?
 9. Are tests aligned with real async and DB behavior?
 10. Was `hpack` run before build or test?
+11. If prompt templates changed (`.poml` files, `makePoml` splices, or `POML` AST), does the consumer module keep `POML(..)` + `default*Params` in scope, is `OverloadedStrings` on, and does the generated `Input -> POML` function match the `<let>` declarations?

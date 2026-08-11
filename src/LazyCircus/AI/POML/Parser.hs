@@ -2,10 +2,12 @@
 Parser for the @.poml@ (Prompt-Oriented Markup Language) file format.
 
 A @.poml@ document is an XML document whose root element is @<poml>@. The body
-uses a whitelisted set of structural tags (@p@, @h@, @code@, @b@, @i@, @u@, @s@,
-@span@, @br@, @list@, @item@) that map onto the 'POML' AST. Template variables can
-be spliced into text via the @{{name}}@ syntax, and multiple operands may be
-concatenated with @+@, e.g. @{{a + " " + b}}@.
+uses a whitelisted set of structural tags: inline/block tags (@p@, @h@, @code@,
+@b@, @i@, @u@, @s@, @span@, @br@), list tags (@list@, @item@), and the seven
+semantic prompt tags (@role@, @task@, @cp@, @examples@, @example@, @input@,
+@output@) that map onto the 'POML' AST. Template variables can be spliced into
+text via the @{{name}}@ syntax, and multiple operands may be concatenated with
+@+@, e.g. @{{a + " " + b}}@.
 
 @<let name=\"...\" type=\"...\"\/>@ children of @<poml>@ are /metadata/: they declare
 template variables consumed by the Template-Haskell code generator (T5) and are
@@ -16,12 +18,11 @@ text must be XML-escaped (@&lt;@, @&amp;@) by the author. The @{{ ... }}@
 delimiters themselves are not special to the XML parser and may appear freely in
 text content or attribute values.
 
-/Note on compilation/: this module references structural 'POML' constructors
-(@Paragraph@, @Heading@, @Strong@, @Italic@, @Underline@, @Strikethrough@,
-@Span@, @Code@, @Br@) introduced by the T1 worktree. It is written to be correct
-against those constructors and resolves once T1's @Types.hs@ merges into this
-tree; before that merge it is expected to fail to compile with \"Data constructor
-not in scope\" errors for exactly those nine names.
+/Note on the @caption@ attribute of @<cp>@/: 'parsePomlText' requires a static
+literal caption (it cannot represent a runtime template in @cpCaption :: Text@).
+A templated caption such as @<cp caption=\"{{name}}\">…<\/cp>@ is rejected here
+and must instead be spliced via the @makePoml@ TH macro, which can build a
+'CPParams' whose @cpCaption@ references an input field at runtime.
 -}
 module LazyCircus.AI.POML.Parser
     ( -- * Intermediate parse representation
@@ -115,7 +116,26 @@ data PomlDoc = PomlDoc
 --   Shared between this parser and the Template-Haskell code generator (T5).
 allowedElementNames :: Set Text
 allowedElementNames =
-    Set.fromList ["p", "h", "code", "b", "i", "u", "s", "span", "br", "list", "item"]
+    Set.fromList
+        [ "p"
+        , "h"
+        , "code"
+        , "b"
+        , "i"
+        , "u"
+        , "s"
+        , "span"
+        , "br"
+        , "list"
+        , "item"
+        , "role"
+        , "task"
+        , "cp"
+        , "examples"
+        , "example"
+        , "input"
+        , "output"
+        ]
 
 --------------------------------------------------------------------------------
 -- Parsing entry points
@@ -228,7 +248,8 @@ parseAttr (k, v) = do
 
 -- | Convert the child nodes of a body element. Whitespace-only text is
 --   preserved as inline content everywhere except inside block containers
---   (currently only @<list>@), where it is treated as XML formatting noise.
+--   (currently @<list>@ and @<examples>@), where it is treated as XML
+--   formatting noise.
 elementChildrenToNodes :: ElName -> [Node] -> Either String [PomlNode]
 elementChildrenToNodes parentName nodes = do
     maybeNodes <- traverse (xmlNodeToPomlNode parentName) nodes
@@ -236,13 +257,21 @@ elementChildrenToNodes parentName nodes = do
 
 -- | Convert a single XML 'Node' to @Maybe PomlNode@ (@Nothing@ for ignorable).
 --   Whitespace-only text is preserved as a 'NodeText' everywhere except inside
---   block containers like @<list>@, where it is dropped as formatting noise.
+--   block containers like @<list>@ and @<examples>@, where it is dropped as
+--   formatting noise.
 xmlNodeToPomlNode :: ElName -> Node -> Either String (Maybe PomlNode)
 xmlNodeToPomlNode _ (XML.NodeElement e) = Just <$> elementToNode e
 xmlNodeToPomlNode parentName (XML.NodeContent t)
-    | T.null (T.strip t) && parentName == "list" = Right Nothing
+    | T.null (T.strip t) && isBlockContainer parentName = Right Nothing
     | otherwise = Just . NodeText <$> parseTemplateExprs t
 xmlNodeToPomlNode _ _ = Right Nothing
+
+-- | Whether the parent element is a block container whose direct child
+--   whitespace should be ignored as XML formatting noise.
+isBlockContainer :: ElName -> Bool
+isBlockContainer "list" = True
+isBlockContainer "examples" = True
+isBlockContainer _ = False
 
 -- | Parse an XML attribute value into a template expression, if non-empty.
 -- @Nothing@ is produced for empty/whitespace-only values; otherwise the value
@@ -380,6 +409,15 @@ nodeToPOML (NodeElement nm attrs children) = case nm of
         [] -> Right Br
         _ -> Left "<br/> must not have children"
     "list" -> listToPOML children
+    "role" -> Role defaultRoleParams <$> traverse nodeToPOML children
+    "task" -> Task defaultTaskParams <$> traverse nodeToPOML children
+    "input" -> ExampleInput defaultExampleInputParams <$> traverse nodeToPOML children
+    "output" -> ExampleOutput defaultExampleOutputParams <$> traverse nodeToPOML children
+    "example" -> Example defaultExampleParams <$> traverse nodeToPOML children
+    "cp" -> do
+        caption <- cpCaptionStatic attrs
+        CP (defaultCPParams caption) <$> traverse nodeToPOML children
+    "examples" -> examplesToPOML children
     "item" -> Left "<item> is only valid directly inside <list>"
     other -> Left ("Unknown element: <" <> T.unpack other <> ">")
 
@@ -393,6 +431,33 @@ listToPOML childNodes = List defaultListParams <$> traverse itemToPOMLs childNod
         Left ("<list> may only contain <item> children, found <" <> T.unpack other <> ">")
     itemToPOMLs (NodeText _) =
         Left "<list> may not contain direct text; wrap it in <item>"
+
+-- | Lower an @<examples>@ element: each child must be an @<example>@, whose
+-- children become one @[POML]@ entry of the resulting 'ExampleSet'.
+examplesToPOML :: [PomlNode] -> Either String POML
+examplesToPOML childNodes =
+    ExampleSet defaultExampleSetParams <$> traverse exampleItem childNodes
+  where
+    exampleItem (NodeElement "example" _ itemChildren) = traverse nodeToPOML itemChildren
+    exampleItem (NodeElement other _ _) =
+        Left ("<examples> may only contain <example> children, found <" <> T.unpack other <> ">")
+    exampleItem (NodeText _) =
+        Left "<examples> may not contain direct text; wrap it in <example>"
+
+-- | Extract the mandatory static @caption@ attribute of a @<cp>@ element.
+-- Template expressions (variables/concatenations) are rejected here because
+-- @cpCaption :: Text@ cannot hold a runtime template — use the @makePoml@ TH
+-- macro for templated captions.
+cpCaptionStatic :: [(Text, Maybe TemplateExpr)] -> Either String Text
+cpCaptionStatic attrs =
+    case lookup "caption" attrs of
+        Nothing -> Left "<cp> requires a 'caption' attribute"
+        Just Nothing -> Left "<cp> 'caption' must not be empty"
+        Just (Just (TLit t)) -> Right t
+        Just (Just (TVar _)) ->
+            Left "<cp> 'caption' uses a template expression; use the makePoml TH macro"
+        Just (Just (TConcat _)) ->
+            Left "<cp> 'caption' uses a template expression; use the makePoml TH macro"
 
 -- | Extract a static integer level from the @level@ attribute, if it is a literal.
 levelFromAttrs :: [(Text, Maybe TemplateExpr)] -> Maybe Int

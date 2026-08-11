@@ -20,8 +20,13 @@ that calls 'makePoml' must keep them in scope:
 
   * 'POML' and all of its constructors from "LazyCircus.AI.POML.Types"
     (@Paragraph@, @Heading@, @Code@, @Strong@, @Italic@, @Underline@,
-    @Strikethrough@, @Span@, @Br@, @Text@, @List@, and the
-    'defaultListParams' value).
+    @Strikethrough@, @Span@, @Br@, @Text@, @List@, @CP@, @Role@, @Task@,
+    @ExampleSet@, @Example@, @ExampleInput@, @ExampleOutput@), plus the
+    @default*Params@ values referenced by each semantic tag
+    ('defaultListParams', 'defaultCPParams', 'defaultRoleParams',
+    'defaultTaskParams', 'defaultExampleSetParams',
+    'defaultExampleParams', 'defaultExampleInputParams',
+    'defaultExampleOutputParams').
   * 'Text' (the type) and 'bool', 'tshow' from the RIO prelude.
   * @OverloadedStrings@ must be enabled (the library default already does
     this) so that string literals produced by the splice coerce to
@@ -48,7 +53,17 @@ import LazyCircus.AI.POML.Parser
     , TemplateExpr (..)
     , parsePoml
     )
-import LazyCircus.AI.POML.Types (POML (..), defaultListParams)
+import LazyCircus.AI.POML.Types
+    ( POML (..)
+    , defaultCPParams
+    , defaultExampleInputParams
+    , defaultExampleOutputParams
+    , defaultExampleParams
+    , defaultExampleSetParams
+    , defaultListParams
+    , defaultRoleParams
+    , defaultTaskParams
+    )
 import RIO
 
 -- | Shared no-unpacking, no-strictness record field annotation; mirrors
@@ -170,11 +185,15 @@ requireSingleBody doc = case pdBody doc of
             \(wrap content in a single root element)"
 
 -- | Fail if any 'TVar' in the body lacks a matching @<let>@ declaration.
+-- Both text content and attribute values (e.g. a @<cp>@ @caption@) are walked,
+-- so undeclared variables are reported with a clear message before codegen.
 validateVarRefs :: Map Text PomlType -> PomlNode -> Q ()
 validateVarRefs varTypes = checkNode
   where
     checkNode (NodeText exprs) = mapM_ checkExpr exprs
-    checkNode (NodeElement _ _ children) = mapM_ checkNode children
+    checkNode (NodeElement _ attrs children) = do
+        mapM_ checkExpr [e | (_, Just e) <- attrs]
+        mapM_ checkNode children
 
     checkExpr (TVar n)
         | Map.member n varTypes = pure ()
@@ -251,6 +270,34 @@ genNode varTypes mArgName (NodeElement name attrs children) =
             appE
                 (appE (conE 'List) (varE 'defaultListParams))
                 (genItems varTypes mArgName children)
+        "role" ->
+            appE
+                (appE (conE 'Role) (varE 'defaultRoleParams))
+                (genChildren varTypes mArgName children)
+        "task" ->
+            appE
+                (appE (conE 'Task) (varE 'defaultTaskParams))
+                (genChildren varTypes mArgName children)
+        "input" ->
+            appE
+                (appE (conE 'ExampleInput) (varE 'defaultExampleInputParams))
+                (genChildren varTypes mArgName children)
+        "output" ->
+            appE
+                (appE (conE 'ExampleOutput) (varE 'defaultExampleOutputParams))
+                (genChildren varTypes mArgName children)
+        "example" ->
+            appE
+                (appE (conE 'Example) (varE 'defaultExampleParams))
+                (genChildren varTypes mArgName children)
+        "cp" ->
+            appE
+                (appE (conE 'CP) (appE (varE 'defaultCPParams) (genCaptionExpr varTypes mArgName (join (lookup "caption" attrs)))))
+                (genChildren varTypes mArgName children)
+        "examples" ->
+            appE
+                (appE (conE 'ExampleSet) (varE 'defaultExampleSetParams))
+                (genExamples varTypes mArgName children)
         "item" ->
             fail "makePoml: <item> is only valid directly inside <list>"
         other ->
@@ -346,6 +393,27 @@ genChildren :: Map Text PomlType -> Maybe Name -> [PomlNode] -> Q Exp
 genChildren varTypes mArgName children =
     listE (map (genNode varTypes mArgName) children)
 
+-- | Build a 'Text'-valued expression for a @<cp>@ @caption@ attribute value.
+-- The caller is expected to have collapsed the double-'Maybe' of an attribute
+-- lookup (absent attribute = outer 'Nothing', empty value = inner 'Nothing');
+-- both cases fail here with a missing-caption error. A literal, a variable, or
+-- a concatenation is lowered by reusing the same atom-rendering logic that
+-- 'genNodeText' uses for text content. A @poml@-typed variable in the caption
+-- fails: @cpCaption :: Text@ cannot hold a 'POML' value.
+genCaptionExpr
+    :: Map Text PomlType
+    -> Maybe Name
+    -> Maybe TemplateExpr
+    -> Q Exp
+genCaptionExpr _ _ Nothing =
+    fail "makePoml: <cp> requires a 'caption' attribute"
+genCaptionExpr varTypes mArgName (Just expr) = do
+    let atoms = flatten expr
+    validateNoPomlInConcat varTypes atoms
+    case atoms of
+        [single] -> genConcatPart varTypes mArgName single
+        many -> combineWith '(<>) (map (genConcatPart varTypes mArgName) many)
+
 -- | Codegen the @[[POML]]@ body of a @<list>@ element. Each child must be
 -- an @<item>@.
 genItems :: Map Text PomlType -> Maybe Name -> [PomlNode] -> Q Exp
@@ -362,6 +430,23 @@ genItems varTypes mArgName children =
             )
     genItem (NodeText _) =
         fail "makePoml: <list> may not contain direct text; wrap it in <item>"
+
+-- | Codegen the @[[POML]]@ body of an @<examples>@ element. Each child must
+-- be an @<example>@.
+genExamples :: Map Text PomlType -> Maybe Name -> [PomlNode] -> Q Exp
+genExamples varTypes mArgName children =
+    listE (map genExample children)
+  where
+    genExample (NodeElement "example" _ itemChildren) =
+        genChildren varTypes mArgName itemChildren
+    genExample (NodeElement other _ _) =
+        fail
+            ( "makePoml: <examples> may only contain <example> children, found <"
+                <> T.unpack other
+                <> ">"
+            )
+    genExample (NodeText _) =
+        fail "makePoml: <examples> may not contain direct text; wrap it in <example>"
 
 -- | Build a non-empty chain of expressions joined by the named binary
 -- operator. Fails on the empty list (which would not type-check).
