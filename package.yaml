@@ -10,6 +10,7 @@ copyright: "2026 Author name here"
 extra-source-files:
   - README.md
   - CHANGELOG.md
+  - app/example/prompts/*.poml
 
 # Metadata used when publishing your package
 # synopsis:            Short description of the package
@@ -51,6 +52,7 @@ dependencies:
   - unordered-containers
   - template-haskell
   - openapi3
+  - xml-conduit
 
 ghc-options:
   - -Wall

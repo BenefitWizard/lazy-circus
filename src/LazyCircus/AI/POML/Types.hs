@@ -1,4 +1,64 @@
-module LazyCircus.AI.POML.Types where
+module LazyCircus.AI.POML.Types
+    ( POML(..)
+      -- * Smart constructors
+      -- ** Captioned blocks, lists, examples, roles, tasks
+    , text
+    , json
+    , cp_
+    , cp
+    , list_
+    , list
+    , exampleInput_
+    , exampleInput
+    , exampleOutput_
+    , exampleOutput
+    , examples_
+    , examples
+    , role_
+    , role
+    , task_
+    , task
+    , csvTable_
+    , csvTable
+    , var
+      -- ** Basic inline / block tags
+    , p_
+    , h_
+    , hLvl_
+    , code_
+    , b_
+    , i_
+    , u_
+    , s_
+    , span_
+    , br
+      -- * Parameter types and defaults
+    , CPParams(..)
+    , defaultCPParams
+    , CaptionStyle(..)
+    , CaptionTextTransform(..)
+    , CaptionEnding(..)
+    , ContentSyntax(..)
+    , Speaker(..)
+    , ListParams(..)
+    , defaultListParams
+    , ListStyle(..)
+    , ExampleOutputParams(..)
+    , defaultExampleOutputParams
+    , ExampleInputParams(..)
+    , defaultExampleInputParams
+    , ExampleSetParams(..)
+    , defaultExampleSetParams
+    , RoleParams(..)
+    , defaultRoleParams
+    , TaskParams(..)
+    , defaultTaskParams
+    , ColumnDef(..)
+    , ParserType(..)
+    , TableSyntax(..)
+    , TableParams(..)
+    , defaultTableParams
+    ) where
 
 import Data.Aeson (ToJSON)
 import Data.Aeson.Text (encodeToLazyText)
@@ -20,6 +80,78 @@ data POML
     | Task TaskParams [POML]
     | Table TableParams T.Table
     | Var Text
+    -- | Paragraph block (@<p>@).
+    | Paragraph [POML]
+    -- | Heading block (@<h level="n">@); the 'Maybe' 'Int' is the optional
+    -- level ('Nothing' = default).
+    | Heading (Maybe Int) [POML]
+    -- | Code block (@<code syntax="…">@); the 'Maybe' 'Text' is the optional
+    -- syntax.
+    | Code (Maybe Text) [POML]
+    -- | Strong (bold) inline node (@<b>@).
+    | Strong [POML]
+    -- | Italic inline node (@<i>@).
+    | Italic [POML]
+    -- | Underline inline node (@<u>@).
+    | Underline [POML]
+    -- | Strikethrough inline node (@<s>@).
+    | Strikethrough [POML]
+    -- | Generic inline span (@<span>@).
+    | Span [POML]
+    -- | Line break (@<br\/>@).
+    | Br
+
+-- | Structural equality for POML nodes.
+-- 'Table' is compared by parameters and the rendered CSV text produced by
+-- 'T.renderTable' (the existential row payload cannot be compared directly).
+-- Two tables with different row types but identical rendered CSV text are
+-- considered equal — acceptable for test assertions.
+instance Eq POML where
+    Text a == Text b = a == b
+    CP pa ca == CP pb cb = pa == pb && ca == cb
+    List pa ia == List pb ib = pa == pb && ia == ib
+    ExampleInput pa ca == ExampleInput pb cb = pa == pb && ca == cb
+    ExampleOutput pa ca == ExampleOutput pb cb = pa == pb && ca == cb
+    ExampleSet pa ia == ExampleSet pb ib = pa == pb && ia == ib
+    Role pa ca == Role pb cb = pa == pb && ca == cb
+    Task pa ca == Task pb cb = pa == pb && ca == cb
+    Table pa ta == Table pb tb = pa == pb && T.renderTable ta == T.renderTable tb
+    Var a == Var b = a == b
+    Paragraph ca == Paragraph cb = ca == cb
+    Heading la ca == Heading lb cb = la == lb && ca == cb
+    Code sa ca == Code sb cb = sa == sb && ca == cb
+    Strong ca == Strong cb = ca == cb
+    Italic ca == Italic cb = ca == cb
+    Underline ca == Underline cb = ca == cb
+    Strikethrough ca == Strikethrough cb = ca == cb
+    Span ca == Span cb = ca == cb
+    Br == Br = True
+    _ == _ = False
+
+-- | Readable representation of POML nodes.
+-- 'Table' is shown via 'T.renderTable' (its existential row payload has no
+-- 'Show' instance); every other constructor is shown structurally. Must not
+-- crash on any constructor.
+instance Show POML where
+    show (Text t) = "Text " <> show t
+    show (CP ps cs) = "CP " <> show ps <> " " <> show cs
+    show (List ps items) = "List " <> show ps <> " " <> show items
+    show (ExampleInput ps cs) = "ExampleInput " <> show ps <> " " <> show cs
+    show (ExampleOutput ps cs) = "ExampleOutput " <> show ps <> " " <> show cs
+    show (ExampleSet ps items) = "ExampleSet " <> show ps <> " " <> show items
+    show (Role ps cs) = "Role " <> show ps <> " " <> show cs
+    show (Task ps cs) = "Task " <> show ps <> " " <> show cs
+    show (Table ps t) = "Table " <> show ps <> " (rendered: " <> show (T.renderTable t) <> ")"
+    show (Var x) = "Var " <> show x
+    show (Paragraph cs) = "Paragraph " <> show cs
+    show (Heading lvl cs) = "Heading " <> show lvl <> " " <> show cs
+    show (Code syn cs) = "Code " <> show syn <> " " <> show cs
+    show (Strong cs) = "Strong " <> show cs
+    show (Italic cs) = "Italic " <> show cs
+    show (Underline cs) = "Underline " <> show cs
+    show (Strikethrough cs) = "Strikethrough " <> show cs
+    show (Span cs) = "Span " <> show cs
+    show Br = "Br"
 
 -- | Allow string literals to become plain text POML leaf nodes.
 instance IsString POML where
@@ -100,6 +232,46 @@ csvTable params = Table params . T.CSV
 -- | Insert a template variable placeholder node.
 var :: Text -> POML
 var = Var
+
+-- | Build a paragraph (@<p>@) block.
+p_ :: [POML] -> POML
+p_ = Paragraph
+
+-- | Build a heading (@<h>@) block with the default level.
+h_ :: [POML] -> POML
+h_ = Heading Nothing
+
+-- | Build a heading (@<h>@) block with an explicit level.
+hLvl_ :: Int -> [POML] -> POML
+hLvl_ lvl = Heading (Just lvl)
+
+-- | Build a code (@<code>@) block with no explicit syntax.
+code_ :: [POML] -> POML
+code_ = Code Nothing
+
+-- | Build a strong (bold, @<b>@) inline node.
+b_ :: [POML] -> POML
+b_ = Strong
+
+-- | Build an italic (@<i>@) inline node.
+i_ :: [POML] -> POML
+i_ = Italic
+
+-- | Build an underline (@<u>@) inline node.
+u_ :: [POML] -> POML
+u_ = Underline
+
+-- | Build a strikethrough (@<s>@) inline node.
+s_ :: [POML] -> POML
+s_ = Strikethrough
+
+-- | Build a generic inline span (@<span>@) node.
+span_ :: [POML] -> POML
+span_ = Span
+
+-- | A standalone line-break (@<br\/>@) node.
+br :: POML
+br = Br
 
 -- params
 

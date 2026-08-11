@@ -1,0 +1,5 @@
+<poml>
+  <let name="firstName" type="string"/>
+  <let name="lastName" type="string"/>
+  <p>Contact: {{firstName + " " + lastName}}</p>
+</poml>
