@@ -42,7 +42,8 @@ syntaxFromTable (CSV _) = "csv"
 syntaxFromTable (Markdown _) = "markdown"
 
 renderMarkdown :: forall a. (CSVTableConstraint a) => [a] -> Text
-renderMarkdown _rows = Text.unlines $ [header, separator] <> (error "No markdown renderer right now")
+renderMarkdown _rows =
+    Text.unlines [header, separator, "<markdown table body not yet implemented>"]
   where
     rawHeader = headerOrder (undefined :: a)
     headerSize = length rawHeader

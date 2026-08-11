@@ -18,6 +18,9 @@ build-type:     Simple
 extra-source-files:
     README.md
     CHANGELOG.md
+    app/example/prompts/contact.poml
+    app/example/prompts/greeting.poml
+    app/example/prompts/hello.poml
 
 source-repository head
   type: git
@@ -29,7 +32,9 @@ library
       LazyCircus.AI
       LazyCircus.AI.Conversation
       LazyCircus.AI.POML
+      LazyCircus.AI.POML.Parser
       LazyCircus.AI.POML.Table
+      LazyCircus.AI.POML.TH
       LazyCircus.AI.POML.Types
       LazyCircus.App
       LazyCircus.App.Default
@@ -124,6 +129,7 @@ library
     , transformers
     , unordered-containers
     , uuid
+    , xml-conduit
   default-language: GHC2021
 
 library common-circus
@@ -189,6 +195,7 @@ library common-circus
     , transformers
     , unordered-containers
     , uuid
+    , xml-conduit
   default-language: GHC2021
 
 executable bot
@@ -237,12 +244,14 @@ executable bot
     , transformers
     , unordered-containers
     , uuid
+    , xml-conduit
   default-language: GHC2021
 
 executable example
   main-is: Example.hs
   other-modules:
       Example.DemoScenarios
+      Example.PomlDemo
       Paths_lazy_circus
   autogen-modules:
       Paths_lazy_circus
@@ -285,6 +294,7 @@ executable example
     , transformers
     , unordered-containers
     , uuid
+    , xml-conduit
   default-language: GHC2021
 
 test-suite lazy-circus-test
@@ -301,6 +311,10 @@ test-suite lazy-circus-test
       DBLangSpec
       HTTPLangSpec
       LogSpec
+      PomlEquivalenceSpec
+      PomlParserSpec
+      PomlRendererSpec
+      PomlTHSpec
       ServiceCallSpec
       TestDbSupport
       TestHelpers.Bot
@@ -352,5 +366,6 @@ test-suite lazy-circus-test
     , transformers
     , unordered-containers
     , uuid
+    , xml-conduit
   default-language: GHC2021
   build-tool-depends: hspec-discover:hspec-discover == 2.*

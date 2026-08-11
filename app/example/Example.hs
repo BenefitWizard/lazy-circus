@@ -10,6 +10,7 @@ import System.IO (putStrLn)
 
 import DemoEnv
 import Example.DemoScenarios
+import Example.PomlDemo (runPomlDemo)
 
 import LazyCircus.App.Default (DefaultApp)
 import SimpleServiceLib (AllServices)
@@ -22,6 +23,9 @@ main = do
     config <- readDemoConfig
     putStrLn "🎪 Lazy Circus Demo (Production Mode)"
     putStrLn "======================================"
+
+    -- POML TH demo: runs unconditionally (no service dependencies).
+    runPomlDemo
 
     printConfigStatus config
 

@@ -1,0 +1,4 @@
+<poml>
+  <let name="name" type="string"/>
+  <p>Hello, {{name}}!</p>
+</poml>

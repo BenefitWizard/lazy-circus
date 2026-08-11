@@ -10,6 +10,7 @@ copyright: "2026 Author name here"
 extra-source-files:
   - README.md
   - CHANGELOG.md
+  - app/example/prompts/*.poml
 
 # Metadata used when publishing your package
 # synopsis:            Short description of the package
@@ -54,6 +55,7 @@ dependencies:
   - openapi3
   - stm
   - transformers
+  - xml-conduit
 
 ghc-options:
   - -Wall
