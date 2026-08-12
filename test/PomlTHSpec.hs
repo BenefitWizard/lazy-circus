@@ -11,7 +11,7 @@
 -- | Tests for the @makePoml@ Template Haskell macro defined in
 -- "LazyCircus.AI.POML.TH". The macro reads @.poml@ files at compile time and
 -- generates a record type (when the document declares @<let>@ variables) plus
--- a function that builds a 'POML' AST node from the record's fields.
+-- a function that builds a @[POML]@ list from the record's fields.
 --
 -- These tests splice four documents — string substitution (@hello@), a
 -- no-input static value (@greeting@), string concatenation (@contact@), and a
@@ -24,51 +24,101 @@ module PomlTHSpec (spec) where
 import Data.List (isInfixOf)
 import LazyCircus.AI.POML (renderPOMLtoPrompt)
 import LazyCircus.AI.POML.TH (makePoml)
-import LazyCircus.AI.POML.Types (POML (..), defaultListParams)
+import LazyCircus.AI.POML.Types (POML (..), defaultListParams, fragment, p_)
 import RIO
 import Test.Hspec
 
--- | Generates @HelloInput@ and @hello :: HelloInput -> POML@ from
+-- | Generates @HelloInput@ and @hello :: HelloInput -> [POML]@ from
 -- @app/example/prompts/hello.poml@.
 $(makePoml "hello" "app/example/prompts/hello.poml")
 
--- | Generates @greeting :: POML@ (no input record) from
+-- | Generates @greeting :: [POML]@ (no input record) from
 -- @app/example/prompts/greeting.poml@.
 $(makePoml "greeting" "app/example/prompts/greeting.poml")
 
--- | Generates @ContactInput@ and @contact :: ContactInput -> POML@ from
+-- | Generates @ContactInput@ and @contact :: ContactInput -> [POML]@ from
 -- @app/example/prompts/contact.poml@.
 $(makePoml "contact" "app/example/prompts/contact.poml")
 
--- | Generates @CaptionInput@ and @caption :: CaptionInput -> POML@ from
+-- | Generates @CaptionInput@ and @caption :: CaptionInput -> [POML]@ from
 -- @app/example/prompts/caption.poml@ (a templated <cp caption>).
 $(makePoml "caption" "app/example/prompts/caption.poml")
+
+-- | Generates @multi :: [POML]@ (no input record) from
+-- @app/example/prompts/multi.poml@ — a document with two top-level body
+-- elements, exercising the multi-root lowering path.
+$(makePoml "multi" "app/example/prompts/multi.poml")
+
+-- | Generates @InnerInput@ and @inner :: InnerInput -> [POML]@ from
+-- @app/example/prompts/inner.poml@ — a single-node template meant to be
+-- spliced into a @poml@-typed slot of another template.
+$(makePoml "inner" "app/example/prompts/inner.poml")
+
+-- | Generates @InnerMultiInput@ and @innerMulti :: InnerMultiInput -> [POML]@
+-- from @app/example/prompts/innerMulti.poml@ — a two-node template exercising
+-- @fragment@ composition with a multi-root source (the case a plain
+-- pattern-match cannot handle).
+$(makePoml "innerMulti" "app/example/prompts/innerMulti.poml")
+
+-- | Generates @OuterInput@ and @outer :: OuterInput -> [POML]@ from
+-- @app/example/prompts/outer.poml@ — a template that composes a @poml@-typed
+-- @greeting@ slot (spliced as a subtree) alongside a @string@-typed @topic@.
+$(makePoml "outer" "app/example/prompts/outer.poml")
 
 spec :: Spec
 spec = describe "makePoml" $ do
     it "substitutes a string <let> variable into the rendered prompt" $
-        renderPOMLtoPrompt [hello (HelloInput{name = "World"})]
+        renderPOMLtoPrompt (hello (HelloInput{name = "World"}))
             `shouldBe` "<p>Hello, World!</p>"
 
     it "uses the supplied input field rather than a hardcoded value" $
-        renderPOMLtoPrompt [hello (HelloInput{name = "Alice"})]
+        renderPOMLtoPrompt (hello (HelloInput{name = "Alice"}))
             `shouldBe` "<p>Hello, Alice!</p>"
 
     it "generates a nullary value when the document has no <let> declarations" $
-        renderPOMLtoPrompt [greeting] `shouldBe` "<p>Welcome to the circus!</p>"
+        renderPOMLtoPrompt greeting `shouldBe` "<p>Welcome to the circus!</p>"
 
     it "concatenates multiple string <let> variables inside one template" $
         renderPOMLtoPrompt
-            [contact (ContactInput{firstName = "Jane", lastName = "Doe"})]
+            (contact (ContactInput{firstName = "Jane", lastName = "Doe"}))
             `shouldBe` "<p>Contact: Jane Doe</p>"
 
     it "substitutes a templated <cp caption> variable into the rendered caption" $
-        renderPOMLtoPrompt [caption (CaptionInput{topic = "Cats"})]
+        renderPOMLtoPrompt (caption (CaptionInput{topic = "Cats"}))
             `shouldBe` "<cp caption=\"Cats\">Describe it.</cp>"
 
     it "uses the supplied input field to change the rendered caption" $
-        renderPOMLtoPrompt [caption (CaptionInput{topic = "Dogs"})]
+        renderPOMLtoPrompt (caption (CaptionInput{topic = "Dogs"}))
             `shouldBe` "<cp caption=\"Dogs\">Describe it.</cp>"
+
+    it "lowers a multi-root body to a concatenated [POML] list" $
+        renderPOMLtoPrompt multi
+            `shouldBe` "<role>Be kind</role><task>Do it</task>"
+
+    it "splices a poml-typed slot with a single POML node built via the eDSL" $
+        renderPOMLtoPrompt
+            (outer (OuterInput{body = p_ ["Greetings!"], subject = "cats"}))
+            `shouldBe`
+                "<role>You are a friendly assistant.</role>"
+                    <> "<p>Greetings!</p>"
+                    <> "<task>Now tell me about cats.</task>"
+
+    it "composes one makePoml template into another's poml-typed slot via fragment" $
+        renderPOMLtoPrompt
+            (outer (OuterInput{body = fragment (inner (InnerInput{who = "World"})), subject = "cats"}))
+            `shouldBe`
+                "<role>You are a friendly assistant.</role>"
+                    <> "<p>Hello, World!</p>"
+                    <> "<task>Now tell me about cats.</task>"
+
+    it "composes a multi-root template (fragment collapses >1 node into one POML)" $
+        renderPOMLtoPrompt
+            (outer (OuterInput{body = fragment (innerMulti (InnerMultiInput{recipient = "World"})), subject = "cats"}))
+            `shouldBe`
+                "<role>You are a friendly assistant.</role>"
+                    <> "<p>Greeting #1 for World.</p>"
+                    <> "<p>Greeting #2 for World.</p>"
+                    <> "<task>Now tell me about cats.</task>"
 
     it "derives Eq on the generated input record" $
         HelloInput{name = "A"} `shouldBe` HelloInput{name = "A"}

@@ -15,7 +15,9 @@ renderPOMLtoPrompt poml = mconcat $ concatMap renderPOMLTag poml
 --   * 'Text' — raw text, emitted as-is;
 --   * 'Var' — a @{{name}}@ placeholder that preserves the variable name;
 --   * 'Br' — the self-closing @<br\/>@ tag (no closing tag; it cannot use
---     'renderTag', which always emits a close).
+--     'renderTag', which always emits a close);
+--   * 'Fragment' — a transparent group, rendered as the concatenation of its
+--     children (no wrapper tag).
 renderPOMLTag :: POML -> [Text]
 renderPOMLTag (Text t) = [t]
 renderPOMLTag (CP CPParams{cpCaption = caption} children) =
@@ -66,6 +68,8 @@ renderPOMLTag (Span children) =
     renderTag "span" [] (concatMap renderPOMLTag children)
 -- Self-closing line break; emitted directly because 'renderTag' always adds a closing tag.
 renderPOMLTag Br = ["<br/>"]
+-- Transparent group: rendered as the concatenation of its children (no wrapper).
+renderPOMLTag (Fragment xs) = concatMap renderPOMLTag xs
 
 renderTag :: Text -> [(Text, Text)] -> [Text] -> [Text]
 renderTag tag attrs content = openTag tag attrs <> content <> closeTag tag

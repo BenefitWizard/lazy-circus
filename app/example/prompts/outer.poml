@@ -1,0 +1,5 @@
+<poml>
+  <let name="body" type="poml"/>
+  <let name="subject" type="string"/>
+  <role>You are a friendly assistant.</role>{{body}}<task>Now tell me about {{subject}}.</task>
+</poml>

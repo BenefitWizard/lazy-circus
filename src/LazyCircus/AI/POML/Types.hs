@@ -36,6 +36,8 @@ module LazyCircus.AI.POML.Types
     , s_
     , span_
     , br
+      -- ** Composition
+    , fragment
       -- * Parameter types and defaults
     , CPParams(..)
     , defaultCPParams
@@ -108,6 +110,10 @@ data POML
     | Span [POML]
     -- | Line break (@<br\/>@).
     | Br
+    -- | Transparent group of nodes — rendered as the concatenation of its
+    -- children with no wrapper tag. Only arises from the 'fragment' smart
+    -- constructor (for two or more nodes); the parser never produces it.
+    | Fragment [POML]
 
 -- | Structural equality for POML nodes.
 -- 'Table' is compared by parameters and the rendered CSV text produced by
@@ -135,6 +141,7 @@ instance Eq POML where
     Strikethrough ca == Strikethrough cb = ca == cb
     Span ca == Span cb = ca == cb
     Br == Br = True
+    Fragment ca == Fragment cb = ca == cb
     _ == _ = False
 
 -- | Readable representation of POML nodes.
@@ -162,6 +169,7 @@ instance Show POML where
     show (Strikethrough cs) = "Strikethrough " <> show cs
     show (Span cs) = "Span " <> show cs
     show Br = "Br"
+    show (Fragment cs) = "Fragment " <> show cs
 
 -- | Allow string literals to become plain text POML leaf nodes.
 instance IsString POML where
@@ -290,6 +298,17 @@ span_ = Span
 -- | A standalone line-break (@<br\/>@) node.
 br :: POML
 br = Br
+
+-- | Collapse a list of POML nodes into a single node for splicing into a
+-- @type="poml"@ slot: the empty list becomes 'Text' "" (renders to nothing),
+-- a singleton collapses to the node itself, and two or more nodes become a
+-- 'Fragment'. Observationally transparent at any nesting level:
+--
+-- > renderPOMLtoPrompt [fragment xs] == renderPOMLtoPrompt xs
+fragment :: [POML] -> POML
+fragment [] = Text ""
+fragment [x] = x
+fragment xs = Fragment xs
 
 -- params
 

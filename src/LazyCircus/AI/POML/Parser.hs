@@ -152,25 +152,26 @@ parsePoml input =
         Left exc -> Left (displayException exc)
         Right doc -> docToPomlDoc doc
 
--- | Parse a @.poml@ document and lower it to a 'POML' AST node in one step.
+-- | Parse a @.poml@ document and lower it to a list of 'POML' AST nodes — one
+-- per top-level body element.
 --
 -- Returns @Left@ for template concatenations (@{{a + b}}@), which cannot be
 -- expressed in the 'POML' AST and require the @makePoml@ TH macro instead.
--- PRE-CONTRACT: The body contains exactly one top-level element (or a single
--- text node).
-parsePomlText :: Text -> Either String POML
+-- PRE-CONTRACT: The body contains at least one top-level element.
+parsePomlText :: Text -> Either String [POML]
 parsePomlText input = parsePoml input >>= toPOML
 
--- | Lower an intermediate 'PomlDoc' to a single 'POML' AST node.
+-- | Lower an intermediate 'PomlDoc' to a list of 'POML' AST nodes — one per
+-- top-level body element.
 --
--- Discards 'pdLets' (metadata consumed by codegen). Requires exactly one
--- top-level body node; returns @Left@ otherwise, and also returns @Left@ when a
--- body node uses template concatenation, which only the TH macro can represent.
-toPOML :: PomlDoc -> Either String POML
+-- Discards 'pdLets' (metadata consumed by codegen). An empty body is rejected
+-- (@Left@); a non-empty body is lowered element-wise via 'nodeToPOML'. Returns
+-- @Left@ when any body node uses template concatenation, which only the TH
+-- macro can represent.
+toPOML :: PomlDoc -> Either String [POML]
 toPOML doc = case pdBody doc of
-    [] -> Left "Empty .poml body (expected one top-level element)"
-    [single] -> nodeToPOML single
-    _many -> Left "Multiple top-level elements in .poml body; use the makePoml TH macro"
+    [] -> Left "Empty .poml body (expected at least one top-level element)"
+    nodes -> traverse nodeToPOML nodes
 
 --------------------------------------------------------------------------------
 -- XML document → PomlDoc

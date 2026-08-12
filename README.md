@@ -38,7 +38,7 @@ Lazy Circus ships with a rich set of built-in capabilities ready for production 
 * **Database Effect DSL (via `beam`):** A comprehensive database language supporting both typed CRUD operations and raw queries. Advanced features like separate Read-Only connections, Row-Level Security (RLS), transaction management, and pessimistic row locking (`findLocked` / `findAllLocked` with `SELECT ... FOR UPDATE` semantics) are supported out-of-the-box.
 * **Telegram Bot Integration:** A ready-to-use effect for sending messages, documents, and reactions. It natively supports running multiple bots from a single application seamlessly.
 * **Mail Integration:** A robust email effect for composing and sending transactional emails.
-* **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses, an XML-like prompt templating language (`POML`) which significantly improves prompt adherence, a `makePoml` TemplateHaskell macro that compiles `.poml` files into typed Haskell (`Input -> POML`) at compile time (with automatic recompilation on file edit), a pure `parsePomlText` parser for runtime/test use, a multi-turn `Conversation` handle that threads context across calls, and an agent loop (`solveWithAgent`) that runs a ReAct cycle with tool use against registered services.
+* **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses, an XML-like prompt templating language (`POML`) which significantly improves prompt adherence, a `makePoml` TemplateHaskell macro that compiles `.poml` files into typed Haskell (`Input -> [POML]`) at compile time (with automatic recompilation on file edit), a pure `parsePomlText` parser for runtime/test use, a multi-turn `Conversation` handle that threads context across calls, and an agent loop (`solveWithAgent`) that runs a ReAct cycle with tool use against registered services.
 * **Production & Test Interpreters:** Two distinct performers (`DefaultPerformer` and `TestInterpreter`). The test runtime keeps the same shared-runner architecture as production, but swaps capabilities at the edges: DB can stay real, while Telegram, mail, AI, logging, and async work are captured through mocks in the capability layer.
 * **Structured Async Logging:** High-performance, asynchronous structured logging available universally across all effect types. It supports nested log contexts (e.g., automatically attaching a `user_id` or `trace_id` to all subsequent nested calls).
 * **Service Call Infrastructure:** A transparent mechanism for running parallel typed workers with a standardized request/response interface. When the application needs concurrent background workers that process requests one at a time, register them through `LazyCircus.App.Service` and call from scenarios with `callService` — no coupling to concrete implementations. The `makeServiceLib` Template Haskell macro generates the service library data type, config, dispatch instances, builder function, and optional tool-call plumbing for AI integration from a list of request/response/tool-spec triples.
@@ -245,21 +245,23 @@ swithLogCtx [("user_id", "42")] $ do
 `Script` is a GADT that wraps any sub-language into a single type. Using smart constructors:
 
 ```haskell
-import LazyCircus (tgScript, mailScript, aiScript, httpScript)
+import LazyCircus (tgScript, mailScript, aiScript, httpScript, dbScript)
 
 -- Wrap sub-languages
 tgScript "my-bot-name"   myTelegramScript  :: Script b
 mailScript               myMailScript      :: Script b
 aiScript                 myAIScript        :: Script b
 httpScript myBaseUrl     myHTTPScript      :: Script b
+dbScript myDb ReadWrite  myDbScript        :: Script b
 ```
 
 `aiScript` wraps with an empty tool-description list. For tool-aware AI scripts, use `AIScriptDef` directly or the TH-generated `aiScriptWithAll` / `aiScriptWith` smart constructors (see [Section 8](#8-adding-a-new-effect)).
 
-For DB scripts, use the `DBScriptDef` constructor directly:
+For DB scripts, the `dbScript` smart constructor is the idiomatic wrapper; the underlying `DBScriptDef` constructor is also available via `Script(..)`:
 
 ```haskell
-DBScriptDef myDb ReadWrite myDbScript :: Script b
+dbScript myDb ReadWrite myDbScript :: Script b
+-- equivalent to: DBScriptDef myDb ReadWrite myDbScript
 ```
 
 ---

@@ -109,11 +109,11 @@ The default method uses `generateFiltration`, so an empty instance is enough in 
 
 `findLocked` and `findAllLocked` (the `SELECT ... FOR UPDATE` family) dispatch through the same `generateFiltration` used by `find` / `findAll`. No extra service instance is needed — once a table has `HasReadService`, locking reads work automatically. Just remember they must run inside `withTransaction` (see [effects.md](effects.md#row-locking)).
 
-#### Use `DBScriptDef` With An Explicit `DbMode`
+#### Use `dbScript` With An Explicit `DbMode`
 
 ```haskell
-evalScript $ DBScriptDef myDb ReadWrite $ create row
-evalScript $ DBScriptDef myDb ReadOnly $ find key
+evalScript $ dbScript myDb ReadWrite $ create row
+evalScript $ dbScript myDb ReadOnly $ find key
 ```
 
 ## Service Registration
@@ -514,9 +514,9 @@ import LazyCircus.Scene.MyEffect.Class
 import LazyCircus.Scene.MyEffect.Lang
 ```
 
-If the effect should have a convenience wrapper like `tgScript`, `mailScript`, `aiScript`, or `httpScript`,
-also update `LazyCircus.hs`. There is intentionally no DB smart constructor, so add a new one
-only when the public API genuinely benefits from it.
+If the effect should have a convenience wrapper like `tgScript`, `mailScript`, `aiScript`,
+`httpScript`, or `dbScript`, also update `LazyCircus.hs`. Add a new one only when the public API
+genuinely benefits from it.
 
 ### Checklist For New Effects
 
@@ -562,19 +562,23 @@ Fix:
 evalScript $ tgScript "demo-bot" $ sendMessage req
 ```
 
-### 3. Expecting A DB Smart Constructor That Does Not Exist
+### 3. Expecting Separate Read/Write DB Constructors
 
 Problem:
 
-- trying to call something like `dbScript` or `rwDbScript`
+- trying to call something like `rwDbScript` or `roDbScript`
 
 Fix:
 
-Use the constructor directly:
+There is one DB smart constructor, `dbScript`, which takes the `DbMode`
+(`ReadWrite` / `ReadOnly`) as its second argument:
 
 ```haskell
-evalScript $ DBScriptDef simpleDb ReadWrite $ find key
+evalScript $ dbScript simpleDb ReadWrite $ find key
 ```
+
+(`DBScriptDef` is the underlying `Script` constructor and remains available via
+`Script(..)`.)
 
 ### 4. Using `ReadOnly` For Writes
 

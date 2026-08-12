@@ -164,7 +164,7 @@ cleanupLater :: Int32 -> ScenarioProgram Script serviceLib ()
 cleanupLater actId = do
     runAsync $ do
         logInfo "Background cleanup started"
-        evalScript $ DBScriptDef simpleDb ReadWrite $ delete (CircusActId actId)
+        evalScript $ dbScript simpleDb ReadWrite $ delete (CircusActId actId)
         logInfo "Background cleanup finished"
 ```
 

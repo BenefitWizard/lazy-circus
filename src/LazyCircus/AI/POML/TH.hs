@@ -4,10 +4,10 @@
 PURPOSE: Generate POML AST values (and optional input record types) from
   @.poml@ source files at compile time via a Template Haskell macro.
 SCOPE: Reading and parsing @.poml@ files, building the variable type
-  environment, validating the parsed document (single root, declared
-  variables, valid element names, no @poml@-typed variables inside
-  concatenations), and emitting a record type plus a function definition
-  whose body constructs a single 'POML' AST node.
+  environment, validating the parsed document (declared variables, valid
+  element names, no @poml@-typed variables inside concatenations), and
+  emitting a record type plus a function definition whose body constructs a
+  @[POML]@ list (one entry per top-level body node).
 DEPENDS: "LazyCircus.AI.POML.Parser" for parsing, "LazyCircus.AI.POML.Types"
   for the 'POML' AST shape (used to drive code generation),
   @template-haskell@ for splice construction, and the RIO prelude for
@@ -73,7 +73,7 @@ recordBang = Bang NoSourceUnpackedness NoSourceStrictness
 
 {- | Compile-time macro that reads, parses, and lowers a @.poml@ file into a
 Haskell record type (when the document declares template variables) and a
-function returning a 'POML' value.
+function returning a @[POML]@ list.
 
 The @base@ argument drives the generated names: a base of @"hello"@
 produces a record type @HelloInput@ (when there are @<let>@ declarations)
@@ -90,9 +90,9 @@ PRE-CONTRACT: @base@ is a valid Haskell identifier prefix suitable for the
   element is @<poml>@.
 POST-CONTRACT: On success returns at most one record type declaration (when
   the document has @<let>@ declarations) and exactly one function
-  declaration whose body is a single 'POML' value. Calls 'fail' on any
-  parse error, undeclared variable reference, multi-rooted body, empty
-  body, invalid element name, or @poml@-typed variable inside a
+  declaration whose body is a @[POML]@ list (one element per top-level body
+  node). Calls 'fail' on any parse error, undeclared variable reference,
+  empty body, invalid element name, or @poml@-typed variable inside a
   concatenation.
 -}
 makePoml :: String -> FilePath -> Q [Dec]
@@ -113,10 +113,11 @@ generateDecls base doc = do
             if null (pdLets doc)
                 then Nothing
                 else Just (mkName "arg")
-    bodyNode <- requireSingleBody doc
-    validateVarRefs varTypes bodyNode
-    bodyExp <- genNode varTypes mArgName bodyNode
-    pure (genInputRecord base doc <> genFun base mArgName bodyExp)
+    bodyNodes <- requireNonEmptyBody doc
+    mapM_ (validateVarRefs varTypes) bodyNodes
+    bodyExp <- genBodyList varTypes mArgName bodyNodes
+    funDecs <- genFun base mArgName bodyExp
+    pure (genInputRecord base doc <> funDecs)
 
 -- | Validate that a @<let>@ name is a legal lowercase Haskell identifier
 -- (not a reserved word), suitable for use as a record field selector. Calls
@@ -174,15 +175,13 @@ isValidHsIdent (c : cs) = isLowerStart c && all isIdentChar cs
             || (ch >= 'A' && ch <= 'Z')
             || (ch >= '0' && ch <= '9')
 
--- | Enforce that the body has exactly one top-level node.
-requireSingleBody :: PomlDoc -> Q PomlNode
-requireSingleBody doc = case pdBody doc of
+-- | Enforce that the body has at least one top-level node; return all of them.
+-- A @.poml@ body with multiple top-level elements is supported and lowered to
+-- a @[POML]@ list (one entry per element). An empty body fails.
+requireNonEmptyBody :: PomlDoc -> Q [PomlNode]
+requireNonEmptyBody doc = case pdBody doc of
     [] -> fail "makePoml: empty body"
-    [single] -> pure single
-    _ ->
-        fail
-            "makePoml: multiple top-level body elements not supported \
-            \(wrap content in a single root element)"
+    nodes -> pure nodes
 
 -- | Fail if any 'TVar' in the body lacks a matching @<let>@ declaration.
 -- Both text content and attribute values (e.g. a @<cp>@ @caption@) are walked,
@@ -223,19 +222,27 @@ pomlTypeToHsType PTPoml = ConT ''POML
 
 -- | Emit the function signature and body. The function takes the input
 -- record when @<let>@ declarations exist, otherwise it is a nullary value.
-genFun :: String -> Maybe Name -> Exp -> [Dec]
-genFun base mArgName body = [SigD funName sigTy, FunD funName [clause]]
-  where
-    funName = mkName (lowercaseFirst base)
-    sigTy = case mArgName of
-        Just _ ->
-            AppT
-                (AppT ArrowT (ConT (mkName (capitalize base <> "Input"))))
-                (ConT ''POML)
-        Nothing -> ConT ''POML
-    clause = case mArgName of
-        Just arg -> Clause [VarP arg] (NormalB body) []
-        Nothing -> Clause [] (NormalB body) []
+-- The body type is always @[POML]@ — one element per top-level body node.
+genFun :: String -> Maybe Name -> Exp -> Q [Dec]
+genFun base mArgName body = do
+    resultTy <- [t| [POML] |]
+    let funName = mkName (lowercaseFirst base)
+        sigTy = case mArgName of
+            Just _ ->
+                AppT
+                    (AppT ArrowT (ConT (mkName (capitalize base <> "Input"))))
+                    resultTy
+            Nothing -> resultTy
+        clause = case mArgName of
+            Just arg -> Clause [VarP arg] (NormalB body) []
+            Nothing -> Clause [] (NormalB body) []
+    pure [SigD funName sigTy, FunD funName [clause]]
+
+-- | Codegen a @[POML]@ list literal from the document body nodes — one entry
+-- per top-level node.
+genBodyList :: Map Text PomlType -> Maybe Name -> [PomlNode] -> Q Exp
+genBodyList varTypes mArgName nodes =
+    listE (map (genNode varTypes mArgName) nodes)
 
 -- | Codegen entry point for a single 'PomlNode'.
 genNode :: Map Text PomlType -> Maybe Name -> PomlNode -> Q Exp

@@ -22,6 +22,10 @@ extra-source-files:
     app/example/prompts/contact.poml
     app/example/prompts/greeting.poml
     app/example/prompts/hello.poml
+    app/example/prompts/inner.poml
+    app/example/prompts/innerMulti.poml
+    app/example/prompts/multi.poml
+    app/example/prompts/outer.poml
 
 source-repository head
   type: git

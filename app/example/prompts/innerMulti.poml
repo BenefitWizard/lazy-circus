@@ -1,0 +1,5 @@
+<poml>
+  <let name="recipient" type="string"/>
+  <p>Greeting #1 for {{recipient}}.</p>
+  <p>Greeting #2 for {{recipient}}.</p>
+</poml>

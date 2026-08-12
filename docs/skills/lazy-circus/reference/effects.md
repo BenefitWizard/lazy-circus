@@ -4,7 +4,7 @@ Read this when:
 
 - using or reviewing `DBScript`, `TelegramScript`, `AIScript`, `MailScript`, or `HTTPScript`
 - checking scene-level logging APIs
-- deciding whether to use `tgScript`, `mailScript`, `aiScript`, `httpScript`, or `DBScriptDef`
+- deciding whether to use `tgScript`, `mailScript`, `aiScript`, `httpScript`, or `dbScript`
 
 ## Effect Languages
 
@@ -113,10 +113,12 @@ reserveAct actId = withTransaction $ do
 Embedding into a scenario:
 
 ```haskell
-evalScript $ DBScriptDef simpleDb ReadWrite $ find (CircusActId 42)
+evalScript $ dbScript simpleDb ReadWrite $ find (CircusActId 42)
 ```
 
-There is no `dbScript` smart constructor in this project. Use `DBScriptDef` directly.
+There is no need to use `DBScriptDef` directly — the `dbScript` smart constructor
+(from `LazyCircus`) is the idiomatic wrapper, mirroring `tgScript` / `mailScript` /
+`aiScript` / `httpScript`. `DBScriptDef` remains available via `Script(..)`.
 
 ## Telegram
 
@@ -289,6 +291,7 @@ The `POML` constructors group into:
 - **Leaf / inline:** `Text`, `Var` (smart: `text`, `var`; `IsString` instance makes string literals coerce to `Text`)
 - **Basic block / inline tags:** `Paragraph`, `Heading`, `Code`, `Strong`, `Italic`, `Underline`, `Strikethrough`, `Span`, `Br` (smart: `p_`, `h_`, `hLvl_`, `code_`, `b_`, `i_`, `u_`, `s_`, `span_`, `br`)
 - **Semantic prompt blocks:** `CP`, `List`, `Role`, `Task`, `Example`, `ExampleSet`, `ExampleInput`, `ExampleOutput`, `Table` (smart: `cp_`/`cp`, `list_`/`list`, `role_`/`role`, `task_`/`task`, `example_`/`example`, `examples_`/`examples`, `exampleInput_`/`exampleInput`, `exampleOutput_`/`exampleOutput`, `csvTable_`/`csvTable`)
+- **Composition:** `Fragment` (smart: `fragment :: [POML] -> POML`) — collapses a `[POML]` fragment into a single `POML` for splicing into a `type="poml"` slot of another template. Empty → `Text ""`, singleton → the node itself, otherwise `Fragment` (transparent under rendering). EDSL/composition-only; the parser never produces it.
 
 Each semantic block takes a `*Params` record with a `default*Params` base (e.g. `defaultCPParams`, `defaultListParams`). The `_`-suffixed smart constructors use the defaults; the non-suffixed variants take explicit params.
 
@@ -304,16 +307,18 @@ myPrompt =
 
 #### Pure Parser
 
-`parsePomlText :: Text -> Either String POML` parses a `.poml` document (XML root `<poml>`,
-whitelisted body tags) directly into a `POML` AST in one step. Static text lowers to `Text`; a
-bare `{{name}}` placeholder lowers to `Var "name"`. Template concatenations
+`parsePomlText :: Text -> Either String [POML]` parses a `.poml` document (XML root `<poml>`,
+whitelisted body tags) into a `[POML]` list — one entry per top-level body element. A document
+may contain **one or more** top-level elements (e.g. a `<role>` and a `<task>` as siblings), so
+the same template no longer needs to be wrapped in a single outer tag. Static text lowers to
+`Text`; a bare `{{name}}` placeholder lowers to `Var "name"`. Template concatenations
 (`{{a + " " + b}}`) and templated `<cp caption="{{...}}">` cannot be expressed in the AST and
 return `Left` — use the TH macro for those.
 
 ```haskell
 import LazyCircus.AI.POML.Parser (parsePomlText)
 
-parsed :: Either String POML
+parsed :: Either String [POML]
 parsed = parsePomlText "<poml><p>Hello</p></poml>"
 ```
 
@@ -323,7 +328,7 @@ parsed = parsePomlText "<poml><p>Hello</p></poml>"
 compile time and generates:
 
 - a record type `{Base}Input` (only when the document has `<let name="…" type="…"/>` declarations), with one typed field per variable (`string` → `Text`, `boolean` → `Bool`, `number` → `Float`, `poml` → `POML`);
-- a function `{base} :: {Base}Input -> POML` (or a nullary `{base} :: POML` when there are no `<let>` declarations) whose body constructs a single `POML` node.
+- a function `{base} :: {Base}Input -> [POML]` (or a nullary `{base} :: [POML]` when there are no `<let>` declarations) whose body is a `[POML]` list — one element per top-level body node. A document may contain **one or more** top-level elements, each lowered to one list entry.
 
 The `base` argument drives the generated names; the file is registered with `addDependentFile`
 so edits trigger recompilation.
@@ -343,10 +348,10 @@ import LazyCircus.AI.POML.Types (POML (..), defaultListParams)  -- must stay in 
 --   </poml>
 $(makePoml "hello" "prompts/hello.poml")
 -- generates: data HelloInput = HelloInput { name :: Text }
---             hello :: HelloInput -> POML
+--             hello :: HelloInput -> [POML]
 
 greeting :: Text
-greeting = renderPOMLtoPrompt [hello HelloInput{ name = "World" }]
+greeting = renderPOMLtoPrompt (hello HelloInput{ name = "World" })
 ```
 
 Concatenations (`{{firstName + " " + lastName}}`) and templated `<cp caption="{{topic}}">` are
@@ -354,12 +359,27 @@ only representable through the macro — they are spliced at the AST level insid
 function. A `poml`-typed variable may appear as a subtree but cannot participate in a text
 concatenation (the splice fails with a clear message).
 
+**Composing one template into another.** A generated function returns `[POML]`, while a
+`type="poml"` slot expects a single `POML`. Bridge them with `fragment`:
+
+```haskell
+import LazyCircus.AI.POML.Types (fragment)
+
+-- outer.poml: <let name="body" type="poml"/> … {{body}} …
+outer (OuterInput{ body = fragment (inner inp), subject = "..." })
+```
+
+`fragment` collapses the `[POML]` to one node (singleton → the node itself, multi-node →
+`Fragment`), so it works regardless of how many top-level nodes `inner` produces.
+
 Consumer requirements for `makePoml`: keep `POML(..)` and the referenced `default*Params` values
 in scope, and enable `OverloadedStrings` (already a library default). If two splices in the same
 module produce record types that share a field name, also enable `DuplicateRecordFields`.
 
 See `app/example/Example/PomlDemo.hs` and the `app/example/prompts/*.poml` templates
-(`hello.poml`, `greeting.poml`, `contact.poml`) for the canonical worked example.
+(`hello.poml`, `greeting.poml`, `contact.poml`, `caption.poml`, `multi.poml`) for the canonical
+worked example. `multi.poml` in particular demonstrates a document with multiple top-level body
+elements (`<role>` and `<task>` as siblings), lowered to a multi-element `[POML]` list.
 
 ## Mail
 

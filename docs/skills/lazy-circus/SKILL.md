@@ -6,7 +6,7 @@ description: >
   the user mentions LazyCircus, lazy-circus, ScenarioProgram, Script, DBScript,
   TelegramScript, AIScript, MailScript, HTTPScript, evalScript, tgScript, mailScript,
   aiScript, httpScript, sendDocument, askContinuing, solveWithAgent,
-  solveWithAgentContinuing, AgentRequest, Conversation, DefaultPerformer, DBScriptDef,
+  solveWithAgentContinuing, AgentRequest, Conversation, DefaultPerformer, dbScript, DBScriptDef,
   findLocked, findAllLocked, LockSpec, HasLogLang, tgTest, TelegramTestScript, waitForReply, waitForMatching, OutgoingMessage,
   Mailboxes, UpdateFactory, mkTextUpdate, POML, makePoml, parsePoml, parsePomlText,
   POML.TH, POML.Parser, PomlDemo, or asks how to write scenarios, add new effects,
@@ -67,13 +67,14 @@ Read more than one reference file when a task crosses layers.
   - Telegram -> `tgScript "bot-name" ...`
    - Mail -> `mailScript ...`
    - AI -> `aiScript ...` (empty tools) or `aiScriptWithAll ...` / `aiScriptWith tools ...` (TH-generated, with tools)
-   - DB -> `DBScriptDef db mode ...`
+   - DB -> `dbScript db mode ...` (or the underlying `DBScriptDef` constructor directly)
    - HTTP -> `httpScript baseUrl ...`
 - `AIScriptDef` takes a `[ToolDescription]` as its first argument; `aiScript` passes `[]` for backward compatibility.
 - For multi-turn AI, thread a `Conversation` with `askContinuing` / `solveWithAgentContinuing`. Stateless `ask` / `solveWithAgent` inject `emptyConversation` and discard the transcript.
 - A `Conversation` never holds a `Chat.System` message; build it only via `emptyConversation` or `conversationFromTurns`.
-- Author prompts as `[POML]` fragments (the `prompt` / `systemPrompt` fields of `AIRequest` / `AgentRequest`). Prefer the `makePoml` TH macro (`LazyCircus.AI.POML.TH`) over hand-built AST: it reads a `.poml` file at compile time, emits a typed `Input` record (from `<let>` declarations) plus an `Input -> POML` function, and registers the file with `addDependentFile` so edits trigger recompilation. The consumer module must keep `POML(..)` + the `default*Params` values in scope and enable `OverloadedStrings`.
-- `parsePomlText` (`LazyCircus.AI.POML.Parser`) is the pure, TH-free path from `.poml` text to a `POML` AST (for tests / runtime). It cannot represent template concatenations (`{{a + " " + b}}`) or templated `<cp caption="{{...}}">` — those require the `makePoml` macro, which lowers them at the AST level. `renderPOMLtoPrompt :: [POML] -> Text` turns any `POML` value into the prompt text sent to the model.
+- Author prompts as `[POML]` fragments (the `prompt` / `systemPrompt` fields of `AIRequest` / `AgentRequest`). Prefer the `makePoml` TH macro (`LazyCircus.AI.POML.TH`) over hand-built AST: it reads a `.poml` file at compile time, emits a typed `Input` record (from `<let>` declarations) plus an `Input -> [POML]` function, and registers the file with `addDependentFile` so edits trigger recompilation. A `.poml` body may contain one or more top-level elements (e.g. `<role>` and `<task>` as siblings) — each is lowered to one `[POML]` entry, so a real prompt no longer needs to be wrapped in a single outer tag. The consumer module must keep `POML(..)` + the `default*Params` values in scope and enable `OverloadedStrings`.
+- `parsePomlText` (`LazyCircus.AI.POML.Parser`) is the pure, TH-free path from `.poml` text to a `[POML]` list (for tests / runtime). It cannot represent template concatenations (`{{a + " " + b}}`) or templated `<cp caption="{{...}}">` — those require the `makePoml` macro, which lowers them at the AST level. `renderPOMLtoPrompt :: [POML] -> Text` turns any `[POML]` list into the prompt text sent to the model.
+- To splice one template's `[POML]` output into another template's `type="poml"` slot, wrap it with `fragment :: [POML] -> POML` (`LazyCircus.AI.POML.Types`): `outer (OuterInput{ body = fragment (inner inp), … })`. Empty → `Text ""`, singleton → the node itself, multi-node → a transparent `Fragment` group. The parser never produces `Fragment`; it is eDSL/composition-only.
 - Use `callService` to invoke registered services from `ScenarioProgram`.
 - `runArbitraryIO` is a **last-resort escape hatch** for one-off `IO` that fits no scene language or service. It runs for real in BOTH production and tests (no mocking/capture) and is invisible to automatic timing — prefer a scene language / service instead.
 - `ScenarioProgram` has two type parameters: `ScenarioProgram script serviceLib a`.
@@ -146,4 +147,4 @@ Prefer LSP navigation for Haskell modules when possible.
 8. If a new effect was added, was dispatch updated everywhere?
 9. Are tests aligned with real async and DB behavior?
 10. Was `hpack` run before build or test?
-11. If prompt templates changed (`.poml` files, `makePoml` splices, or `POML` AST), does the consumer module keep `POML(..)` + `default*Params` in scope, is `OverloadedStrings` on, and does the generated `Input -> POML` function match the `<let>` declarations?
+11. If prompt templates changed (`.poml` files, `makePoml` splices, or `POML` AST), does the consumer module keep `POML(..)` + `default*Params` in scope, is `OverloadedStrings` on, and does the generated `Input -> [POML]` function match the `<let>` declarations?

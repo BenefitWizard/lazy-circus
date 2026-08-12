@@ -4,8 +4,8 @@
 --
 -- Covers the structural-document path ('parsePoml' producing a 'PomlDoc' with
 -- @<let>@ metadata and body nodes), the error cases (unknown tag, bad <let>
--- type, non-<poml> root, unterminated template), and the single-node lowering
--- path ('parsePomlText' -> 'POML').
+-- type, non-<poml> root, unterminated template, empty body), and the
+-- body-lowering path ('parsePomlText' -> '[POML]').
 module PomlParserSpec (spec) where
 
 import Data.Either (isLeft)
@@ -66,49 +66,57 @@ spec = do
     describe "parsePomlText" $ do
         it "lowers a single static text node to a Paragraph POML" $
             parsePomlText "<poml><p>Hi</p></poml>"
-                `shouldBe` Right (p_ ["Hi" :: POML])
+                `shouldBe` Right [p_ ["Hi" :: POML]]
 
         it "lowers a single variable placeholder to a Var POML" $
             parsePomlText "<poml><p>{{x}}</p></poml>"
-                `shouldBe` Right (p_ [var "x"])
+                `shouldBe` Right [p_ [var "x"]]
 
         it "rejects template concatenation with Left" $
             parsePomlText "<poml><p>{{a + b}}</p></poml>" `shouldSatisfy` isLeft
 
-        it "rejects multiple top-level elements with Left" $
-            parsePomlText "<poml><p>A</p><p>B</p></poml>" `shouldSatisfy` isLeft
+        it "lowers multiple top-level elements to a [POML] list" $
+            parsePomlText "<poml><p>A</p><p>B</p></poml>"
+                `shouldBe` Right [p_ ["A" :: POML], p_ ["B" :: POML]]
+
+        it "lowers a mix of semantic top-level elements to a [POML] list" $
+            parsePomlText "<poml><role>R</role><task>T</task></poml>"
+                `shouldBe` Right [role_ ["R" :: POML], task_ ["T" :: POML]]
+
+        it "rejects an empty body with Left" $
+            parsePomlText "<poml></poml>" `shouldSatisfy` isLeft
 
     describe "semantic tags" $ do
         it "parses <role> into a Role node" $
             parsePomlText "<poml><role>Be kind</role></poml>"
-                `shouldBe` Right (role_ ["Be kind" :: POML])
+                `shouldBe` Right [role_ ["Be kind" :: POML]]
 
         it "parses <task> into a Task node" $
             parsePomlText "<poml><task>T</task></poml>"
-                `shouldBe` Right (task_ ["T" :: POML])
+                `shouldBe` Right [task_ ["T" :: POML]]
 
         it "parses <cp caption=\"C\"> into a CP node" $
             parsePomlText "<poml><cp caption=\"C\">x</cp></poml>"
-                `shouldBe` Right (cp_ "C" ["x" :: POML])
+                `shouldBe` Right [cp_ "C" ["x" :: POML]]
 
         it "parses <input> into an ExampleInput node" $
             parsePomlText "<poml><input>q</input></poml>"
-                `shouldBe` Right (exampleInput_ ["q" :: POML])
+                `shouldBe` Right [exampleInput_ ["q" :: POML]]
 
         it "parses <output> into an ExampleOutput node" $
             parsePomlText "<poml><output>a</output></poml>"
-                `shouldBe` Right (exampleOutput_ ["a" :: POML])
+                `shouldBe` Right [exampleOutput_ ["a" :: POML]]
 
         it "parses <examples><example> into an ExampleSet node" $
             parsePomlText
                 "<poml><examples><example><input>q</input><output>a</output></example></examples></poml>"
                 `shouldBe` Right
-                    ( examples_
+                    [ examples_
                         [ [ exampleInput_ ["q" :: POML]
                           , exampleOutput_ ["a" :: POML]
                           ]
                         ]
-                    )
+                    ]
 
         it "parses a standalone <example> into an Example node" $
             parsePomlText "<poml><example><input>i</input></example></poml>"

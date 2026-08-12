@@ -32,7 +32,7 @@ Scenario logs explain what happened at the orchestration level:
 ```haskell
 myScenario = do
     logInfo "Creating act"
-    mAct <- evalScript $ DBScriptDef simpleDb ReadWrite $ create row
+    mAct <- evalScript $ dbScript simpleDb ReadWrite $ create row
     case mAct of
         Nothing -> logError "DB create returned no rows"
         Just act -> do

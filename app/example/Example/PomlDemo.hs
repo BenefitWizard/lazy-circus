@@ -10,7 +10,7 @@
 
 -- | Demonstration of the @makePoml@ Template Haskell macro, which reads
 -- @.poml@ files at compile time and generates a record type plus a function
--- that builds a 'POML' AST node.
+-- that builds a @[POML]@ list.
 module Example.PomlDemo
     ( runPomlDemo
     , HelloInput (..)
@@ -28,15 +28,15 @@ import LazyCircus.AI.POML (renderPOMLtoPrompt)
 import LazyCircus.AI.POML.TH (makePoml)
 import LazyCircus.AI.POML.Types (POML (..), defaultListParams)
 
--- | Generates @HelloInput@ and @hello :: HelloInput -> POML@ from
+-- | Generates @HelloInput@ and @hello :: HelloInput -> [POML]@ from
 -- @app/example/prompts/hello.poml@.
 $(makePoml "hello" "app/example/prompts/hello.poml")
 
--- | Generates @greeting :: POML@ (no input record) from
+-- | Generates @greeting :: [POML]@ (no input record) from
 -- @app/example/prompts/greeting.poml@.
 $(makePoml "greeting" "app/example/prompts/greeting.poml")
 
--- | Generates @ContactInput@ and @contact :: ContactInput -> POML@ from
+-- | Generates @ContactInput@ and @contact :: ContactInput -> [POML]@ from
 -- @app/example/prompts/contact.poml@.
 $(makePoml "contact" "app/example/prompts/contact.poml")
 
@@ -46,16 +46,16 @@ runPomlDemo = do
     putStrLn "\n=== POML Template Demo ==="
     putStrLn
         ( "hello:    "
-            <> Text.unpack (renderPOMLtoPrompt [hello HelloInput{name = "World"}])
+            <> Text.unpack (renderPOMLtoPrompt (hello HelloInput{name = "World"}))
         )
     putStrLn
         ( "greeting: "
-            <> Text.unpack (renderPOMLtoPrompt [greeting])
+            <> Text.unpack (renderPOMLtoPrompt greeting)
         )
     putStrLn
         ( "contact:  "
             <> Text.unpack
                 ( renderPOMLtoPrompt
-                    [contact ContactInput{firstName = "Jane", lastName = "Doe"}]
+                    (contact ContactInput{firstName = "Jane", lastName = "Doe"})
                 )
         )

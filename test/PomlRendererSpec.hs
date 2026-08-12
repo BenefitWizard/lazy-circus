@@ -16,6 +16,7 @@ import LazyCircus.AI.POML.Types
     , exampleInput_
     , exampleOutput_
     , examples_
+    , fragment
     , h_
     , hLvl_
     , i_
@@ -93,3 +94,18 @@ spec = describe "renderPOMLtoPrompt" $ do
     it "renders nested inline content" $
         renderPOMLtoPrompt [p_ [b_ ["bold"], " and ", i_ ["italic"]]]
             `shouldBe` "<p><b>bold</b> and <i>italic</i></p>"
+
+    describe "fragment (transparent group)" $ do
+        it "renders a multi-node fragment as the concatenation of its children" $
+            renderPOMLtoPrompt [fragment [p_ ["a"], p_ ["b"]]]
+                `shouldBe` "<p>a</p><p>b</p>"
+
+        it "is observationally transparent: [fragment xs] renders as xs" $
+            renderPOMLtoPrompt [fragment [role_ ["x"], br, task_ ["y"]]]
+                `shouldBe` renderPOMLtoPrompt [role_ ["x"], br, task_ ["y"]]
+
+        it "collapses a singleton list to the node itself (Eq)" $
+            fragment [p_ ["x"]] `shouldBe` p_ ["x"]
+
+        it "renders the empty fragment as nothing" $
+            fragment [] `shouldBe` (Text "" :: POML)

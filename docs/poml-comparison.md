@@ -19,8 +19,8 @@ The parser **exists and is the entry point** for `.poml` source. It exposes thre
 | Name | Type | Purpose |
 | --- | --- | --- |
 | `parsePoml` | `Text -> Either String PomlDoc` | Parse XML text into the intermediate `PomlDoc` (decls + body nodes). |
-| `parsePomlText` | `Text -> Either String POML` | Parse and lower in one step (`parsePoml` `>>=` `toPOML`). |
-| `toPOML` | `PomlDoc -> Either String POML` | Lower a `PomlDoc` to a single `POML` AST node; requires exactly one top-level body node. |
+| `parsePomlText` | `Text -> Either String [POML]` | Parse and lower in one step (`parsePoml` `>>=` `toPOML`). |
+| `toPOML` | `PomlDoc -> Either String [POML]` | Lower a `PomlDoc` to a `[POML]` list — one entry per top-level body node. A document may contain one or more top-level elements. |
 
 Internally, `nodeToPOML :: PomlNode -> Either String POML` does the per-node lowering, and `allowedElementNames :: Set Text` is the whitelist of legal body tag names shared with the TH code generator.
 
@@ -35,10 +35,13 @@ Illustrative lowering:
 
 ```
 parsePomlText "<poml><role>Be kind</role></poml>"
-  ⇨ Right (role_ ["Be kind"])
+  ⇨ Right [role_ ["Be kind"]]
 
 parsePomlText "<poml><p>Hello, {{name}}!</p></poml>"
-  ⇨ Right (p_ [text "Hello, ", var "name", text "!"])
+  ⇨ Right [p_ [text "Hello, ", var "name", text "!"]]
+
+parsePomlText "<poml><role>R</role><task>T</task></poml>"
+  ⇨ Right [role_ ["R"], task_ ["T"]]
 ```
 
 ---
@@ -101,6 +104,7 @@ All seven semantic tags are supported end-to-end via parse, eDSL, and render.
 | `Br` | `<br/>` (self-closing; emitted directly, no close tag) |
 | `Text t` | raw `t` |
 | `Var n` | `{{n}}` |
+| `Fragment` | transparent — the concatenation of its children (no wrapper tag) |
 
 The emitted tag names are the **standardized** ones above. Note in particular that `ExampleInput` renders as `<input>` and `ExampleOutput` renders as `<output>` — **not** `<example_input>` / `<example_output>`.
 
@@ -148,6 +152,31 @@ Through `makePoml`, the caption template is evaluated against the input record f
 
 `for` (loops), `if` (conditionals), and `include` (partial inclusion) are **not supported**. There is no parsing, AST node, or codegen for them. The only template constructs are variable references and `+` concatenation.
 
+### Composing templates: `fragment`
+
+`makePoml` generates a function returning `[POML]` (one entry per top-level body node), while a `type="poml"` slot on another template expects a single `POML`. The bridge is `fragment :: [POML] -> POML` (from `LazyCircus.AI.POML.Types`):
+
+```haskell
+fragment []  = Text ""        -- renders to nothing
+fragment [x] = x              -- singleton collapses to the node itself
+fragment xs  = Fragment xs    -- two or more → transparent group
+```
+
+`Fragment` is **eDSL/composition-only** — the parser never produces it. It renders as the concatenation of its children with no wrapper tag, so it is observationally transparent at any nesting level:
+
+```haskell
+renderPOMLtoPrompt [fragment xs] == renderPOMLtoPrompt xs
+```
+
+Typical use — feed one template's `[POML]` output into another template's `type="poml"` slot:
+
+```haskell
+-- outer.poml declares <let name="body" type="poml"/> and references {{body}}
+outer (OuterInput{ body = fragment (inner inp), subject = "..." })
+```
+
+This works regardless of how many top-level nodes `inner` produces. The single-node case collapses (no `Fragment` wrapper); the multi-node case wraps in one `Fragment`.
+
 ---
 
 ## The `makePoml` Template Haskell macro
@@ -161,14 +190,14 @@ makePoml "contact" "app/example/prompts/contact.poml"
 against a file declaring `<let name="firstName" type="string"/>` and `<let name="lastName" type="string"/>` produces:
 
 - a record type `ContactInput` with one field per `<let>` (field types follow `pomlTypeToHsType`: `string`→`Text`, `boolean`→`Bool`, `number`→`Float`, `poml`→`POML`), deriving `Eq` and `Show`;
-- a function `contact :: ContactInput -> POML` whose body is the lowered `POML` AST, with declared variables validated and spliced from the record.
+- a function `contact :: ContactInput -> [POML]` whose body is the lowered `[POML]` list (one entry per top-level body node), with declared variables validated and spliced from the record.
 
-When the document has **no** `<let>` declarations, no record is generated and the function is nullary: `base :: POML`.
+When the document has **no** `<let>` declarations, no record is generated and the function is nullary: `base :: [POML]`.
 
 The macro performs the following compile-time validation (failing the splice on any error):
 
 - every `<let>` name is a legal, non-reserved lowercase Haskell identifier (`validateLetName`, `isValidHsIdent`);
-- the body has exactly one top-level node (`requireSingleBody`);
+- the body has at least one top-level node (`requireNonEmptyBody`); a document may contain one or more top-level elements;
 - every `{{name}}` reference has a matching `<let>` declaration (`validateVarRefs`);
 - no `poml`-typed variable appears inside a concatenation, since its `POML` value cannot be appended to `Text` (`validateNoPomlInConcat`).
 
