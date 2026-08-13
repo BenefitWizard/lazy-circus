@@ -11,6 +11,8 @@ extra-source-files:
   - README.md
   - CHANGELOG.md
   - app/example/prompts/*.poml
+  - app/example/prompts/*.txt
+  - app/example/prompts/*.json
 
 # Metadata used when publishing your package
 # synopsis:            Short description of the package

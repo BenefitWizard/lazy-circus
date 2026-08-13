@@ -42,14 +42,27 @@ spec = do
                 Right PomlDoc{pdLets, pdBody} -> do
                     length pdLets `shouldBe` 1
                     case pdLets of
-                        [LetDecl{letName, letType}] -> do
-                            letName `shouldBe` "name"
-                            letType `shouldBe` PTString
+                        [LetInput name ty] -> do
+                            name `shouldBe` "name"
+                            ty `shouldBe` PTString
                         _ -> expectationFailure ("expected exactly one <let>, got: " <> show pdLets)
                     pdBody
                         `shouldBe` [ NodeElement "p" []
                                         [NodeText [TLit "Hello, ", TVar "name", TLit "!"]]
                                    ]
+
+        it "parses <let src=\"...\"> into a LetFile declaration" $
+            case parsePoml "<poml><let name=\"disclaimer\" src=\"disclaimer.txt\"/><p>{{disclaimer}}</p></poml>" of
+                Left err -> expectationFailure ("expected Right, got Left: " <> err)
+                Right PomlDoc{pdLets} ->
+                    pdLets `shouldBe` [LetFile "disclaimer" "disclaimer.txt"]
+
+        it "rejects a <let> specifying both type and src with Left" $
+            parsePoml "<poml><let name=\"x\" type=\"string\" src=\"f.txt\"/></poml>"
+                `shouldSatisfy` isLeft
+
+        it "rejects a <let> specifying neither type nor src with Left" $
+            parsePoml "<poml><let name=\"x\"/></poml>" `shouldSatisfy` isLeft
 
         it "rejects an unknown tag with Left" $
             parsePoml "<poml><foo/></poml>" `shouldSatisfy` isLeft

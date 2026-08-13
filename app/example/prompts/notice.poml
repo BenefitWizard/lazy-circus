@@ -1,0 +1,4 @@
+<poml>
+  <let name="notice" src="refer-disclaimer.txt"/>
+  <p>{{notice}}</p>
+</poml>

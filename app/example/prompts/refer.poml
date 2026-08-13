@@ -1,0 +1,5 @@
+<poml>
+  <let name="user" type="string"/>
+  <let name="notice" src="refer-disclaimer.txt"/>
+  <p>Hi {{user}}! {{notice}}</p>
+</poml>

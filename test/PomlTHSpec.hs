@@ -65,6 +65,25 @@ $(makePoml "innerMulti" "app/example/prompts/innerMulti.poml")
 -- @greeting@ slot (spliced as a subtree) alongside a @string@-typed @topic@.
 $(makePoml "outer" "app/example/prompts/outer.poml")
 
+-- | Generates @ReferInput@ and @refer :: ReferInput -> [POML]@ from
+-- @app/example/prompts/refer.poml@ — a @string@-typed @who@ runtime input
+-- composed with a @src@-inlined @notice@ constant in one concatenation. The
+-- constant comes from @refer-disclaimer.txt@ (read verbatim at compile time).
+$(makePoml "refer" "app/example/prompts/refer.poml")
+
+-- | Generates @notice :: [POML]@ (no input record — only a @src@ constant)
+-- from @app/example/prompts/notice.poml@ — exercises a document whose sole
+-- variable is a compile-time file constant, so no @XInput@ record is produced.
+$(makePoml "notice" "app/example/prompts/notice.poml")
+
+-- | Generates @jsonFmt :: [POML]@ (no input record — only a @src@ constant)
+-- from @app/example/prompts/jsonFmt.poml@ — inlines a JSON response-format
+-- schema (@response-format.json@) verbatim into a @<code>@ block. Guards the
+-- primary use case: specifying the expected response shape inside a prompt.
+-- Special characters in the JSON (@{@, @}@, @"@, @\\@) survive because the file
+-- is read by @readFileUtf8@ (not XML-parsed) and emitted as a 'Text' literal.
+$(makePoml "jsonFmt" "app/example/prompts/jsonFmt.poml")
+
 spec :: Spec
 spec = describe "makePoml" $ do
     it "substitutes a string <let> variable into the rendered prompt" $
@@ -126,6 +145,24 @@ spec = describe "makePoml" $ do
     it "derives Show on the generated input record" $
         show (HelloInput{name = "X"})
             `shouldSatisfy` ("HelloInput" `isInfixOf`)
+
+    it "inlines a <let src=\"...\"> file verbatim into the prompt at compile time" $
+        renderPOMLtoPrompt (refer (ReferInput{user = "Alice"}))
+            `shouldBe` "<p>Hi Alice! See the docs.\n</p>"
+
+    it "lets a <let src=\"...\"> constant participate in a concatenation with a string field" $
+        renderPOMLtoPrompt (refer (ReferInput{user = "Bob"}))
+            `shouldBe` "<p>Hi Bob! See the docs.\n</p>"
+
+    it "generates a nullary value when the document's only <let> is a src constant" $
+        renderPOMLtoPrompt notice `shouldBe` "<p>See the docs.\n</p>"
+
+    it "inlines a JSON schema file verbatim (special chars preserved) into a <code> block" $ do
+        schema <- readFileUtf8 "app/example/prompts/response-format.json"
+        renderPOMLtoPrompt jsonFmt
+            `shouldBe` "<role>You are a structured responder.</role>"
+                    <> "<task>Reply with JSON in exactly this shape:</task>"
+                    <> "<code>" <> schema <> "</code>"
 
 -- NOTE: A `.poml` with a `poml`-typed variable inside a concatenation
 -- (e.g. {{pomlVar + "text"}}) causes `makePoml` to call `fail` at compile

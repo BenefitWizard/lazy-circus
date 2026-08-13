@@ -1,0 +1,6 @@
+<poml>
+  <let name="schema" src="response-format.json"/>
+  <role>You are a structured responder.</role>
+  <task>Reply with JSON in exactly this shape:</task>
+  <code>{{schema}}</code>
+</poml>

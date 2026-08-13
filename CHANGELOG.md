@@ -25,6 +25,15 @@ and this project adheres to the
   `Fragment`. It is observationally transparent —
   `renderPOMLtoPrompt [fragment xs] == renderPOMLtoPrompt xs`. The parser never
   produces `Fragment`; it is eDSL/composition-only.
+- POML: `<let name="..." src="file"/>` now inlines an external file's entire
+  contents verbatim as a **compile-time constant** (no JSON parsing, no
+  attribute navigation). `LetDecl` is now a sum type: `LetInput` (a `type`-declared
+  runtime field, as before) and `LetFile` (a `src` constant). In `makePoml`:
+  the file is read relative to the `.poml` and registered with
+  `addDependentFile`; a `src` variable is **not** a record field (it is baked
+  into the generated code as a `Text` literal), so a document whose only `<let>`
+  is a `src` yields a nullary function. Specifying both `type` and `src` (or
+  neither) is a parse error.
 
 ### Changed
 - **(Breaking)** POML public API now returns `[POML]` instead of a single

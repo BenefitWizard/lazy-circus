@@ -327,8 +327,8 @@ parsed = parsePomlText "<poml><p>Hello</p></poml>"
 `makePoml :: String -> FilePath -> Q [Dec]` (from `LazyCircus.AI.POML.TH`) reads a `.poml` file at
 compile time and generates:
 
-- a record type `{Base}Input` (only when the document has `<let name="…" type="…"/>` declarations), with one typed field per variable (`string` → `Text`, `boolean` → `Bool`, `number` → `Float`, `poml` → `POML`);
-- a function `{base} :: {Base}Input -> [POML]` (or a nullary `{base} :: [POML]` when there are no `<let>` declarations) whose body is a `[POML]` list — one element per top-level body node. A document may contain **one or more** top-level elements, each lowered to one list entry.
+- a record type `{Base}Input` (only when the document has `<let name="…" type="…"/>` **runtime-input** declarations), with one typed field per variable (`string` → `Text`, `boolean` → `Bool`, `number` → `Float`, `poml` → `POML`);
+- a function `{base} :: {Base}Input -> [POML]` (or a nullary `{base} :: [POML]` when there are no runtime-input `<let>`s) whose body is a `[POML]` list — one element per top-level body node. A document may contain **one or more** top-level elements, each lowered to one list entry.
 
 The `base` argument drives the generated names; the file is registered with `addDependentFile`
 so edits trigger recompilation.
@@ -372,14 +372,43 @@ outer (OuterInput{ body = fragment (inner inp), subject = "..." })
 `fragment` collapses the `[POML]` to one node (singleton → the node itself, multi-node →
 `Fragment`), so it works regardless of how many top-level nodes `inner` produces.
 
+**File constants (`<let src="..."/>`).** A `<let>` may instead name an external file to inline as
+a **compile-time constant**:
+
+```xml
+<let name="schema" src="response-format.json"/>
+```
+
+The file is read at compile time (path relative to the `.poml`), registered with
+`addDependentFile`, and its **entire contents are inlined verbatim** as a `Text` literal wherever
+`{{name}}` appears — on its own (`Text "<file contents>"`), inside a concatenation, or in a `<cp
+caption>`. There is **no JSON parsing and no attribute navigation**: the raw file text becomes the
+prompt text, which is exactly what you want to embed an expected response-format schema.
+
+A `src` variable is **not** a record field. Consequently a document whose `<let>`s are all `src`
+constants generates a **nullary** function (no `{Base}Input` record):
+
+```haskell
+-- jsonFmt.poml: <let name="schema" src="response-format.json"/> … {{schema}} …
+-- response-format.json is baked in at compile time; no input record is generated.
+jsonFmt :: [POML]
+```
+
+Internally `LetDecl` is a sum type: `LetInput` (a `type`-declared runtime field) and `LetFile` (a
+`src` constant). Specifying both `type` and `src`, or neither, is a parse error. `toPOML` /
+`parsePomlText` treat `src` declarations as metadata (like `type` ones); the inlining happens only
+in the `makePoml` TH macro.
+
 Consumer requirements for `makePoml`: keep `POML(..)` and the referenced `default*Params` values
 in scope, and enable `OverloadedStrings` (already a library default). If two splices in the same
 module produce record types that share a field name, also enable `DuplicateRecordFields`.
 
 See `app/example/Example/PomlDemo.hs` and the `app/example/prompts/*.poml` templates
 (`hello.poml`, `greeting.poml`, `contact.poml`, `caption.poml`, `multi.poml`) for the canonical
-worked example. `multi.poml` in particular demonstrates a document with multiple top-level body
-elements (`<role>` and `<task>` as siblings), lowered to a multi-element `[POML]` list.
+worked example. `multi.poml` demonstrates a document with multiple top-level body elements
+(`<role>` and `<task>` as siblings), lowered to a multi-element `[POML]` list. The `src` file
+constants are exercised by `refer.poml` / `notice.poml` / `jsonFmt.poml` (with `refer-disclaimer.txt`
+and `response-format.json`) — see `test/PomlTHSpec.hs`.
 
 ## Mail
 

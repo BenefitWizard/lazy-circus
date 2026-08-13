@@ -73,11 +73,19 @@ import Text.XML qualified as XML (Node (NodeContent, NodeElement))
 -- | Local name of an XML element, used as the structural tag identifier.
 type ElName = Text
 
--- | Declaration of a template variable produced from a @<let>@ element.
-data LetDecl = LetDecl
-    { letName :: Text      -- ^ variable name (the @name@ attribute)
-    , letType :: PomlType  -- ^ declared variable type (the @type@ attribute)
-    }
+-- | Declaration of a template variable produced from a @<let>@ element. A
+-- variable is either a runtime input (carrying a declared 'PomlType', supplied
+-- via the generated record) or a compile-time constant whose value is the
+-- entire contents of an external file, inlined verbatim by the @makePoml@ TH
+-- macro.
+data LetDecl
+    = LetInput Text PomlType
+    -- ^ @<let name=\"...\" type=\"...\"\/>@ — a runtime input field: the
+    -- variable name and its declared 'PomlType'.
+    | LetFile Text Text
+    -- ^ @<let name=\"...\" src=\"...\"\/>@ — a compile-time constant: the
+    -- variable name and a path (relative to the @.poml@ file) whose entire
+    -- contents are inlined at compile time.
     deriving (Eq, Show)
 
 -- | POML template variable type — the @type@ attribute of @<let>@.
@@ -204,18 +212,25 @@ walkRootChildren nodes = do
         | otherwise = RBody . NodeText <$> parseTemplateExprs t
     classifyRoot _ = Right RSkip
 
--- | Parse a @<let name="..." type="..."/>@ element into a 'LetDecl'.
+-- | Parse a @<let>@ element into a 'LetDecl'. The presence of a @src@
+-- attribute selects the constructor: @src@ inlines an external file as a
+-- compile-time constant ('LetFile'); otherwise a @type@ attribute declares a
+-- runtime input field ('LetInput'). Specifying both or neither is an error.
 parseLetDecl :: Element -> Either String LetDecl
 parseLetDecl e = do
     let attrs = elementAttributes e
     name <-
         maybe (Left "<let> requires a 'name' attribute") Right $
             Map.lookup "name" attrs
-    typeText <-
-        maybe (Left "<let> requires a 'type' attribute") Right $
-            Map.lookup "type" attrs
-    ptype <- parsePomlType typeText
-    pure LetDecl{letName = name, letType = ptype}
+    case (Map.lookup "type" attrs, Map.lookup "src" attrs) of
+        (Just typeText, Nothing) ->
+            LetInput name <$> parsePomlType typeText
+        (Nothing, Just src) ->
+            pure (LetFile name src)
+        (Just _, Just _) ->
+            Left "<let> may not specify both 'type' and 'src'"
+        (Nothing, Nothing) ->
+            Left "<let> requires either a 'type' or a 'src' attribute"
 
 -- | Map a @<let>@ @type@ attribute value to its 'PomlType'.
 parsePomlType :: Text -> Either String PomlType

@@ -39,12 +39,14 @@ module LazyCircus.AI.POML.TH
     ( makePoml
     ) where
 
+import Control.Exception (IOException)
 import Data.Char (toLower, toUpper)
 import Data.Text qualified as T
 import RIO.Map (Map)
 import RIO.Map qualified as Map
 import Language.Haskell.TH hiding (Code)
 import Language.Haskell.TH.Syntax (addDependentFile)
+import RIO.FilePath (takeDirectory, (</>))
 import LazyCircus.AI.POML.Parser
     ( LetDecl (..)
     , PomlDoc (..)
@@ -70,6 +72,28 @@ import RIO
 -- 'LazyCircus.App.Service.TH.recordBang'.
 recordBang :: Bang
 recordBang = Bang NoSourceUnpackedness NoSourceStrictness
+
+-- | How a declared template variable is realised in generated code. A runtime
+-- input is read from the generated record argument at runtime; a compile-time
+-- constant is a 'Text' literal baked into the splice (the entire contents of a
+-- @<let src=\"...\"\/>@ file, already read by 'resolveSrcLets').
+data VarKind
+    = VKInput PomlType
+    -- ^ runtime input field carrying a declared 'PomlType'.
+    | VKConst Text
+    -- ^ compile-time constant whose value is the inlined file contents.
+    deriving (Eq)
+
+-- | Total accessor for a 'LetDecl' variable name, regardless of constructor.
+letDeclName :: LetDecl -> Text
+letDeclName (LetInput n _) = n
+letDeclName (LetFile n _) = n
+
+-- | 'True' for a runtime input declaration ('LetInput'); 'False' for a
+-- compile-time file constant ('LetFile').
+isInputLet :: LetDecl -> Bool
+isInputLet LetInput{} = True
+isInputLet LetFile{} = False
 
 {- | Compile-time macro that reads, parses, and lowers a @.poml@ file into a
 Haskell record type (when the document declares template variables) and a
@@ -101,23 +125,71 @@ makePoml base filePath = do
     addDependentFile filePath
     case parsePoml content of
         Left err -> fail ("makePoml: failed to parse " <> filePath <> ": " <> err)
-        Right doc -> generateDecls base doc
+        Right doc -> do
+            constContents <- resolveSrcLets filePath doc
+            generateDecls base constContents doc
 
--- | Drive validation and code generation for a parsed 'PomlDoc'.
-generateDecls :: String -> PomlDoc -> Q [Dec]
-generateDecls base doc = do
-    mapM_ (validateLetName . letName) (pdLets doc)
-    let varTypes =
-            Map.fromList [(letName ld, letType ld) | ld <- pdLets doc]
+-- | Drive validation and code generation for a parsed 'PomlDoc'. The
+-- @constContents@ map carries the already-read contents of each @<let src=…>@
+-- file (keyed by variable name); runtime input variables are taken from the
+-- 'PomlDoc' declarations.
+generateDecls :: String -> Map Text Text -> PomlDoc -> Q [Dec]
+generateDecls base constContents doc = do
+    mapM_ (validateLetName . letDeclName) (pdLets doc)
+    let inputLets = [ld | ld <- pdLets doc, isInputLet ld]
+        varEnv = buildVarEnv constContents (pdLets doc)
         mArgName =
-            if null (pdLets doc)
+            if null inputLets
                 then Nothing
                 else Just (mkName "arg")
     bodyNodes <- requireNonEmptyBody doc
-    mapM_ (validateVarRefs varTypes) bodyNodes
-    bodyExp <- genBodyList varTypes mArgName bodyNodes
+    mapM_ (validateVarRefs varEnv) bodyNodes
+    bodyExp <- genBodyList varEnv mArgName bodyNodes
     funDecs <- genFun base mArgName bodyExp
-    pure (genInputRecord base doc <> funDecs)
+    pure (genInputRecord base inputLets <> funDecs)
+
+-- | Read each 'LetFile' source file (path relative to the @.poml@ directory),
+-- register it with 'addDependentFile', and return a map from variable name to
+-- the file's entire contents, read verbatim. Fails the splice with a clear
+-- message naming the resolved path if a file cannot be read.
+resolveSrcLets :: FilePath -> PomlDoc -> Q (Map Text Text)
+resolveSrcLets pomlPath doc = fmap Map.fromList (traverse readSrc fileLets)
+  where
+    dir = takeDirectory pomlPath
+    fileLets = [ld | ld <- pdLets doc, not (isInputLet ld)]
+    readSrc (LetFile n src) = do
+        let path = dir </> T.unpack src
+        addDependentFile path
+        result <- runIO (try (readFileUtf8 path) :: IO (Either IOException Text))
+        case result of
+            Right c -> pure (n, c)
+            Left exc ->
+                fail
+                    ( "makePoml: cannot read <let name=\""
+                        <> T.unpack n
+                        <> "\" src=\""
+                        <> T.unpack src
+                        <> "\"> (resolved to "
+                        <> path
+                        <> "): "
+                        <> show exc
+                    )
+    readSrc LetInput{} =
+        error "makePoml: internal error: LetInput reached resolveSrcLets"
+
+-- | Build the variable environment consumed by validation and codegen. Runtime
+-- inputs map to their declared 'PomlType'; file constants map to their inlined
+-- (already-read) contents as 'VKConst'. A missing entry for a 'LetFile' is an
+-- internal error — 'resolveSrcLets' guarantees one exists.
+buildVarEnv :: Map Text Text -> [LetDecl] -> Map Text VarKind
+buildVarEnv constContents = Map.fromList . map mk
+  where
+    mk (LetInput n ty) = (n, VKInput ty)
+    mk (LetFile n _) = case Map.lookup n constContents of
+        Just c -> (n, VKConst c)
+        Nothing ->
+            error
+                ("makePoml: internal error: missing src content for " <> T.unpack n)
 
 -- | Validate that a @<let>@ name is a legal lowercase Haskell identifier
 -- (not a reserved word), suitable for use as a record field selector. Calls
@@ -186,8 +258,8 @@ requireNonEmptyBody doc = case pdBody doc of
 -- | Fail if any 'TVar' in the body lacks a matching @<let>@ declaration.
 -- Both text content and attribute values (e.g. a @<cp>@ @caption@) are walked,
 -- so undeclared variables are reported with a clear message before codegen.
-validateVarRefs :: Map Text PomlType -> PomlNode -> Q ()
-validateVarRefs varTypes = checkNode
+validateVarRefs :: Map Text VarKind -> PomlNode -> Q ()
+validateVarRefs varEnv = checkNode
   where
     checkNode (NodeText exprs) = mapM_ checkExpr exprs
     checkNode (NodeElement _ attrs children) = do
@@ -195,22 +267,26 @@ validateVarRefs varTypes = checkNode
         mapM_ checkNode children
 
     checkExpr (TVar n)
-        | Map.member n varTypes = pure ()
+        | Map.member n varEnv = pure ()
         | otherwise = fail ("makePoml: undeclared variable: " <> T.unpack n)
     checkExpr (TLit _) = pure ()
     checkExpr (TConcat parts) = mapM_ checkExpr parts
 
 -- | Emit the @data {Base}Input = ...@ declaration when the document has
--- @<let>@ declarations; otherwise emit nothing.
-genInputRecord :: String -> PomlDoc -> [Dec]
-genInputRecord base doc
-    | null (pdLets doc) = []
+-- runtime-input @<let>@ declarations; otherwise emit nothing. Compile-time file
+-- constants ('LetFile') are excluded — they are inlined as literals, not record
+-- fields.
+genInputRecord :: String -> [LetDecl] -> [Dec]
+genInputRecord base inputLets
+    | null inputLets = []
     | otherwise = [DataD [] typeName [] Nothing [RecC typeName fields] derivings]
   where
     typeName = mkName (capitalize base <> "Input")
-    fields = map mkField (pdLets doc)
-    mkField LetDecl{letName = n, letType = ty} =
+    fields = map mkField inputLets
+    mkField (LetInput n ty) =
         (mkName (T.unpack n), recordBang, pomlTypeToHsType ty)
+    mkField LetFile{} =
+        error "makePoml: internal error: LetFile reached genInputRecord"
     derivings = [DerivClause Nothing [ConT ''Eq, ConT ''Show]]
 
 -- | Map a 'PomlType' to the corresponding Haskell field type.
@@ -240,79 +316,79 @@ genFun base mArgName body = do
 
 -- | Codegen a @[POML]@ list literal from the document body nodes — one entry
 -- per top-level node.
-genBodyList :: Map Text PomlType -> Maybe Name -> [PomlNode] -> Q Exp
-genBodyList varTypes mArgName nodes =
-    listE (map (genNode varTypes mArgName) nodes)
+genBodyList :: Map Text VarKind -> Maybe Name -> [PomlNode] -> Q Exp
+genBodyList varEnv mArgName nodes =
+    listE (map (genNode varEnv mArgName) nodes)
 
 -- | Codegen entry point for a single 'PomlNode'.
-genNode :: Map Text PomlType -> Maybe Name -> PomlNode -> Q Exp
-genNode varTypes mArgName (NodeText exprs) =
-    genNodeText varTypes mArgName exprs
-genNode varTypes mArgName (NodeElement name attrs children) =
+genNode :: Map Text VarKind -> Maybe Name -> PomlNode -> Q Exp
+genNode varEnv mArgName (NodeText exprs) =
+    genNodeText varEnv mArgName exprs
+genNode varEnv mArgName (NodeElement name attrs children) =
     case name of
         "p" ->
-            appE (conE 'Paragraph) (genChildren varTypes mArgName children)
+            appE (conE 'Paragraph) (genChildren varEnv mArgName children)
         "h" ->
             appE
                 (appE (conE 'Heading) (maybeIntExp (levelFromAttrs attrs)))
-                (genChildren varTypes mArgName children)
+                (genChildren varEnv mArgName children)
         "code" ->
             appE
                 (appE (conE 'Code) (maybeTextExp (syntaxFromAttrs attrs)))
-                (genChildren varTypes mArgName children)
+                (genChildren varEnv mArgName children)
         "b" ->
-            appE (conE 'Strong) (genChildren varTypes mArgName children)
+            appE (conE 'Strong) (genChildren varEnv mArgName children)
         "i" ->
-            appE (conE 'Italic) (genChildren varTypes mArgName children)
+            appE (conE 'Italic) (genChildren varEnv mArgName children)
         "u" ->
-            appE (conE 'Underline) (genChildren varTypes mArgName children)
+            appE (conE 'Underline) (genChildren varEnv mArgName children)
         "s" ->
-            appE (conE 'Strikethrough) (genChildren varTypes mArgName children)
+            appE (conE 'Strikethrough) (genChildren varEnv mArgName children)
         "span" ->
-            appE (conE 'Span) (genChildren varTypes mArgName children)
+            appE (conE 'Span) (genChildren varEnv mArgName children)
         "br" -> case children of
             [] -> conE 'Br
             _ -> fail "makePoml: <br> must not have children"
         "list" ->
             appE
                 (appE (conE 'List) (varE 'defaultListParams))
-                (genItems varTypes mArgName children)
+                (genItems varEnv mArgName children)
         "role" ->
             appE
                 (appE (conE 'Role) (varE 'defaultRoleParams))
-                (genChildren varTypes mArgName children)
+                (genChildren varEnv mArgName children)
         "task" ->
             appE
                 (appE (conE 'Task) (varE 'defaultTaskParams))
-                (genChildren varTypes mArgName children)
+                (genChildren varEnv mArgName children)
         "input" ->
             appE
                 (appE (conE 'ExampleInput) (varE 'defaultExampleInputParams))
-                (genChildren varTypes mArgName children)
+                (genChildren varEnv mArgName children)
         "output" ->
             appE
                 (appE (conE 'ExampleOutput) (varE 'defaultExampleOutputParams))
-                (genChildren varTypes mArgName children)
+                (genChildren varEnv mArgName children)
         "example" ->
             appE
                 (appE (conE 'Example) (varE 'defaultExampleParams))
-                (genChildren varTypes mArgName children)
+                (genChildren varEnv mArgName children)
         "cp" ->
             appE
-                (appE (conE 'CP) (appE (varE 'defaultCPParams) (genCaptionExpr varTypes mArgName (join (lookup "caption" attrs)))))
-                (genChildren varTypes mArgName children)
+                (appE (conE 'CP) (appE (varE 'defaultCPParams) (genCaptionExpr varEnv mArgName (join (lookup "caption" attrs)))))
+                (genChildren varEnv mArgName children)
         "examples" ->
             appE
                 (appE (conE 'ExampleSet) (varE 'defaultExampleSetParams))
-                (genExamples varTypes mArgName children)
+                (genExamples varEnv mArgName children)
         "item" ->
             fail "makePoml: <item> is only valid directly inside <list>"
         other ->
             fail ("makePoml: unknown element: <" <> T.unpack other <> ">")
 
 -- | Lower a 'NodeText' run into a 'POML' expression.
-genNodeText :: Map Text PomlType -> Maybe Name -> [TemplateExpr] -> Q Exp
-genNodeText varTypes mArgName exprs =
+genNodeText :: Map Text VarKind -> Maybe Name -> [TemplateExpr] -> Q Exp
+genNodeText varEnv mArgName exprs =
     case exprs of
         [TLit t] ->
             appE (conE 'Text) (textLitE t)
@@ -320,15 +396,15 @@ genNodeText varTypes mArgName exprs =
             singleTVar n
         _ -> do
             let atoms = concatMap flatten exprs
-                partExps = map (genConcatPart varTypes mArgName) atoms
-            validateNoPomlInConcat varTypes atoms
+                partExps = map (genConcatPart varEnv mArgName) atoms
+            validateNoPomlInConcat varEnv atoms
             appE (conE 'Text) (combineWith '(<>) partExps)
   where
     singleTVar n =
-        case Map.lookup n varTypes of
-            Just PTString ->
+        case Map.lookup n varEnv of
+            Just (VKInput PTString) ->
                 appE (conE 'Text) (fieldAccess n mArgName)
-            Just PTBoolean ->
+            Just (VKInput PTBoolean) ->
                 appE
                     (conE 'Text)
                     ( appE
@@ -341,22 +417,24 @@ genNodeText varTypes mArgName exprs =
                         )
                         (fieldAccess n mArgName)
                     )
-            Just PTNumber ->
+            Just (VKInput PTNumber) ->
                 appE
                     (conE 'Text)
                     (appE (varE 'tshow) (fieldAccess n mArgName))
-            Just PTPoml ->
+            Just (VKInput PTPoml) ->
                 fieldAccess n mArgName
+            Just (VKConst c) ->
+                appE (conE 'Text) (textLitE c)
             Nothing ->
                 fail ("makePoml: undeclared variable: " <> T.unpack n)
 
 -- | Validate that no @poml@-typed variable appears in a concatenation
 -- context (its 'POML' value cannot be appended to 'Text').
-validateNoPomlInConcat :: Map Text PomlType -> [TemplateExpr] -> Q ()
-validateNoPomlInConcat varTypes = mapM_ check
+validateNoPomlInConcat :: Map Text VarKind -> [TemplateExpr] -> Q ()
+validateNoPomlInConcat varEnv = mapM_ check
   where
     check (TVar n)
-        | Map.lookup n varTypes == Just PTPoml =
+        | Map.lookup n varEnv == Just (VKInput PTPoml) =
             fail
                 ( "makePoml: poml-typed variable '"
                     <> T.unpack n
@@ -365,13 +443,13 @@ validateNoPomlInConcat varTypes = mapM_ check
     check _ = pure ()
 
 -- | Render one atom of a concatenation to a 'Text'-valued expression.
-genConcatPart :: Map Text PomlType -> Maybe Name -> TemplateExpr -> Q Exp
+genConcatPart :: Map Text VarKind -> Maybe Name -> TemplateExpr -> Q Exp
 genConcatPart _ _ (TLit t) = textLitE t
-genConcatPart varTypes mArgName (TVar n) =
-    case Map.lookup n varTypes of
-        Just PTString ->
+genConcatPart varEnv mArgName (TVar n) =
+    case Map.lookup n varEnv of
+        Just (VKInput PTString) ->
             fieldAccess n mArgName
-        Just PTBoolean ->
+        Just (VKInput PTBoolean) ->
             appE
                 ( appE
                     ( appE
@@ -381,24 +459,26 @@ genConcatPart varTypes mArgName (TVar n) =
                     (textLitE "true")
                 )
                 (fieldAccess n mArgName)
-        Just PTNumber ->
+        Just (VKInput PTNumber) ->
             appE (varE 'tshow) (fieldAccess n mArgName)
-        Just PTPoml ->
+        Just (VKInput PTPoml) ->
             -- Defensive: 'validateNoPomlInConcat' should have caught this already.
             fail
                 ( "makePoml: poml-typed variable '"
                     <> T.unpack n
                     <> "' cannot participate in concatenation"
                 )
+        Just (VKConst c) ->
+            textLitE c
         Nothing ->
             fail ("makePoml: undeclared variable: " <> T.unpack n)
-genConcatPart varTypes mArgName (TConcat parts) =
-    combineWith '(<>) (map (genConcatPart varTypes mArgName) parts)
+genConcatPart varEnv mArgName (TConcat parts) =
+    combineWith '(<>) (map (genConcatPart varEnv mArgName) parts)
 
 -- | Codegen the children list of an element as @[POML]@.
-genChildren :: Map Text PomlType -> Maybe Name -> [PomlNode] -> Q Exp
-genChildren varTypes mArgName children =
-    listE (map (genNode varTypes mArgName) children)
+genChildren :: Map Text VarKind -> Maybe Name -> [PomlNode] -> Q Exp
+genChildren varEnv mArgName children =
+    listE (map (genNode varEnv mArgName) children)
 
 -- | Build a 'Text'-valued expression for a @<cp>@ @caption@ attribute value.
 -- The caller is expected to have collapsed the double-'Maybe' of an attribute
@@ -408,27 +488,27 @@ genChildren varTypes mArgName children =
 -- 'genNodeText' uses for text content. A @poml@-typed variable in the caption
 -- fails: @cpCaption :: Text@ cannot hold a 'POML' value.
 genCaptionExpr
-    :: Map Text PomlType
+    :: Map Text VarKind
     -> Maybe Name
     -> Maybe TemplateExpr
     -> Q Exp
 genCaptionExpr _ _ Nothing =
     fail "makePoml: <cp> requires a 'caption' attribute"
-genCaptionExpr varTypes mArgName (Just expr) = do
+genCaptionExpr varEnv mArgName (Just expr) = do
     let atoms = flatten expr
-    validateNoPomlInConcat varTypes atoms
+    validateNoPomlInConcat varEnv atoms
     case atoms of
-        [single] -> genConcatPart varTypes mArgName single
-        many -> combineWith '(<>) (map (genConcatPart varTypes mArgName) many)
+        [single] -> genConcatPart varEnv mArgName single
+        many -> combineWith '(<>) (map (genConcatPart varEnv mArgName) many)
 
 -- | Codegen the @[[POML]]@ body of a @<list>@ element. Each child must be
 -- an @<item>@.
-genItems :: Map Text PomlType -> Maybe Name -> [PomlNode] -> Q Exp
-genItems varTypes mArgName children =
+genItems :: Map Text VarKind -> Maybe Name -> [PomlNode] -> Q Exp
+genItems varEnv mArgName children =
     listE (map genItem children)
   where
     genItem (NodeElement "item" _ itemChildren) =
-        genChildren varTypes mArgName itemChildren
+        genChildren varEnv mArgName itemChildren
     genItem (NodeElement other _ _) =
         fail
             ( "makePoml: <list> may only contain <item> children, found <"
@@ -440,12 +520,12 @@ genItems varTypes mArgName children =
 
 -- | Codegen the @[[POML]]@ body of an @<examples>@ element. Each child must
 -- be an @<example>@.
-genExamples :: Map Text PomlType -> Maybe Name -> [PomlNode] -> Q Exp
-genExamples varTypes mArgName children =
+genExamples :: Map Text VarKind -> Maybe Name -> [PomlNode] -> Q Exp
+genExamples varEnv mArgName children =
     listE (map genExample children)
   where
     genExample (NodeElement "example" _ itemChildren) =
-        genChildren varTypes mArgName itemChildren
+        genChildren varEnv mArgName itemChildren
     genExample (NodeElement other _ _) =
         fail
             ( "makePoml: <examples> may only contain <example> children, found <"

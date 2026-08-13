@@ -24,8 +24,13 @@ extra-source-files:
     app/example/prompts/hello.poml
     app/example/prompts/inner.poml
     app/example/prompts/innerMulti.poml
+    app/example/prompts/jsonFmt.poml
     app/example/prompts/multi.poml
+    app/example/prompts/notice.poml
     app/example/prompts/outer.poml
+    app/example/prompts/refer.poml
+    app/example/prompts/refer-disclaimer.txt
+    app/example/prompts/response-format.json
 
 source-repository head
   type: git

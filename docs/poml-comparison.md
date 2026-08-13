@@ -27,7 +27,10 @@ Internally, `nodeToPOML :: PomlNode -> Either String POML` does the per-node low
 The format is XML with these top-level rules:
 
 - The document root must be `<poml>`.
-- `<let name="…" type="…"/>` children of `<poml>` are **declarations**: they declare template variables consumed by `makePoml` codegen and are otherwise ignored by `toPOML`. The four declared types are `string`, `boolean`, `number`, and `poml` (see `PomlType`: `PTString`, `PTBoolean`, `PTNumber`, `PTPoml`).
+- `<let>` children of `<poml>` are **declarations**: they declare template variables consumed by `makePoml` codegen and are otherwise ignored by `toPOML`. There are two forms, selected by the attributes:
+  - `<let name="…" type="…"/>` — a **runtime input field**. The four declared types are `string`, `boolean`, `number`, and `poml` (see `PomlType`: `PTString`, `PTBoolean`, `PTNumber`, `PTPoml`). It becomes a field of the generated `XInput` record.
+  - `<let name="…" src="file"/>` — a **compile-time constant**. The entire contents of `file` (path relative to the `.poml`) are inlined verbatim as a `Text` literal by `makePoml`; it does **not** become a record field. See [File constants (`src`)](#file-constants-src).
+  - Specifying both `type` and `src`, or neither, is a parse error.
 - The body is made of whitelisted element tags (see [Supported tags](#supported-tags)).
 - Template variables can be spliced into text via `{{name}}`, and multiple operands can be concatenated with `+`, e.g. `{{a + " " + b}}`. The placeholders are not special to the XML parser and may appear in text content or attribute values; any literal `<` or `&` inside text must still be XML-escaped by the author.
 
@@ -177,6 +180,39 @@ outer (OuterInput{ body = fragment (inner inp), subject = "..." })
 
 This works regardless of how many top-level nodes `inner` produces. The single-node case collapses (no `Fragment` wrapper); the multi-node case wraps in one `Fragment`.
 
+### File constants (`src`)
+
+`<let name="…" src="file"/>` inlines an external file as a **compile-time constant**. Unlike a `type="…"` declaration (a runtime input field), a `src` variable's value is fixed at compile time: `makePoml` reads the file — its path relative to the `.poml` file — inlines its **entire contents verbatim** (no JSON parsing, no trimming, no attribute navigation), and bakes the result into the generated code as a `Text` literal. The file is registered with `addDependentFile`, so editing it recompiles the splice.
+
+A `src` variable is **not** a record field. Wherever `{{name}}` appears, the inlined `Text` is substituted directly:
+
+- on its own as a whole text node → `Text "<file contents>"`;
+- inside a concatenation, e.g. `{{who + ": " + note}}` → `Text (who <> ": " <> "<file contents>")`;
+- in a `<cp caption="{{name}}">` → the caption becomes the literal `Text`.
+
+Because a `src` constant is always `Text`-valued, it may freely participate in concatenations (it is never `poml`-typed). A document whose **only** `<let>` is a `src` constant therefore generates a **nullary** function (no `XInput` record):
+
+```xml
+<poml>
+  <let name="disclaimer" src="disclaimer.txt"/>
+  <p>Read this: {{disclaimer}}</p>
+</poml>
+```
+
+```haskell
+-- disclaimer.txt contents are inlined; no record is generated
+renderPOMLtoPrompt disclaimer == "<p>Read this: <…disclaimer.txt…></p>"
+```
+
+```haskell
+-- a src constant composed with a string runtime input
+makePoml "refer" "app/example/prompts/refer.poml"
+-- refer :: ReferInput -> [POML]   — ReferInput{ user :: Text } (only the string field; 'notice' is a constant)
+refer (ReferInput{user = "Alice"})
+```
+
+Specifying both `type` and `src`, or neither, is a parse error. `toPOML`/`parsePomlText` treat `src` declarations as metadata (like `type` ones); the inlining happens only in the `makePoml` TH macro.
+
 ---
 
 ## The `makePoml` Template Haskell macro
@@ -189,19 +225,20 @@ makePoml "contact" "app/example/prompts/contact.poml"
 
 against a file declaring `<let name="firstName" type="string"/>` and `<let name="lastName" type="string"/>` produces:
 
-- a record type `ContactInput` with one field per `<let>` (field types follow `pomlTypeToHsType`: `string`→`Text`, `boolean`→`Bool`, `number`→`Float`, `poml`→`POML`), deriving `Eq` and `Show`;
+- a record type `ContactInput` with one field per `type`-declared `<let>` (field types follow `pomlTypeToHsType`: `string`→`Text`, `boolean`→`Bool`, `number`→`Float`, `poml`→`POML`), deriving `Eq` and `Show`. `<let src="…"/>` constants are **excluded** — they are inlined as `Text` literals, not record fields;
 - a function `contact :: ContactInput -> [POML]` whose body is the lowered `[POML]` list (one entry per top-level body node), with declared variables validated and spliced from the record.
 
-When the document has **no** `<let>` declarations, no record is generated and the function is nullary: `base :: [POML]`.
+When the document has **no** `type`-declared `<let>` (i.e. no runtime inputs — either no `<let>` at all, or only `src` constants), no record is generated and the function is nullary: `base :: [POML]`.
 
 The macro performs the following compile-time validation (failing the splice on any error):
 
 - every `<let>` name is a legal, non-reserved lowercase Haskell identifier (`validateLetName`, `isValidHsIdent`);
 - the body has at least one top-level node (`requireNonEmptyBody`); a document may contain one or more top-level elements;
 - every `{{name}}` reference has a matching `<let>` declaration (`validateVarRefs`);
-- no `poml`-typed variable appears inside a concatenation, since its `POML` value cannot be appended to `Text` (`validateNoPomlInConcat`).
+- no `poml`-typed variable appears inside a concatenation, since its `POML` value cannot be appended to `Text` (`validateNoPomlInConcat`). (`src` constants are `Text`-valued and are never restricted here.)
+- every `<let src="…"/>` file is readable (resolved relative to the `.poml`); the path is also registered with `addDependentFile` (`resolveSrcLets`).
 
-The source file is registered with `addDependentFile`, so editing the `.poml` triggers a recompile of any module that splices it.
+The source file is registered with `addDependentFile`, so editing the `.poml` triggers a recompile of any module that splices it; each `src`-referenced file is registered the same way.
 
 ### Consumer-side imports
 

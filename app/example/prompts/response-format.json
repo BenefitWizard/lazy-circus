@@ -1,0 +1,6 @@
+{
+  "summary": "string",
+  "categories": ["string"],
+  "confidence": "number",
+  "meta": { "source": "string", "note": "see \"README\"" }
+}
