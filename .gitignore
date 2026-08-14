@@ -7,5 +7,10 @@ dist-newstyle/
 docs/plans/
 docs/Ideas/
 docs/execution-logs/
+docs/execution-log-*.md
+docs/handover-*.md
 docs/code-reviews/
+docs/runbooks/
+docs/internal/
+AllServices_Generated.hs
 opencode.json
