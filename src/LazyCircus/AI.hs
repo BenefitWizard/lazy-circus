@@ -13,6 +13,20 @@
 module LazyCircus.AI
     ( AIRequest(..)
     , AgentRequest(..)
+    , AIParams(..)
+    , Chat.ReasoningEffort(..)
+    , mkAIRequest
+    , mkAgentRequest
+    , withModel
+    , withTemperature
+    , withTopP
+    , withMaxCompletionTokens
+    , withSeed
+    , withFrequencyPenalty
+    , withPresencePenalty
+    , withStop
+    , withUser
+    , withReasoningEffort
     , Conversation
     , HasAIMethods(..)
     , askAI
@@ -35,7 +49,7 @@ import LazyCircus.App.Log (AppLogMsg (SensitiveLogMsg), AppLogMsgWithContext (..
 import LazyCircus.App.Service (HasToolCallExec (..), HasToolDescriptions (..), ToolCallExec (..), ToolDescription (..))
 import OpenAI.V1 qualified as V1
 import OpenAI.V1.Chat.Completions qualified as Chat
-import OpenAI.V1.Models qualified as Models (Model)
+import OpenAI.V1.Models qualified as Models (Model (..))
 import OpenAI.V1.Tool qualified as Tool
 import OpenAI.V1.ToolCall qualified as TC
 import RIO
@@ -44,13 +58,133 @@ import qualified RIO.Vector as V
 
 -- data Model = DeepSeek deriving (Show, Eq)
 
+-- | Configurable OpenAI chat-completion parameters exposed at the request level.
+--
+-- Every field is 'Maybe': 'Nothing' keeps the default request behaviour, 'Just'
+-- overrides the corresponding field of the built 'Chat.CreateChatCompletion'.
+-- Build fragments with the @with*@ smart constructors and combine them with
+-- @<>@ / 'mappend' (right operand wins, see the 'Semigroup' instance).
+data AIParams = AIParams
+    { aiModel               :: Maybe Text                 -- ^ model name; 'Nothing' falls back to 'defaultModel'
+    , aiTemperature         :: Maybe Double               -- ^ sampling temperature
+    , aiTopP                :: Maybe Double               -- ^ nucleus sampling cutoff
+    , aiMaxCompletionTokens :: Maybe Natural              -- ^ completion length budget
+    , aiSeed                :: Maybe Integer              -- ^ deterministic-sampling seed
+    , aiFrequencyPenalty    :: Maybe Double               -- ^ penalty for repeated tokens
+    , aiPresencePenalty     :: Maybe Double               -- ^ penalty encouraging new topics
+    , aiStop                :: Maybe [Text]               -- ^ stop sequences (up to 4, API-side limit)
+    , aiUser                :: Maybe Text                 -- ^ end-user identifier for abuse tracking
+    , aiReasoningEffort     :: Maybe Chat.ReasoningEffort -- ^ reasoning depth for reasoning models
+    }
+    deriving (Show)
+
+-- | Right-biased merge of parameter fragments.
+-- LAW: identity: @p <> mempty = mempty <> p = p@.
+-- LAW: right bias: a 'Just' field of the right operand wins over the left
+--   operand's value; fields combine pointwise and are never concatenated
+--   (important for 'aiStop', which overrides rather than appends).
+instance Semigroup AIParams where
+    l <> r = AIParams
+        { aiModel = aiModel r <|> aiModel l
+        , aiTemperature = aiTemperature r <|> aiTemperature l
+        , aiTopP = aiTopP r <|> aiTopP l
+        , aiMaxCompletionTokens = aiMaxCompletionTokens r <|> aiMaxCompletionTokens l
+        , aiSeed = aiSeed r <|> aiSeed l
+        , aiFrequencyPenalty = aiFrequencyPenalty r <|> aiFrequencyPenalty l
+        , aiPresencePenalty = aiPresencePenalty r <|> aiPresencePenalty l
+        , aiStop = aiStop r <|> aiStop l
+        , aiUser = aiUser r <|> aiUser l
+        , aiReasoningEffort = aiReasoningEffort r <|> aiReasoningEffort l
+        }
+
+-- | All fields 'Nothing' — keeps the default request behaviour.
+-- LAW: identity holds via the 'Semigroup' instance: @x <> mempty = x@ and
+--   @mempty <> x = x@.
+instance Monoid AIParams where
+    mempty = AIParams
+        { aiModel = Nothing
+        , aiTemperature = Nothing
+        , aiTopP = Nothing
+        , aiMaxCompletionTokens = Nothing
+        , aiSeed = Nothing
+        , aiFrequencyPenalty = Nothing
+        , aiPresencePenalty = Nothing
+        , aiStop = Nothing
+        , aiUser = Nothing
+        , aiReasoningEffort = Nothing
+        }
+
+-- | Single-field fragment: model name override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withModel :: Text -> AIParams
+withModel v = mempty{aiModel = Just v}
+
+-- | Single-field fragment: sampling temperature override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withTemperature :: Double -> AIParams
+withTemperature v = mempty{aiTemperature = Just v}
+
+-- | Single-field fragment: nucleus sampling cutoff override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withTopP :: Double -> AIParams
+withTopP v = mempty{aiTopP = Just v}
+
+-- | Single-field fragment: completion length budget override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withMaxCompletionTokens :: Natural -> AIParams
+withMaxCompletionTokens v = mempty{aiMaxCompletionTokens = Just v}
+
+-- | Single-field fragment: deterministic-sampling seed override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withSeed :: Integer -> AIParams
+withSeed v = mempty{aiSeed = Just v}
+
+-- | Single-field fragment: repeated-token penalty override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withFrequencyPenalty :: Double -> AIParams
+withFrequencyPenalty v = mempty{aiFrequencyPenalty = Just v}
+
+-- | Single-field fragment: new-topic penalty override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withPresencePenalty :: Double -> AIParams
+withPresencePenalty v = mempty{aiPresencePenalty = Just v}
+
+-- | Single-field fragment: stop sequences override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withStop :: [Text] -> AIParams
+withStop v = mempty{aiStop = Just v}
+
+-- | Single-field fragment: end-user identifier override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withUser :: Text -> AIParams
+withUser v = mempty{aiUser = Just v}
+
+-- | Single-field fragment: reasoning depth override.
+-- POST-CONTRACT: All other fields are 'Nothing'.
+withReasoningEffort :: Chat.ReasoningEffort -> AIParams
+withReasoningEffort v = mempty{aiReasoningEffort = Just v}
+
 -- | Request payload for a structured AI completion.
 data AIRequest a = AIRequest
     { prompt :: [POML]       -- ^ user-facing prompt fragments
     , systemPrompt :: [POML] -- ^ system-level instruction fragments
     , outputType :: Proxy a  -- ^ phantom proxy guiding JSON decode target
     , thinkingEnabled :: Bool  -- ^ enable DeepSeek thinking mode
+    , requestParams :: AIParams -- ^ OpenAI parameters overlay; 'mempty' keeps defaults
     }
+
+-- | Smart constructor for 'AIRequest' with default behaviour.
+-- POST-CONTRACT: @thinkingEnabled = False@ and @requestParams = mempty@;
+--   override either via record update.
+mkAIRequest :: [POML] -> [POML] -> AIRequest a
+mkAIRequest prompt systemPrompt =
+    AIRequest
+        { prompt
+        , systemPrompt
+        , outputType = Proxy
+        , thinkingEnabled = False
+        , requestParams = mempty
+        }
 
 -- | Default model used for AI completions.
 defaultModel :: Models.Model
@@ -61,6 +195,32 @@ defaultModel = "deepseek-v4-flash"
 thinkingExtra :: Bool -> Maybe Object
 thinkingExtra True  = Just $ KM.fromList [("thinking", object ["type" .= ("enabled" :: Text)])]
 thinkingExtra False = Nothing
+
+-- | Overlay 'AIParams' on a base chat-completion request.
+-- POST-CONTRACT: Every 'Just' field replaces the base value; every 'Nothing'
+--   field resets to the API default ('Nothing'). 'aiModel' falls back to the
+--   base model. Fields not covered by 'AIParams' (messages, response_format,
+--   tools, tool_choice, extra, …) pass through untouched.
+applyParams :: AIParams -> Chat.CreateChatCompletion -> Chat.CreateChatCompletion
+applyParams params base = base
+    { Chat.model = maybe (baseModelOf base) Models.Model (aiModel params)
+    , Chat.temperature = aiTemperature params
+    , Chat.top_p = aiTopP params
+    , Chat.max_completion_tokens = aiMaxCompletionTokens params
+    , Chat.seed = aiSeed params
+    , Chat.frequency_penalty = aiFrequencyPenalty params
+    , Chat.presence_penalty = aiPresencePenalty params
+    , Chat.stop = V.fromList <$> aiStop params
+    , Chat.user = aiUser params
+    , Chat.reasoning_effort = aiReasoningEffort params
+    }
+
+-- | Read the model of a chat-completion request.
+-- A record pattern is used because 'DuplicateRecordFields' makes the qualified
+-- selector @Chat.model@ ambiguous (@ChatCompletionObject@ has a field of the
+-- same name).
+baseModelOf :: Chat.CreateChatCompletion -> Models.Model
+baseModelOf Chat.CreateChatCompletion{Chat.model = m} = m
 
 -- | Log reasoning_content from a response message's extra field.
 -- POST-CONTRACT: Logs reasoning content when present; does nothing otherwise.
@@ -115,7 +275,21 @@ data AgentRequest a = AgentRequest
     , agentSystemPrompt  :: [POML]    -- ^ system-level instruction fragments
     , agentMaxIterations :: Natural   -- ^ maximum ReAct iterations before giving up (must be >= 0, guaranteed by 'Natural')
     , thinkingEnabled :: Bool  -- ^ enable DeepSeek thinking mode
+    , agentParams :: AIParams -- ^ OpenAI parameters overlay; 'mempty' keeps defaults
     }
+
+-- | Smart constructor for 'AgentRequest' with default behaviour.
+-- POST-CONTRACT: @thinkingEnabled = False@ and @agentParams = mempty@;
+--   override either via record update.
+mkAgentRequest :: [POML] -> [POML] -> Natural -> AgentRequest a
+mkAgentRequest agentPrompt agentSystemPrompt agentMaxIterations =
+    AgentRequest
+        { agentPrompt
+        , agentSystemPrompt
+        , agentMaxIterations
+        , thinkingEnabled = False
+        , agentParams = mempty
+        }
 
 -- | Environment capability that exposes the OpenAI client methods used by this module.
 class HasAIMethods env where
@@ -133,7 +307,7 @@ PRE-CONTRACT: The input 'Conversation' does NOT begin with a 'Chat.System' messa
 POST-CONTRACT: Returns the decoded first response and an updated 'Conversation' that appends the assistant's reply (when a choice exists). The returned 'Conversation' does NOT contain a leading 'Chat.System'.
 -}
 askAIContinuing :: (HasAIMethods env, HasGLogFunc env, GMsg env ~ AppLogMsgWithContext, HasLoggingContext env, MonadReader env m, MonadIO m, FromJSON a) => AIRequest a -> Conversation -> m (Maybe a, Conversation)
-askAIContinuing (AIRequest prompt systemPrompt _outputType thinkingEnabled) conv = do
+askAIContinuing (AIRequest prompt systemPrompt _outputType thinkingEnabled requestParams) conv = do
     V1.Methods{V1.createChatCompletion} <- view aiMethodsL
     let
         sysMsg = Chat.System
@@ -147,7 +321,7 @@ askAIContinuing (AIRequest prompt systemPrompt _outputType thinkingEnabled) conv
             , extra = Nothing
             }
         messages = V.cons sysMsg (unConversation conv <> V.singleton usrMsg)
-        req = Chat._CreateChatCompletion
+        req = applyParams requestParams $ Chat._CreateChatCompletion
             { Chat.model = defaultModel
             , Chat.response_format = Just Chat.JSON_Object
             , Chat.messages = messages
@@ -256,7 +430,7 @@ solveWithAgentLoopContinuing ::
     , MonadUnliftIO m
     , FromJSON b
     ) => AgentRequest b -> Conversation -> m (Maybe b, Conversation)
-solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations, thinkingEnabled} conv = do
+solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations, thinkingEnabled, agentParams} conv = do
     (result, finalHistory) <- go agentMaxIterations initialMessages
     pure (result, conversationFromTurns (V.drop 1 finalHistory))
   where
@@ -280,7 +454,7 @@ solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentM
 
         let tools = if null toolDescs then Nothing
                     else Just $ V.fromList $ map toOpenAITool toolDescs
-            req = Chat._CreateChatCompletion
+            req = applyParams agentParams $ Chat._CreateChatCompletion
                 { Chat.model = defaultModel
                 , Chat.messages = history
                 , Chat.tools = tools

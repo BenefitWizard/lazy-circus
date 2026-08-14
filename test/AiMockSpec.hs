@@ -17,7 +17,7 @@ module AiMockSpec (spec) where
 import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson.KeyMap qualified as KM
 import DemoEnv (DemoConfig (..), defaultDemoConfig, withDemoApp)
-import LazyCircus.AI (AIRequest (..), AgentRequest (..))
+import LazyCircus.AI (AIRequest (thinkingEnabled), AgentRequest, mkAgentRequest, mkAIRequest)
 import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.Scene.AI qualified as Scene (ask, solveWithAgent)
 import LazyCircus.Scenario (evalScript)
@@ -79,24 +79,12 @@ mockCompletion contentText toolCalls finishReason =
 -- | A representative AI request reused across scenarios: a one-shot
 -- "calculator" prompt with no thinking and an empty tool list.
 calcAiReq :: AIRequest Value
-calcAiReq =
-    AIRequest
-        { prompt = ["Calculate 2+2"]
-        , systemPrompt = ["You are a calculator."]
-        , outputType = Proxy
-        , thinkingEnabled = False
-        }
+calcAiReq = mkAIRequest ["Calculate 2+2"] ["You are a calculator."]
 
 -- | Same as 'calcAiReq' but with 'thinkingEnabled = True'. Used by scenarios
 -- that need to assert the rendered request carries the DeepSeek thinking extra.
 calcAiReqThinking :: AIRequest Value
-calcAiReqThinking =
-    AIRequest
-        { prompt = ["Calculate 2+2"]
-        , systemPrompt = ["You are a calculator."]
-        , outputType = Proxy
-        , thinkingEnabled = True
-        }
+calcAiReqThinking = (mkAIRequest ["Calculate 2+2"] ["You are a calculator."]){thinkingEnabled = True}
 
 -- | A simple @ask@ script (no tools) used across scenarios.
 askScript :: Script (Maybe Value)
@@ -128,12 +116,7 @@ spec = aroundAll withTestApp $ do
             length captured `shouldBe` 2
 
         it "solveWithAgent consumes one completion per iteration" $ \app -> do
-            let req :: AgentRequest Value = AgentRequest
-                    { agentPrompt = ["test"]
-                    , agentSystemPrompt = ["test"]
-                    , agentMaxIterations = 5
-                    , thinkingEnabled = False
-                    }
+            let req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
                 script :: Script (Maybe Value) = AIScriptDef [] (Scene.solveWithAgent req)
             (_, result) <-
                 runWithAiMocks app [mockCompletion "{\"status\":\"ok\",\"code\":200}" Nothing "stop"] $

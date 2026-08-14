@@ -40,7 +40,7 @@ import LazyCircus.Scene.AI.Lang (ask)
 import LazyCircus.Scene.Log (slogInfo, swithLogCtx)
 
 import LazyCircus (tgScript, mailScript, aiScript, dbScript)
-import LazyCircus.AI (AIRequest(..))
+import LazyCircus.AI (mkAIRequest)
 import LazyCircus.AI.POML.Types
     ( POML, cp_, role_, task_, list_, examples_, exampleInput_, exampleOutput_
     , json, text
@@ -60,7 +60,6 @@ import Telegram.Bot.API.UpdatingMessages
     ( EditMessageTextRequest(..), defEditMessageText
     )
 import Telegram.Bot.API.Types (ReactionType(..))
-import Data.Proxy (Proxy)
 import Data.Aeson (FromJSON, ToJSON)
 import GHC.Generics (Generic)
 import Control.Exception (SomeException, toException)
@@ -249,12 +248,9 @@ mailScenario = do
 aiScenario :: ScenarioProgram Script serviceLib ()
 aiScenario = do
     logInfo "AI: starting"
-    let request = AIRequest
-          { prompt = [cp_ "Question" ["Describe a circus act in one sentence"]]
-          , systemPrompt = demoSystemPrompt
-          , outputType = Proxy @AiDescription
-          , thinkingEnabled = False
-          }
+    let request = mkAIRequest
+          [cp_ "Question" ["Describe a circus act in one sentence"]]
+          demoSystemPrompt
     mResult <- evalScript $ aiScript $ ask request
     case mResult of
         Nothing -> logWarn "AI: no response received"

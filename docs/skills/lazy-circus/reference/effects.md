@@ -202,23 +202,82 @@ AI request values use the `AIRequest` type from `LazyCircus.AI`:
 
 ```haskell
 data AIRequest a = AIRequest
-    { prompt :: [POML]
-    , systemPrompt :: [POML]
-    , outputType :: Proxy a
-    , thinkingEnabled :: Bool
+    { prompt :: [POML]           -- user-facing prompt fragments
+    , systemPrompt :: [POML]     -- system-level instruction fragments
+    , outputType :: Proxy a      -- phantom proxy guiding JSON decode target
+    , thinkingEnabled :: Bool    -- enable DeepSeek thinking mode
+    , requestParams :: AIParams  -- OpenAI parameters overlay; mempty keeps defaults
     }
 ```
+
+Build it with `mkAIRequest :: [POML] -> [POML] -> AIRequest a` (arguments:
+prompt, system prompt) — the phantom type is inferred at the use site,
+`thinkingEnabled` defaults to `False`, and `requestParams` defaults to
+`mempty`. Override either via record update.
 
 For tool-using agent loops, use `AgentRequest` (also from `LazyCircus.AI`):
 
 ```haskell
 data AgentRequest a = AgentRequest
-    { agentPrompt :: [POML]
-    , agentSystemPrompt :: [POML]
-    , agentMaxIterations :: Natural
-    , thinkingEnabled :: Bool
+    { agentPrompt :: [POML]         -- user-facing prompt fragments
+    , agentSystemPrompt :: [POML]   -- system-level instruction fragments
+    , agentMaxIterations :: Natural -- maximum ReAct iterations
+    , thinkingEnabled :: Bool       -- enable DeepSeek thinking mode
+    , agentParams :: AIParams       -- OpenAI parameters overlay; mempty keeps defaults
     }
 ```
+
+with its smart constructor
+`mkAgentRequest :: [POML] -> [POML] -> Natural -> AgentRequest a` (prompt,
+system prompt, iteration budget).
+
+### Request Parameters (`AIParams`)
+
+`AIParams` (from `LazyCircus.AI`, re-exported by `LazyCircus.Scene.AI`) is a
+right-biased `Semigroup`/`Monoid` overlay for OpenAI chat-completion
+parameters. Every field is `Maybe`; `Nothing` keeps the default request
+behaviour, `Just` overrides the corresponding request field.
+
+Build single-field fragments with the `with*` smart constructors and combine
+them with `<>`:
+
+| Constructor | Overrides |
+|---|---|
+| `withModel :: Text -> AIParams` | `model` (falls back to `deepseek-v4-flash` when unset) |
+| `withTemperature :: Double -> AIParams` | `temperature` |
+| `withTopP :: Double -> AIParams` | `top_p` |
+| `withMaxCompletionTokens :: Natural -> AIParams` | `max_completion_tokens` |
+| `withSeed :: Integer -> AIParams` | `seed` |
+| `withFrequencyPenalty :: Double -> AIParams` | `frequency_penalty` |
+| `withPresencePenalty :: Double -> AIParams` | `presence_penalty` |
+| `withStop :: [Text] -> AIParams` | `stop` sequences (overridden wholesale, never concatenated) |
+| `withUser :: Text -> AIParams` | end-user identifier |
+| `withReasoningEffort :: ReasoningEffort -> AIParams` | `reasoning_effort` (`ReasoningEffort(..)` is re-exported) |
+
+Semantics:
+
+- `mempty` keeps the default request behaviour (no sampling fields are sent)
+- `<>` is right-biased: a set field of the right operand wins, and list fields
+  (`aiStop`) are overridden wholesale, never concatenated
+- the overlay applies to `ask` requests and to EVERY agent-loop iteration
+- `response_format` and `tools`/`tool_choice` are intentionally not
+  overridable (the JSON decode contract depends on the former; tools are
+  registered at the scene level via `aiScriptWith` / `aiScriptWithAll`)
+- `thinkingEnabled` stays a separate `Bool` (it renders a DeepSeek-specific
+  `extra` object), not an `AIParams` field
+
+```haskell
+creativeAnswer :: AIScript (Maybe Answer, Conversation)
+creativeAnswer =
+    askContinuing req emptyConversation
+  where
+    req = (mkAIRequest [cp_ "Question" ["Tell me a joke"]] jokerSystemPrompt)
+        { requestParams = withTemperature 0.9 <> withMaxCompletionTokens 512
+        }
+```
+
+See `docs/ai-request-vs-openai-api.md` for the full mapping between `AIParams`
+and the OpenAI `CreateChatCompletion` fields.
 
 ### Conversation Threading
 
@@ -242,7 +301,8 @@ multiTurn = do
 Production AI behavior:
 
 - uses OpenAI-compatible client methods from the environment
-- hardcodes the chat model to `deepseek-v4-flash`
+- defaults the chat model to `deepseek-v4-flash` (`defaultModel`); override per request with `withModel` (`aiModel`)
+- applies the request's `AIParams` overlay (`requestParams` / `agentParams`) to every chat-completion request, including each agent-loop iteration
 - `ask` requests JSON object output and decodes the first choice only
 - `solveWithAgent` runs a ReAct loop: it sends the transcript, executes any tool calls via the
   registered `ToolCallExec`, appends results, and repeats until the model returns a final answer
@@ -406,8 +466,9 @@ module produce record types that share a field name, also enable `DuplicateRecor
 See `app/example/Example/PomlDemo.hs` and the `app/example/prompts/*.poml` templates
 (`hello.poml`, `greeting.poml`, `contact.poml`, `caption.poml`, `multi.poml`) for the canonical
 worked example. `multi.poml` demonstrates a document with multiple top-level body elements
-(`<role>` and `<task>` as siblings), lowered to a multi-element `[POML]` list. The `src` file
-constants are exercised by `refer.poml` / `notice.poml` / `jsonFmt.poml` (with `refer-disclaimer.txt`
+(`<role>` and `<task>` as siblings), lowered to a multi-element `[POML]` list. Template
+composition is exercised by `outer.poml` / `inner.poml` / `innerMulti.poml`, and the `src` file
+constants by `refer.poml` / `notice.poml` / `jsonFmt.poml` (with `refer-disclaimer.txt`
 and `response-format.json`) — see `test/PomlTHSpec.hs`.
 
 ## Mail

@@ -6,7 +6,9 @@ description: >
   the user mentions LazyCircus, lazy-circus, ScenarioProgram, Script, DBScript,
   TelegramScript, AIScript, MailScript, HTTPScript, evalScript, tgScript, mailScript,
   aiScript, httpScript, sendDocument, askContinuing, solveWithAgent,
-  solveWithAgentContinuing, AgentRequest, Conversation, DefaultPerformer, dbScript, DBScriptDef,
+  solveWithAgentContinuing, AIRequest, AgentRequest, AIParams, mkAIRequest, mkAgentRequest,
+  withModel, withTemperature, withStop, requestParams, agentParams, ReasoningEffort,
+  Conversation, DefaultPerformer, dbScript, DBScriptDef,
   findLocked, findAllLocked, LockSpec, HasLogLang, tgTest, TelegramTestScript, waitForReply, waitForMatching, OutgoingMessage,
   Mailboxes, UpdateFactory, mkTextUpdate, POML, makePoml, parsePoml, parsePomlText,
   POML.TH, POML.Parser, PomlDemo, or asks how to write scenarios, add new effects,
@@ -72,6 +74,7 @@ Read more than one reference file when a task crosses layers.
 - `AIScriptDef` takes a `[ToolDescription]` as its first argument; `aiScript` passes `[]` for backward compatibility.
 - For multi-turn AI, thread a `Conversation` with `askContinuing` / `solveWithAgentContinuing`. Stateless `ask` / `solveWithAgent` inject `emptyConversation` and discard the transcript.
 - A `Conversation` never holds a `Chat.System` message; build it only via `emptyConversation` or `conversationFromTurns`.
+- Build AI requests with `mkAIRequest` / `mkAgentRequest` (`LazyCircus.AI`, re-exported via `LazyCircus.Scene.AI`): the `requestParams` / `agentParams` fields are strict, so raw record construction must set them explicitly. Override OpenAI sampling parameters per request through the right-biased `AIParams` monoid: `(mkAgentRequest prompt sys 10){ agentParams = withModel "m" <> withTemperature 0.7 }`. `mempty` keeps the defaults (model falls back to `deepseek-v4-flash`); `<>` never concatenates (`withStop ["a"] <> withStop ["b"]` = `Just ["b"]`); the overlay applies in `ask` requests and in every agent-loop iteration. `thinkingEnabled` stays a separate `Bool` (DeepSeek `extra`), not an `AIParams` field; `response_format` and `tools` are intentionally not overridable.
 - Author prompts as `[POML]` fragments (the `prompt` / `systemPrompt` fields of `AIRequest` / `AgentRequest`). Prefer the `makePoml` TH macro (`LazyCircus.AI.POML.TH`) over hand-built AST: it reads a `.poml` file at compile time, emits a typed `Input` record (from `<let type="…">` runtime-input declarations) plus an `Input -> [POML]` function, and registers the file with `addDependentFile` so edits trigger recompilation. A `.poml` body may contain one or more top-level elements (e.g. `<role>` and `<task>` as siblings) — each is lowered to one `[POML]` entry, so a real prompt no longer needs to be wrapped in a single outer tag. The consumer module must keep `POML(..)` + the `default*Params` values in scope and enable `OverloadedStrings`.
 - A `<let name="…" src="file"/>` declaration inlines the file's entire contents **verbatim as a compile-time `Text` constant** (path relative to the `.poml`, registered with `addDependentFile`). It is **not** a runtime record field: a document whose only `<let>`s are `src` constants yields a nullary function. There is no JSON parsing or attribute navigation — the raw file text becomes prompt text (e.g. embed an expected response-format schema). `type` and `src` are mutually exclusive (specifying both, or neither, is a parse error).
 - `parsePomlText` (`LazyCircus.AI.POML.Parser`) is the pure, TH-free path from `.poml` text to a `[POML]` list (for tests / runtime). It cannot represent template concatenations (`{{a + " " + b}}`) or templated `<cp caption="{{...}}">` — those require the `makePoml` macro, which lowers them at the AST level. `renderPOMLtoPrompt :: [POML] -> Text` turns any `[POML]` list into the prompt text sent to the model.
@@ -124,6 +127,8 @@ Prefer LSP navigation for Haskell modules when possible.
 - Treating DB `create` helpers as if they returned a plain row instead of `Maybe`.
 - Calling `findLocked` / `findAllLocked` outside `withTransaction` and expecting a held lock — Postgres auto-commits the statement, so the lock is released immediately (a no-op). Always wrap locking reads in `withTransaction`.
 - Building a `Conversation` with a leading `Chat.System` message, or pattern-matching on the unexported `Conversation` constructor instead of using `emptyConversation` / `conversationFromTurns`.
+- Constructing `AIRequest` / `AgentRequest` via raw record syntax and omitting the strict `requestParams` / `agentParams` field — it fails to compile; use `mkAIRequest` / `mkAgentRequest` plus record-update overrides.
+- Expecting `AIParams` fragments to concatenate list fields (`withStop ["a"] <> withStop ["b"]`) — the `Semigroup` is right-biased and overrides wholesale.
 - Assuming tests execute async work or fake DB behavior.
 - Adding a new public effect without the supporting `Script` dispatch and stable public facade when needed.
 - Using `makeServiceLib` with `(Name, Name)` pairs instead of `(Name, Name, [(Name, String, String)])` triples.
@@ -150,3 +155,4 @@ Prefer LSP navigation for Haskell modules when possible.
 9. Are tests aligned with real async and DB behavior?
 10. Was `hpack` run before build or test?
 11. If prompt templates changed (`.poml` files, `makePoml` splices, or `POML` AST), does the consumer module keep `POML(..)` + `default*Params` in scope, is `OverloadedStrings` on, and does the generated `Input -> [POML]` function match the `<let>` declarations? If `<let src="..."/>` is used, is the referenced file present (relative to the `.poml`) and treated as a compile-time constant, not a record field?
+12. If AI requests changed, are they built via `mkAIRequest` / `mkAgentRequest` (or set `requestParams` / `agentParams` explicitly), and do `AIParams` merges rely on right bias rather than concatenation?

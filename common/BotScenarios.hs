@@ -25,7 +25,7 @@ import Common hiding (migration)
 import Control.Exception (ErrorCall (..))
 import Data.Aeson
 import LazyCircus (aiScript, dbScript, mailScript)
-import LazyCircus.AI (AgentRequest (..), AIRequest (..), Conversation, emptyConversation)
+import LazyCircus.AI (AIRequest, Conversation, emptyConversation, mkAgentRequest, mkAIRequest)
 import LazyCircus.AI.POML.Types (
     POML,
     cp_,
@@ -121,12 +121,7 @@ askAgentContinuing :: Conversation -> Text -> ScenarioProgram Script serviceLib 
 askAgentContinuing conv userQuery =
     withLogContext [("query", userQuery)] $ do
         logInfo "Agent: processing query (continuing)"
-        let req = AgentRequest
-                { agentPrompt = [text userQuery]
-                , agentSystemPrompt = circusAgentSystemPrompt
-                , agentMaxIterations = defaultAgentMaxIterations
-                , thinkingEnabled = False
-                }
+        let req = mkAgentRequest [text userQuery] circusAgentSystemPrompt defaultAgentMaxIterations
         eitherResult <- runSafely @SomeException $
             evalScript $ aiScriptWithAll $ solveWithAgentContinuing req conv
         case eitherResult of
@@ -193,12 +188,7 @@ reactionUserPrompt name desc =
 -- | Build an AI request that asks for a short audience reaction for the given act.
 mkReactionRequest :: Text -> Text -> AIRequest AudienceReaction
 mkReactionRequest name desc =
-    AIRequest
-        { systemPrompt = reactionSystemPrompt
-        , prompt = reactionUserPrompt name desc
-        , outputType = Proxy @AudienceReaction
-        , thinkingEnabled = False
-        }
+    mkAIRequest (reactionUserPrompt name desc) reactionSystemPrompt
 
 {- | Create a circus act, generate an AI audience reaction, update the act, and send a notification email.
 PRE-CONTRACT: A valid SMTP and AI configuration must be available at runtime.

@@ -1,7 +1,6 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeApplications #-}
 
 -- | Tests for the AI agent loop (solveWithAgent and solveWithAgentLoop).
 --
@@ -13,7 +12,7 @@ module AIAgentSpec (spec) where
 import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson.KeyMap qualified as KM
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
-import LazyCircus.AI (AIRequest(..), AgentRequest(..), HasAIMethods(..), askAIContinuing, conversationFromTurns, emptyConversation, solveWithAgentLoop, solveWithAgentLoopContinuing, unConversation)
+import LazyCircus.AI (AIParams (..), AIRequest, AgentRequest (agentParams, thinkingEnabled), HasAIMethods (..), askAIContinuing, conversationFromTurns, emptyConversation, mkAgentRequest, mkAIRequest, solveWithAgentLoop, solveWithAgentLoopContinuing, unConversation, withMaxCompletionTokens, withModel, withReasoningEffort, withStop, withTemperature)
 import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.App.Service (HasToolCallExec(..), ToolCallExec(..), ToolDescription(..))
 import SimpleServiceLib (AllServices)
@@ -24,6 +23,7 @@ import LazyCircus.Script (Script(..))
 import LazyCircus.Testing.Performer (runWithDefaultMocks, runScenarioProgram)
 import OpenAI.V1 qualified as V1
 import OpenAI.V1.Chat.Completions qualified as Chat
+import OpenAI.V1.Models qualified as Models (Model (..))
 import OpenAI.V1.ToolCall qualified as TC
 import OpenAI.V1.Usage (Usage(..))
 import RIO
@@ -88,15 +88,35 @@ spec = do
             -- `mempty` is the identity (emptyConversation == mempty by length).
             V.length (unConversation (a <> mempty)) `shouldBe` 1
 
+    describe "AIParams (Semigroup/Monoid)" $ do
+        it "mempty is the identity on both sides" $ do
+            let p = withTemperature 0.7 <> withModel "m1" <> withStop ["x"]
+            aiTemperature (p <> mempty) `shouldBe` Just 0.7
+            aiModel (p <> mempty) `shouldBe` Just "m1"
+            aiStop (p <> mempty) `shouldBe` Just ["x"]
+            aiTemperature (mempty <> p) `shouldBe` Just 0.7
+            aiModel (mempty <> p) `shouldBe` Just "m1"
+            aiStop (mempty <> p) `shouldBe` Just ["x"]
+        it "right operand wins on conflicting fields" $ do
+            let p = withTemperature 0.1 <> withTemperature 0.9
+            aiTemperature p `shouldBe` Just 0.9
+        it "overrides (not concatenates) list fields" $ do
+            let p = withStop ["a"] <> withStop ["b"]
+            aiStop p `shouldBe` Just ["b"]
+        it "merges disjoint fragments field-wise" $ do
+            let p = withModel "m" <> withTemperature 0.5 <> withMaxCompletionTokens 42
+            aiModel p `shouldBe` Just "m"
+            aiTemperature p `shouldBe` Just 0.5
+            aiMaxCompletionTokens p `shouldBe` Just 42
+        it "carries reasoning effort" $
+            case aiReasoningEffort (mempty <> withReasoningEffort Chat.ReasoningEffort_High) of
+                Just Chat.ReasoningEffort_High -> pure ()
+                _ -> expectationFailure "expected reasoning effort to survive the merge"
+
     aroundAll withTestApp $ do
         describe "solveWithAgent (test performer - returns Nothing)" $ do
             it "returns Nothing in test environment without API calls" $ \app -> do
-                let req = AgentRequest
-                        { agentPrompt = ["Calculate 2+2"]
-                        , agentSystemPrompt = ["You are a calculator."]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = False
-                        }
+                let req = mkAgentRequest ["Calculate 2+2"] ["You are a calculator."] 5
                     script :: Script (Maybe Value)
                     script = AIScriptDef [] (solveWithAgent req)
                 (_, result) <- runWithDefaultMocks app $ do
@@ -104,12 +124,7 @@ spec = do
                 result `shouldBe` (Nothing :: Maybe Value)
 
             it "returns Nothing even with maxIterations = 0 in test environment" $ \app -> do
-                let req = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 0
-                        , thinkingEnabled = False
-                        }
+                let req = mkAgentRequest ["test"] ["test"] 0
                     script :: Script (Maybe Value)
                     script = AIScriptDef [] (solveWithAgent req)
                 (_, result) <- runWithDefaultMocks app $ do
@@ -117,12 +132,7 @@ spec = do
                 result `shouldBe` (Nothing :: Maybe Value)
 
             it "returns Nothing with non-zero tool descriptions in test environment" $ \app -> do
-                let req = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 3
-                        , thinkingEnabled = False
-                        }
+                let req = mkAgentRequest ["test"] ["test"] 3
                     dummyDescs = [ToolDescription "test_tool" "A test tool" Nothing]
                     script :: Script (Maybe Value)
                     script = AIScriptDef dummyDescs (solveWithAgent req)
@@ -137,12 +147,7 @@ spec = do
                         atomicModifyIORef' apiCalledRef (\_ -> (True, ()))
                         fail "API should not have been called"
                     }
-                let req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 0
-                        , thinkingEnabled = False
-                        }
+                let req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 0
                 result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
                 result `shouldBe` Nothing
                 readIORef apiCalledRef >>= (`shouldBe` False)
@@ -151,12 +156,7 @@ spec = do
                 let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
                         pure $ mockCompletion "{\"result\": 42}" Nothing "stop"
                     }
-                let req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = False
-                        }
+                let req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
                 result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
                 result `shouldBe` Just (object ["result" .= (42 :: Int)])
 
@@ -180,12 +180,7 @@ spec = do
                     mockExec = ToolCallExec $ \toolName _argsValue -> do
                         atomicModifyIORef' toolCallCountRef (\c -> (c + 1, ()))
                         pure $ object ["status" .= ("executed" :: Text), "tool" .= toolName]
-                let req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = False
-                        }
+                let req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
                 result <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoop req)
                 result `shouldBe` Just (object ["status" .= ("ok" :: Text), "code" .= (200 :: Int)])
                 readIORef toolCallCountRef >>= (`shouldBe` 1)
@@ -204,12 +199,7 @@ spec = do
                             pure $ mockCompletion "keep going" (Just (V.fromList [toolCall])) "tool_calls"
                         }
                     mockExec = ToolCallExec $ \_ _ -> pure $ object ["result" .= ("ok" :: Text)]
-                let req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 2
-                        , thinkingEnabled = False
-                        }
+                let req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 2
                 result <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoop req)
                 result `shouldBe` Nothing
                 readIORef callCountRef >>= (`shouldBe` 2)
@@ -218,12 +208,7 @@ spec = do
                 let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
                         pure $ mockCompletion "" Nothing "stop"
                     }
-                let req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = False
-                        }
+                let req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
                 result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
                 result `shouldBe` Nothing
 
@@ -231,12 +216,7 @@ spec = do
                 let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
                         pure $ mockCompletion "not valid json {{{" Nothing "stop"
                     }
-                let req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = False
-                        }
+                let req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
                 result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
                 result `shouldBe` Just (String "not valid json {{{")
 
@@ -254,12 +234,7 @@ spec = do
                             , Chat.usage = Usage 0 0 0 Nothing Nothing
                             }
                     }
-                let req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = False
-                        }
+                let req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
                 result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
                 result `shouldBe` Nothing
 
@@ -269,12 +244,7 @@ spec = do
                         writeIORef requestRef (Just req)
                         pure $ mockCompletion "{\"ok\": true}" Nothing "stop"
                     }
-                let req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = True
-                        }
+                let req :: AgentRequest Value = (mkAgentRequest ["test"] ["test"] 5){thinkingEnabled = True}
                 result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
                 result `shouldBe` Just (object ["ok" .= True])
                 sentReq <- readIORef requestRef
@@ -283,6 +253,63 @@ spec = do
                         KM.lookup "thinking" extraObj `shouldSatisfy` isJust
                     Just Chat.CreateChatCompletion{Chat.extra = Nothing} ->
                         expectationFailure "Expected extra to be Just, got Nothing"
+                    Nothing -> expectationFailure "No request was captured"
+
+            it "sends request params when agentParams is set" $ \app -> do
+                requestRef <- newIORef (Nothing :: Maybe Chat.CreateChatCompletion)
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \req -> do
+                        writeIORef requestRef (Just req)
+                        pure $ mockCompletion "{\"ok\": true}" Nothing "stop"
+                    }
+                    req :: AgentRequest Value =
+                        (mkAgentRequest ["test"] ["test"] 5)
+                            { agentParams =
+                                withModel "my-model"
+                                    <> withTemperature 0.7
+                                    <> withMaxCompletionTokens 123
+                                    <> withStop ["END"]
+                                    <> withReasoningEffort Chat.ReasoningEffort_High
+                            }
+                result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
+                result `shouldBe` Just (object ["ok" .= True])
+                sentReq <- readIORef requestRef
+                case sentReq of
+                    Just Chat.CreateChatCompletion
+                        { Chat.model = sentModel
+                        , Chat.temperature = t
+                        , Chat.max_completion_tokens = mt
+                        , Chat.stop = st
+                        , Chat.reasoning_effort = re
+                        } -> do
+                            Models.text sentModel `shouldBe` "my-model"
+                            t `shouldBe` Just 0.7
+                            mt `shouldBe` Just 123
+                            st `shouldBe` Just (V.fromList ["END"])
+                            case re of
+                                Just Chat.ReasoningEffort_High -> pure ()
+                                _ -> expectationFailure "expected reasoning_effort = ReasoningEffort_High"
+                    Nothing -> expectationFailure "No request was captured"
+
+            it "keeps default model and no sampling fields when agentParams is mempty" $ \app -> do
+                requestRef <- newIORef (Nothing :: Maybe Chat.CreateChatCompletion)
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \req -> do
+                        writeIORef requestRef (Just req)
+                        pure $ mockCompletion "{\"ok\": true}" Nothing "stop"
+                    }
+                    req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
+                _ <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
+                sentReq <- readIORef requestRef
+                case sentReq of
+                    Just Chat.CreateChatCompletion
+                        { Chat.model = sentModel
+                        , Chat.temperature = t
+                        , Chat.max_completion_tokens = mt
+                        , Chat.stop = st
+                        } -> do
+                            Models.text sentModel `shouldBe` "deepseek-v4-flash"
+                            t `shouldBe` Nothing
+                            mt `shouldBe` Nothing
+                            st `shouldBe` Nothing
                     Nothing -> expectationFailure "No request was captured"
 
             it "preserves reasoning_content extra through tool-call iterations" $ \app -> do
@@ -329,12 +356,7 @@ spec = do
                         pure $ if n == 0 then firstResponse else secondResponse
                     }
                     mockExec = ToolCallExec $ \_ _ -> pure $ object ["status" .= ("ok" :: Text)]
-                let req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = True
-                        }
+                let req :: AgentRequest Value = (mkAgentRequest ["test"] ["test"] 5){thinkingEnabled = True}
                 result <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoop req)
                 result `shouldBe` Just (object ["status" .= ("done" :: Text)])
                 allReqs <- readIORef requestsRef
@@ -357,12 +379,7 @@ spec = do
                             [] -> error "No more mock responses"
                             (r : rest) -> (rest, r)
                     }
-                    req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = False
-                        }
+                    req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
                 (r1, conv1) <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoopContinuing req emptyConversation)
                 r1 `shouldBe` Just (object ["v" .= (1 :: Int)])
                 -- conv1 excludes the leading System: [User1, Assistant1].
@@ -398,12 +415,7 @@ spec = do
                             (r : rest) -> (rest, r)
                     }
                     mockExec = ToolCallExec $ \_ _ -> pure $ object ["status" .= ("ok" :: Text)]
-                    req :: AgentRequest Value = AgentRequest
-                        { agentPrompt = ["test"]
-                        , agentSystemPrompt = ["test"]
-                        , agentMaxIterations = 5
-                        , thinkingEnabled = False
-                        }
+                    req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
                 (r, conv1) <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoopContinuing req emptyConversation)
                 r `shouldBe` Just (object ["done" .= True])
                 -- conv1: [User1, Assistant(tool_calls), Tool(result), Assistant(final answer)].
@@ -431,12 +443,7 @@ spec = do
                             [] -> error "No more mock responses"
                             (r : rest) -> (rest, r)
                     }
-                    aiReq :: AIRequest Value = AIRequest
-                        { prompt = ["test"]
-                        , systemPrompt = ["test"]
-                        , outputType = Proxy
-                        , thinkingEnabled = False
-                        }
+                    aiReq :: AIRequest Value = mkAIRequest ["test"] ["test"]
                 (r1, conv1) <- runRIO (app & aiMethodsL .~ mockMethods) (askAIContinuing aiReq emptyConversation)
                 r1 `shouldBe` Just (object ["a" .= (1 :: Int)])
                 V.length (unConversation conv1) `shouldBe` 2
@@ -455,12 +462,7 @@ spec = do
 
         describe "ask (test performer - non-regression)" $ do
             it "returns Nothing in test environment without API calls" $ \app -> do
-                let aiReq :: AIRequest Value = AIRequest
-                        { prompt = ["Calculate 2+2"]
-                        , systemPrompt = ["You are a calculator."]
-                        , outputType = Proxy
-                        , thinkingEnabled = False
-                        }
+                let aiReq :: AIRequest Value = mkAIRequest ["Calculate 2+2"] ["You are a calculator."]
                     script :: Script (Maybe Value)
                     script = AIScriptDef [] (Scene.ask aiReq)
                 (_, result) <- runWithDefaultMocks app $ do

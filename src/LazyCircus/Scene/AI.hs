@@ -11,6 +11,20 @@ module LazyCircus.Scene.AI (
     solveWithAgentContinuing,
     AIScript,
     AgentRequest(..),
+    AIParams(..),
+    ReasoningEffort(..),
+    mkAgentRequest,
+    mkAIRequest,
+    withModel,
+    withTemperature,
+    withTopP,
+    withMaxCompletionTokens,
+    withSeed,
+    withFrequencyPenalty,
+    withPresencePenalty,
+    withStop,
+    withUser,
+    withReasoningEffort,
     Conversation,
     emptyConversation,
     -- Logging re-exports
@@ -22,7 +36,7 @@ module LazyCircus.Scene.AI (
 )
 where
 
-import LazyCircus.AI (AgentRequest(..), Conversation, emptyConversation)
+import LazyCircus.AI (AgentRequest (..), AIParams (..), Conversation, ReasoningEffort (..), emptyConversation, mkAgentRequest, mkAIRequest, withFrequencyPenalty, withMaxCompletionTokens, withModel, withPresencePenalty, withReasoningEffort, withSeed, withStop, withTemperature, withTopP, withUser)
 import LazyCircus.Scene.AI.Lang (AILangF (..))
 
 

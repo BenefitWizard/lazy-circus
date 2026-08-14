@@ -24,7 +24,7 @@ import Control.Exception qualified as E
 import Data.Aeson (Value)
 import DemoEnv (DemoConfig (..), defaultDemoConfig, withDemoApp)
 import LazyCircus (mailScript, tgScript)
-import LazyCircus.AI (AIRequest (..))
+import LazyCircus.AI (AIRequest, mkAIRequest)
 import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.Scene.AI qualified as Scene (ask)
 import LazyCircus.Scene.Mail.Lang qualified as Mail (makeMail, sendMail)
@@ -69,13 +69,7 @@ withBotTestApp action = withDemoApp botTestConfig $ \app -> action app
 
 -- | A representative one-shot AI @ask@ request (no tools, no thinking).
 calcAiReq :: AIRequest Value
-calcAiReq =
-    AIRequest
-        { prompt = ["Calculate 2+2"]
-        , systemPrompt = ["You are a calculator."]
-        , outputType = Proxy
-        , thinkingEnabled = False
-        }
+calcAiReq = mkAIRequest ["Calculate 2+2"] ["You are a calculator."]
 
 -- | A one-shot AI @ask@ script (no tools) reused across Mocked/Real scenarios.
 askScript :: Script (Maybe Value)
