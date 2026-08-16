@@ -12,10 +12,9 @@ module LazyCircus.DB.WithConnection (
 
 import Database.PostgreSQL.Simple (Connection)
 import LazyCircus.AI (HasAIMethods (..))
-import LazyCircus.App.Default (HasBotEnvs (..), HasExtraContext (..), HasJWTSettings (..), HasMailCreds (..), HasMainDb (..))
+import LazyCircus.App.Default (HasBotEnvs (..), HasExtraContext (..), HasJWTSettings (..), HasMailCreds (..), HasPgPool (..), HasPgPoolReadOnly (..))
 import LazyCircus.App.Log (HasLogQueue (..), HasLoggingContext (..))
 import LazyCircus.AsyncWorker.Types (HasScheduledActions (..))
-import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.Scene.DB.Class (HasDbConnection (..))
 import LazyCircus.Script (Script)
 import RIO
@@ -36,16 +35,16 @@ underlyingApp :: Lens' (AppWithConnection app) app
 underlyingApp = lens _underlyingApp (\x y -> x{_underlyingApp = y})
 
 -- | The injected connection is the active connection for DB interpreters.
-instance HasPgConnection (AppWithConnection app) where
-    postgresL = appConn
-
--- | The injected connection is also used by the generic DBScript performer.
 instance HasDbConnection (AppWithConnection app) where
     dbConnectionL = appConn
 
+-- | Delegates read-write PostgreSQL pool access to the underlying environment capability.
+instance (HasPgPool app) => HasPgPool (AppWithConnection app) where
+    pgPoolL = underlyingApp . pgPoolL
+
 -- | Nested read-only requests still delegate to the underlying environment capability.
-instance (HasPgConnectionReadOnly app) => HasPgConnectionReadOnly (AppWithConnection app) where
-    postgresReadOnlyL = underlyingApp . postgresReadOnlyL
+instance (HasPgPoolReadOnly app) => HasPgPoolReadOnly (AppWithConnection app) where
+    pgPoolReadOnlyL = underlyingApp . pgPoolReadOnlyL
 
 instance (HasLogFunc app) => HasLogFunc (AppWithConnection app) where
     logFuncL = underlyingApp . logFuncL
@@ -56,9 +55,6 @@ instance (HasGLogFunc app) => HasGLogFunc (AppWithConnection app) where
 
 instance (HasProcessContext app) => HasProcessContext (AppWithConnection app) where
     processContextL = underlyingApp . processContextL
-
-instance (HasMainDb app) => HasMainDb (AppWithConnection app) where
-    mainDbL = underlyingApp . mainDbL
 
 instance (HasBotEnvs app) => HasBotEnvs (AppWithConnection app) where
     botEnvsL = underlyingApp . botEnvsL

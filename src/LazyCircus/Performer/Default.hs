@@ -18,13 +18,13 @@ module LazyCircus.Performer.Default (
     -- runDefaultScenario,
 ) where
 
+import Data.Pool (withResource)
 import LazyCircus.AI (askAIContinuing, solveWithAgentLoopContinuing)
 import LazyCircus.App.Default
 import LazyCircus.App.Log
 import LazyCircus.App.Service (HasToolDescriptions (..), callViaServiceLib)
 import LazyCircus.AsyncWorker (scheduleAsyncAction)
 import LazyCircus.AsyncWorker.Types (HasScheduledActions)
-import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
 import LazyCircus.Scenario
@@ -165,9 +165,11 @@ instance KnownHowToEval Script (DefaultPerformer (DefaultApp serviceLib)) where
 -- corresponding language runner (runTelegram, runMail, runAI, runDB, runHTTP).
 -- PRE-CONTRACT: Telegram scripts require the requested bot name to be present
 -- in the environment's botEnvs map; DB scripts require a configured PostgreSQL
--- connection; HTTP scripts require a reachable BaseUrl.
+-- connection pool; HTTP scripts require a reachable BaseUrl.
 -- POST-CONTRACT: Each script variant is executed in its own interpreter context
--- with the appropriate environment projection applied.
+-- with the appropriate environment projection applied. A DB script checks out
+-- one pooled connection for its entire duration, so 'withTransaction' inside
+-- the script is safe.
 evalScriptDefault :: Script a -> DefaultPerformer (DefaultApp serviceLib) a
 evalScriptDefault (TelegramScriptDef name scr) = do
     botEnvs <- view botEnvsL
@@ -177,13 +179,15 @@ evalScriptDefault (TelegramScriptDef name scr) = do
 evalScriptDefault (MailScriptDef scr) = runMail scr
 evalScriptDefault (AIScriptDef descs scr) = local (toolDescriptionsL .~ descs) $ runAI scr
 evalScriptDefault (DBScriptDef db mode scr) = do
-    conn <- case mode of
-        ReadWrite -> view postgresL
+    pool <- case mode of
+        ReadWrite -> view pgPoolL
         ReadOnly -> do
-            mReadOnlyConn <- view postgresReadOnlyL
-            fallbackConn <- view postgresL
-            pure $ fromMaybe fallbackConn mReadOnlyConn
-    changeEnv (AppWithConnection conn) (runDB db mode scr)
+            mReadOnlyPool <- view pgPoolReadOnlyL
+            fallbackPool <- view pgPoolL
+            pure $ fromMaybe fallbackPool mReadOnlyPool
+    withRunInIO $ \runInIO ->
+        withResource pool $ \conn ->
+            runInIO $ changeEnv (AppWithConnection conn) (runDB db mode scr)
 evalScriptDefault (HTTPScriptDef baseUrl scr) = do
     manager <- view httpManagerL
     let clientEnv = mkClientEnv manager baseUrl

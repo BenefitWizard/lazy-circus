@@ -156,8 +156,8 @@ featureScenario = do
 
 `runAsync` does not define how work is executed. It delegates to the active interpreter.
 
-- in the default production runtime it is queued by `scheduleAsyncAction`
-- in tests it is captured in mocks and not executed
+- in the default production runtime it is queued by `scheduleAsyncAction` into the shared action queue, then drained by the async worker loop — `runAsyncWorker` for a single worker, or `runAsyncWorkerPool n` for n competing workers over the same queue (n = 0 clamps to 1, n > 1024 to 1024, each with a warning; cancelling the caller thread stops all workers)
+- in tests it is captured by default (`tcAsync = Mocked`) and not executed; with `tcAsync = Real` it is spawned on a background thread through the same test interpreter
 
 ```haskell
 cleanupLater :: Int32 -> ScenarioProgram Script serviceLib ()

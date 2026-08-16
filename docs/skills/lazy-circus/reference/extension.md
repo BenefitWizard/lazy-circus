@@ -610,7 +610,7 @@ Problem:
 
 Fix:
 
-- DB still uses a real PostgreSQL connection in this repository
+- DB still uses a real PostgreSQL database in this repository (each DB script checks out its own connection from the app's pool)
 - set up the test DB correctly before running DB tests
 
 ### 7. Assuming Test Async Work Is Executed

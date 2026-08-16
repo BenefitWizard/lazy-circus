@@ -68,7 +68,7 @@ description: >-
 
   </example>
 mode: subagent
-model: zai-coding-plan/glm-5.2
+model: zai-coding-plan/glm-5.3
 color: "#A8E6A1"
 tools:
   task: false

@@ -6,7 +6,7 @@
 module ServiceCallSpec (spec) where
 
 import Control.Exception (SomeException)
-import Database.PostgreSQL.Simple (close)
+import Data.Pool (destroyAllResources)
 import DemoEnv (setupDatabase, testConnectionString)
 import LazyCircus.App.Log (AppLogMsgWithContext(..), LoggingContext(..))
 import LazyCircus.App.Default (DefaultApp (..), DefaultAppConfig (..), MailCreds (..), newDefaultApp)
@@ -34,7 +34,7 @@ import Test.Hspec
 -- | Run a test action with a DefaultApp that has real service handlers.
 -- Uses aroundAll so the database and services are set up once for all tests.
 -- PRE-CONTRACT: PostgreSQL must be reachable at 127.0.0.1:5432.
--- POST-CONTRACT: Database connections are closed after the action.
+-- POST-CONTRACT: Database connection pools are released after the action.
 withServiceTestApp :: (DefaultApp AllServices -> IO ()) -> IO ()
 withServiceTestApp action = do
     setupDatabase
@@ -50,6 +50,7 @@ withServiceTestApp action = do
                 DefaultAppConfig
                     { cfgPgConnectionString = testConnectionString
                     , cfgPgConnectionStringReadOnly = Nothing
+                    , cfgPgPoolMaxResources = 10
                     , cfgBotConfigs = []
                     , cfgAiApiKey = Nothing
                     , cfgAiBaseUrl = Nothing
@@ -61,8 +62,8 @@ withServiceTestApp action = do
             pure app
         )
         ( \app' -> do
-            close (pgDbConnection app')
-            mapM_ close (pgDbConnectionReadOnly app')
+            destroyAllResources (pgDbPool app')
+            mapM_ destroyAllResources (pgDbPoolReadOnly app')
         )
         action
 

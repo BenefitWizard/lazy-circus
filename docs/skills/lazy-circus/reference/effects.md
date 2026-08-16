@@ -66,6 +66,7 @@ createAndUpdate = withTransaction $ do
 
 Important DB semantics:
 
+- each DB script checks out one connection from the app's PostgreSQL pool for its entire duration — concurrent scripts (including async workers) run on separate connections, so `withTransaction` and RLS settings never interleave across scripts; `ReadOnly` uses the read-only pool when configured, falling back to the read-write pool
 - `create` and `createAsIs` use `listToMaybe`; if the interpreter returns `[]`, they yield `Nothing`
 - write operations are blocked in `ReadOnly` mode by `DbReadOnlyViolation`
 - `withTransactionRLS` applies `SET LOCAL rls.<key> = ?` inside the transaction

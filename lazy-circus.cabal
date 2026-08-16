@@ -54,7 +54,6 @@ library
       LazyCircus.AsyncWorker
       LazyCircus.AsyncWorker.Types
       LazyCircus.Base64
-      LazyCircus.DB.Class
       LazyCircus.DB.Service
       LazyCircus.DB.Types
       LazyCircus.DB.Types.Embed
@@ -125,6 +124,7 @@ library
     , openai
     , openapi3
     , postgresql-simple
+    , resource-pool
     , rio
     , servant
     , servant-auth
@@ -190,6 +190,7 @@ library common-circus
     , openai
     , openapi3
     , postgresql-simple
+    , resource-pool
     , rio
     , servant
     , servant-auth
@@ -239,6 +240,7 @@ executable bot
     , openai
     , openapi3
     , postgresql-simple
+    , resource-pool
     , rio
     , servant
     , servant-auth
@@ -289,6 +291,7 @@ executable example
     , openai
     , openapi3
     , postgresql-simple
+    , resource-pool
     , rio
     , servant
     , servant-auth
@@ -314,11 +317,13 @@ test-suite lazy-circus-test
       AIAgentSpec
       AiMockSpec
       ArbitraryIOSpec
+      AsyncWorkerPoolSpec
       BotHandlerSpec
       BotScenariosSpec
       ChatStateStoreSpec
       ConfigurablePerformerSpec
       DBLangSpec
+      DbPoolSpec
       HTTPLangSpec
       LogSpec
       PomlEquivalenceSpec
@@ -362,6 +367,7 @@ test-suite lazy-circus-test
     , openai
     , openapi3
     , postgresql-simple
+    , resource-pool
     , rio
     , servant
     , servant-auth

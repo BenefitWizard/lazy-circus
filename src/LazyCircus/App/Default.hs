@@ -15,14 +15,14 @@ module LazyCircus.App.Default
     , BotEnvs
     , ExtraContext
     , MailCreds(..)
-    , PgMainDB
       -- * Configuration
     , DefaultAppConfig(..)
     , newDefaultApp
       -- * Application environment
     , DefaultApp(..)
       -- * Capability classes
-    , HasMainDb(..)
+    , HasPgPool(..)
+    , HasPgPoolReadOnly(..)
     , HasJWTSettings(..)
     , HasBotEnvs(..)
     , HasExtraContext(..)
@@ -38,13 +38,12 @@ module LazyCircus.App.Default
 import Crypto.JOSE (KeyMaterialGenParam (OctGenParam), genJWK)
 import Crypto.Random
 import qualified Control.Exception as E (onException)
+import Data.Pool (Pool, defaultPoolConfig, destroyAllResources, newPool, withResource)
 import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 import LazyCircus.AI (HasAIMethods (..))
 import LazyCircus.App.Log hiding (genLogFunc, logContext, logFunc, logQueue)
 import LazyCircus.App.Service
 import LazyCircus.AsyncWorker.Types (HasScheduledActions (..), ScheduledActions)
-import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
-import LazyCircus.Scene.DB.Class (HasDbConnection (..))
 import LazyCircus.Script (Script)
 import LazyCircus.Telegram (makeBotEnv)
 import LazyCircus.Telegram.Types (BotEnv)
@@ -103,6 +102,9 @@ data DefaultAppConfig serviceLib = DefaultAppConfig
     -- ^ PostgreSQL connection string for the primary read-write database
     , cfgPgConnectionStringReadOnly :: !(Maybe ByteString)
     -- ^ optional PostgreSQL connection string for a read-only replica
+    , cfgPgPoolMaxResources :: !Int
+    -- ^ cap on pooled PostgreSQL connections in total across all stripes;
+    -- must be at least 1 (validated by 'newDefaultApp')
     , cfgBotConfigs :: ![(Text, Text)]
     -- ^ (botName, botToken) pairs for Telegram bots to initialize
     , cfgAiApiKey :: !(Maybe Text)
@@ -120,32 +122,33 @@ data DefaultAppConfig serviceLib = DefaultAppConfig
     -- ^ collection of in-process service handlers
     }
 
--- | Legacy alias for the primary application database handle kept to preserve DefaultApp shape.
-type PgMainDB = Connection
+-- | Capability for accessing the read-write PostgreSQL connection pool from a reader environment.
+class HasPgPool env where
+    pgPoolL :: Lens' env (Pool Connection)
 
--- | Capability for accessing the main database handle from a reader environment.
-class HasMainDb env where
-    mainDbL :: Lens' env PgMainDB
+-- | Capability for accessing the optional read-only PostgreSQL connection pool from a reader environment.
+class HasPgPoolReadOnly env where
+    pgPoolReadOnlyL :: Lens' env (Maybe (Pool Connection))
 
 -- | Capability for accessing JWT settings from a reader environment.
 class HasJWTSettings env where
     jwtSettingsL :: Lens' env JWTSettings
 
 {- | Concrete backend runtime environment threaded through startup, workers, and interpreters.
-Includes read-write and optional read-only database connections, and a configurable SQL logging
-action used by the DebugInterpreter to trace Beam queries during development.
+Includes read-write and optional read-only PostgreSQL connection pools, and a configurable SQL
+logging action used by the DebugInterpreter to trace Beam queries during development.
 -}
 data DefaultApp serviceLib = App
     { logFunc :: LogFunc
     -- ^ RIO standard logging function
     , genLogFunc :: GLogFunc AppLogMsgWithContext
     -- ^ generic structured log writer
-    , pgDbConnection :: Connection
-    -- ^ primary read-write PostgreSQL connection
-    , pgDbConnectionReadOnly :: Maybe Connection
-    -- ^ optional read-only PostgreSQL replica connection
-    , appMainDb :: PgMainDB
-    -- ^ main database handle for legacy DB service layer
+    , pgDbPool :: Pool Connection
+    -- ^ pool of read-write PostgreSQL connections; checkout blocks when the
+    -- configured cap is exhausted
+    , pgDbPoolReadOnly :: Maybe (Pool Connection)
+    -- ^ optional pool of read-only PostgreSQL replica connections with the
+    -- same cap semantics as 'pgDbPool'
     , appProcessContext :: ProcessContext
     -- ^ RIO process context for subprocess management
     , botEnvs :: BotEnvs
@@ -177,26 +180,42 @@ data DefaultApp serviceLib = App
     }
 
 {- | Construct a fully initialized DefaultApp from raw configuration values.
-Connects to PostgreSQL, initializes Telegram bot environments, creates the
+Creates PostgreSQL connection pools, initializes Telegram bot environments, creates the
 AI client, generates JWT settings, and sets up all internal queues.
-If an IO step fails after opening a connection, opened connections are
-automatically closed before rethrowing the exception.
+If an IO step fails after creating the pools, created pools are automatically
+destroyed before rethrowing the exception.
 PRE-CONTRACT: cfgPgConnectionString points to a reachable PostgreSQL instance
-with the expected schema already migrated.
-POST-CONTRACT: Returns a DefaultApp with live connections and initialized
-resources. The caller is responsible for closing connections via bracket or
-similar cleanup mechanism.
+with the expected schema already migrated, and cfgPgPoolMaxResources >= 1.
+POST-CONTRACT: Returns a DefaultApp with live pools and initialized resources;
+each configured pool is probed at construction so an unreachable database fails
+startup. The caller is responsible for releasing the pools via
+'destroyAllResources' or a similar cleanup mechanism.
 -}
 newDefaultApp :: DefaultAppConfig serviceLib -> IO (DefaultApp serviceLib)
 newDefaultApp config = do
-    conn <- connectPostgreSQL (cfgPgConnectionString config)
-    E.onException (go conn) (close conn)
+    when (cfgPgPoolMaxResources config < 1) $
+        throwString $
+            "newDefaultApp: cfgPgPoolMaxResources must be >= 1, got "
+                <> show (cfgPgPoolMaxResources config)
+    rwPool <- newPool $ defaultPoolConfig (connectPostgreSQL (cfgPgConnectionString config)) close poolKeepOpenTime (cfgPgPoolMaxResources config)
+    E.onException (go rwPool) (destroyAllResources rwPool)
   where
-    go conn = do
-        mReadOnlyConn <- traverse connectPostgreSQL (cfgPgConnectionStringReadOnly config)
-        E.onException (buildRest conn mReadOnlyConn) (mapM_ close mReadOnlyConn)
+    -- | Seconds an idle pooled connection stays open before being reaped.
+    poolKeepOpenTime = 30
 
-    buildRest conn mReadOnlyConn = do
+    go rwPool = do
+        withResource rwPool (\_ -> pure ())
+        mReadOnlyPool <- traverse mkReadOnlyPool (cfgPgConnectionStringReadOnly config)
+        E.onException (buildRest rwPool mReadOnlyPool) (mapM_ destroyAllResources mReadOnlyPool)
+
+    -- | Create the read-only replica pool and probe it so an unreachable
+    -- replica fails construction.
+    mkReadOnlyPool connectionString = do
+        pool <- newPool $ defaultPoolConfig (connectPostgreSQL connectionString) close poolKeepOpenTime (cfgPgPoolMaxResources config)
+        E.onException (withResource pool (\_ -> pure ())) (destroyAllResources pool)
+        pure pool
+
+    buildRest rwPool mReadOnlyPool = do
         manager <- newTlsManager
         botEnvsVal <- fmap M.fromList $ forM (cfgBotConfigs config) $ \(name, tokenText) -> do
             botEnv <- makeBotEnv manager (Token tokenText, name)
@@ -222,9 +241,8 @@ newDefaultApp config = do
         pure App
             { logFunc = logFuncVal
             , genLogFunc = genLogFuncVal
-            , pgDbConnection = conn
-            , pgDbConnectionReadOnly = mReadOnlyConn
-            , appMainDb = conn
+            , pgDbPool = rwPool
+            , pgDbPoolReadOnly = mReadOnlyPool
             , appProcessContext = processCtx
             , botEnvs = botEnvsVal
             , jwtSettings = jwtSettingsVal
@@ -270,21 +288,13 @@ instance HasGLogFunc (DefaultApp serviceLib) where
 instance HasProcessContext (DefaultApp serviceLib) where
     processContextL = lens appProcessContext (\x y -> x{appProcessContext = y})
 
--- | Exposes the primary read-write PostgreSQL connection through the shared HasPgConnection capability.
-instance HasPgConnection (DefaultApp serviceLib) where
-    postgresL = lens pgDbConnection (\x y -> x{pgDbConnection = y})
+-- | Exposes the read-write PostgreSQL connection pool through the shared HasPgPool capability.
+instance HasPgPool (DefaultApp serviceLib) where
+    pgPoolL = lens pgDbPool (\x y -> x{pgDbPool = y})
 
--- | Satisfies HasDbConnection by sharing the primary PostgreSQL connection with the Scene DB layer.
-instance HasDbConnection (DefaultApp serviceLib) where
-    dbConnectionL = lens pgDbConnection (\x y -> x{pgDbConnection = y})
-
--- | Expose the optional read-only PostgreSQL connection through the shared HasPgConnectionReadOnly capability.
-instance HasPgConnectionReadOnly (DefaultApp serviceLib) where
-    postgresReadOnlyL = lens pgDbConnectionReadOnly (\x y -> x{pgDbConnectionReadOnly = y})
-
--- | Satisfies HasMainDb by delegating to the appMainDb field.
-instance HasMainDb (DefaultApp serviceLib) where
-    mainDbL = lens appMainDb (\x y -> x{appMainDb = y})
+-- | Exposes the optional read-only PostgreSQL connection pool through the shared HasPgPoolReadOnly capability.
+instance HasPgPoolReadOnly (DefaultApp serviceLib) where
+    pgPoolReadOnlyL = lens pgDbPoolReadOnly (\x y -> x{pgDbPoolReadOnly = y})
 
 -- | Satisfies HasJWTSettings by delegating to the jwtSettings field.
 instance HasJWTSettings (DefaultApp serviceLib) where

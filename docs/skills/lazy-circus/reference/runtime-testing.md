@@ -28,8 +28,8 @@ Note: `runDefaultScenario` is not currently exported. Production scenarios are r
 
 `DefaultApp serviceLib` contains:
 
-- primary PostgreSQL connection
-- optional read-only PostgreSQL connection
+- primary PostgreSQL connection pool (`pgDbPool`; total connection cap set by `cfgPgPoolMaxResources` in `DefaultAppConfig`; every DB script checks out one connection for its whole duration)
+- optional read-only PostgreSQL connection pool (`pgDbPoolReadOnly`; `ReadOnly` scripts fall back to the primary pool when it is unset)
 - Telegram bot environments
 - OpenAI client methods
 - SMTP credentials
@@ -42,6 +42,10 @@ Note: `runDefaultScenario` is not currently exported. Production scenarios are r
 - tool call executor for dispatching named tool calls with JSON arguments
 - shared TLS connection manager for HTTP client requests
 
+`newDefaultApp` probes each configured pool at construction (an unreachable database
+fails startup) and validates `cfgPgPoolMaxResources >= 1`. The caller must release the
+pools via `destroyAllResources` after cancelling worker threads.
+
 ### Wrapper Environments
 
 #### `AppWithConnection`
@@ -51,7 +55,9 @@ Module: `LazyCircus.DB.WithConnection`
 Use this when one interpreter must run against a selected DB connection while preserving access
 to the rest of the application environment.
 
-The default performer uses it to choose between read-write and read-only DB connections.
+The default performer checks out one connection per DB script from the app's pool — the
+read-only pool when configured (falling back to the read-write pool) — and projects into
+`AppWithConnection` for the duration of the script.
 
 #### `AppWithBotEnv`
 
@@ -76,27 +82,49 @@ This is not a lens update. It is a pure projection from outer environment to inn
 
 There are two important execution entry points:
 
-1. `run` from `LazyCircus.Scenario` together with the generic `ScenarioPerformer Script serviceLib`
-   instance in `LazyCircus.Performer`
+1. `run` from `LazyCircus.Scenario` together with the `ScenarioPerformer`
+   instance for `DefaultPerformer` (defined in `LazyCircus.Performer.Default`;
+   `LazyCircus.Performer` re-exports that module)
 2. `evalScriptDefault` from `LazyCircus.Performer.Default` — the production dispatch that
    pattern-matches on `Script` variants
 
-The generic `ScenarioPerformer Script serviceLib` instance:
+The production `ScenarioPerformer` instance:
 
-- dispatches `Script` by calling `runTelegram`, `runMail`, `runAI`, `runDB`, and `runHTTP`
-- uses `async` directly for `runAsync`
-- returns `mempty` from `getExtraContext'`
+- dispatches `Script` through `evalScriptDefault` (which calls `runTelegram`, `runMail`,
+  `runAI`, `runDB`, and `runHTTP`)
+- queues async work via `scheduleAsyncAction`
+- reads the real `extraContext` map from `DefaultApp`
 
 The default performer's `evalScriptDefault` is the production-specific dispatch. It:
 
 - looks up the requested Telegram bot name and throws `NoBotConfigured` when absent
 - projects into `AppWithBotEnv` before running `runTelegram`
-- projects into `AppWithConnection` before running `runDB`
-- uses the read-only PostgreSQL connection when configured and falls back to the primary one otherwise
+- checks out one pooled connection per DB script (read-only pool when configured,
+  read-write pool otherwise) and projects into `AppWithConnection` before running `runDB`
 - reads the real `extraContext` map from `DefaultApp`
 - queues async work via `scheduleAsyncAction`
 
 Tests use a third path, `runScenarioProgram`, which captures async requests instead of executing them.
+
+### Async Worker Pool
+
+`runAsync` in production queues the scenario via `scheduleAsyncAction` into one shared
+`TQueue`. Worker loops drain that queue:
+
+- `runAsyncWorker` — the single-worker drain loop (blocks forever; run it in a dedicated thread)
+- `runAsyncWorkerPool :: Word -> (ScenarioProgram sc sl () -> RIO env ()) -> RIO env ()` —
+  runs n competing copies of the same loop over the shared queue (work-stealing via
+  competing `readTQueue`). n = 0 is clamped to 1 and n > 1024 to 1024, each with a
+  warning log; cancelling or killing the calling thread stops all workers.
+
+Each DB script executed by a worker checks out its own connection from the app pool, so
+concurrent deferred tasks never share a PostgreSQL session (`test/AsyncWorkerPoolSpec.hs`
+and `test/DbPoolSpec.hs` prove the parallelism, distinct connections, and error isolation).
+
+Teardown order matters: cancel the worker threads first (in-flight `withResource`
+checkouts then finish or are destroyed), then call `destroyAllResources` on both pools
+(it does not wait for in-flight users). The demo app wires this in `withDemoApp`, with
+the pool size read from the `ASYNC_WORKERS` env var (default 1).
 
 ## Testing
 
@@ -119,7 +147,7 @@ shared-runner architecture as production:
 The main difference is the capability layer behind that runner. By default (via `defaultTestConfig`),
 all mockable sub-languages are mocked:
 
-- DB capability uses the real configured connection (always real — no mock)
+- DB capability checks out a real connection from the app's pool for each DB script (always real — no mock)
 - Telegram capability is replaced with capture-oriented mocks (`tcTelegram = Mocked`)
 - Mail capability reuses real mail construction but captures sends (`tcMailSend = Mocked`)
 - AI capability uses a transport-level mock with FIFO canned responses (`tcAI = Mocked`)
@@ -209,7 +237,7 @@ captures side effects; `Real` delegates to production implementations without ca
 | Mail `makeMail` | — (always real) | uses real mail construction from env creds | same |
 | AI `ask` / `askContinuing` / `solveWithAgent` / `solveWithAgentContinuing` | `tcAI` | transport-level intercept: overrides `aiMethodsL` with `buildMockAiMethods`, which captures every rendered request (`readAiRequests`) and dequeues FIFO canned `ChatCompletionObject` responses; empty queue yields `emptyCompletion` → `Nothing` | delegates to real `askAIContinuing` / `solveWithAgentLoopContinuing` WITHOUT overriding `aiMethodsL` (real OpenAI client); `readAiRequests` stays empty |
 | HTTP `runClient` | — (always real) | real execution via servant-client against target base URL | same |
-| DB | — (always real) | runs against a real DB connection | same |
+| DB | — (always real) | runs against a real DB (one pooled connection per script) | same |
 | Logging | — (always captured) | captured in refs, not pushed to shared queue | same |
 | `runAsync` | `tcAsync` | captures scenario without executing it (`readScheduledScenarios`) | spawns the scenario on a background thread through the same test interpreter; side effects land in the usual capture buffers / mailbox (no capture in `readScheduledScenarios`) |
 

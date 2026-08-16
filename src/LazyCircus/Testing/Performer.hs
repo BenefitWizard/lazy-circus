@@ -61,13 +61,13 @@ module LazyCircus.Testing.Performer (
 )
 where
 
+import Data.Pool (Pool, withResource)
 import Database.PostgreSQL.Simple qualified as Simple
 import LazyCircus.AI (HasAIMethods (..), askAIContinuing, solveWithAgentLoopContinuing)
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
 import LazyCircus.App.Service (HasServiceLib (..), HasToolCallExec (..), HasToolDescriptions (..), callViaServiceLib)
 import LazyCircus.AsyncWorker.Types (HasScheduledActions (..))
-import LazyCircus.DB.Class (HasPgConnection (..), HasPgConnectionReadOnly (..))
 import LazyCircus.DB.Types (PgDB)
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
@@ -84,7 +84,7 @@ import LazyCircus.Scenario
 import Control.Concurrent.STM (retry)
 import GHC.Stack (HasCallStack, callStack)
 import LazyCircus.Scene.AI.Class (AILangPerformer (..), runAI)
-import LazyCircus.Scene.DB.Class (HasDbConnection (..), runDB)
+import LazyCircus.Scene.DB.Class (runDB)
 import LazyCircus.Scene.DB.Lang (DBScript)
 import LazyCircus.Scene.HTTP.Class (HTTPPerformer (..), runHTTP)
 import LazyCircus.Scene.Log (timedAndLog)
@@ -289,21 +289,13 @@ instance HasGLogFunc (EnvWithMocks serviceLib) where
 instance HasProcessContext (EnvWithMocks serviceLib) where
     processContextL = lens defaultApp (\env app -> env{defaultApp = app}) . processContextL
 
--- | Delegates primary PostgreSQL access to the wrapped DefaultApp.
-instance HasPgConnection (EnvWithMocks serviceLib) where
-    postgresL = lens defaultApp (\env app -> env{defaultApp = app}) . postgresL
+-- | Delegates primary PostgreSQL pool access to the wrapped DefaultApp.
+instance App.HasPgPool (EnvWithMocks serviceLib) where
+    pgPoolL = lens defaultApp (\env app -> env{defaultApp = app}) . App.pgPoolL
 
--- | Delegates read-only PostgreSQL access to the wrapped DefaultApp.
-instance HasPgConnectionReadOnly (EnvWithMocks serviceLib) where
-    postgresReadOnlyL = lens defaultApp (\env app -> env{defaultApp = app}) . postgresReadOnlyL
-
--- | Shares the primary PostgreSQL connection as the generic DB connection.
-instance HasDbConnection (EnvWithMocks serviceLib) where
-    dbConnectionL = lens defaultApp (\env app -> env{defaultApp = app}) . dbConnectionL
-
--- | Delegates legacy main-db access to the wrapped DefaultApp.
-instance App.HasMainDb (EnvWithMocks serviceLib) where
-    mainDbL = lens defaultApp (\env app -> env{defaultApp = app}) . App.mainDbL
+-- | Delegates read-only PostgreSQL pool access to the wrapped DefaultApp.
+instance App.HasPgPoolReadOnly (EnvWithMocks serviceLib) where
+    pgPoolReadOnlyL = lens defaultApp (\env app -> env{defaultApp = app}) . App.pgPoolReadOnlyL
 
 -- | Delegates JWT settings access to the wrapped DefaultApp.
 instance App.HasJWTSettings (EnvWithMocks serviceLib) where
@@ -591,11 +583,16 @@ runScript (HTTPScriptDef baseUrl scr) = do
 runScenarioProgram :: ScenarioProgram Script serviceLib a -> TestInterpreter serviceLib a
 runScenarioProgram = run
 
--- | Run a DB script using the same connection-selection projection as production.
+-- | Run a DB script using the same pool-selection projection as production.
+-- PRE-CONTRACT: The wrapped DefaultApp must carry a configured PostgreSQL pool
+-- (see 'App.newDefaultApp'); one connection is checked out for the whole
+-- script, so 'withTransaction' inside the script is safe.
 runDBWithMockLogging :: PgDB db -> DbMode -> DBScript db a -> TestInterpreter serviceLib a
 runDBWithMockLogging db mode script = do
-    conn <- asks (selectDbConnection mode)
-    changeEnv (AppWithConnection conn) (runDB db mode script)
+    pool <- asks (selectDbPool mode)
+    withRunInIO $ \runInIO ->
+        withResource pool $ \conn ->
+            runInIO $ changeEnv (AppWithConnection conn) (runDB db mode script)
 
 -- | Run a Telegram script using the same bot-environment projection as production.
 --
@@ -858,17 +855,17 @@ buildMail recipient subject body = do
     creds <- view App.mailCredsL
     pure $ Mail.makeMail' creds recipient subject body
 
--- | Select the same database connection that production script dispatch would choose for the given mode.
-selectDbConnection :: DbMode -> EnvWithMocks serviceLib -> Simple.Connection
-selectDbConnection ReadWrite env = App.pgDbConnection $ defaultApp env
-selectDbConnection ReadOnly env = fromMaybe primary maybeReadOnly
+-- | Select the same database connection pool that production script dispatch would choose for the given mode.
+selectDbPool :: DbMode -> EnvWithMocks serviceLib -> Pool Simple.Connection
+selectDbPool ReadWrite env = App.pgDbPool $ defaultApp env
+selectDbPool ReadOnly env = fromMaybe primary maybeReadOnly
   where
     -- | The wrapped application environment.
     app = defaultApp env
-    -- | The primary read-write connection used as fallback.
-    primary = App.pgDbConnection app
-    -- | The optional read-only connection, if configured.
-    maybeReadOnly = App.pgDbConnectionReadOnly app
+    -- | The primary read-write pool used as fallback.
+    primary = App.pgDbPool app
+    -- | The optional read-only pool, if configured.
+    maybeReadOnly = App.pgDbPoolReadOnly app
 
 -- | Append immediate Telegram requests to the mock log while preserving external read order.
 logTgRequests :: [WithImportance SendMessageRequest] -> TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib)) ()

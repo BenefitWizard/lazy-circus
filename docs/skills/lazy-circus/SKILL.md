@@ -8,7 +8,8 @@ description: >
   aiScript, httpScript, sendDocument, askContinuing, solveWithAgent,
   solveWithAgentContinuing, AIRequest, AgentRequest, AIParams, mkAIRequest, mkAgentRequest,
   withModel, withTemperature, withStop, requestParams, agentParams, ReasoningEffort,
-  Conversation, DefaultPerformer, dbScript, DBScriptDef,
+  Conversation, DefaultPerformer, dbScript, DBScriptDef, runAsyncWorker, runAsyncWorkerPool,
+  scheduleAsyncAction, HasPgPool, pgPoolL, HasPgPoolReadOnly, ASYNC_WORKERS,
   findLocked, findAllLocked, LockSpec, HasLogLang, tgTest, TelegramTestScript, waitForReply, waitForMatching, OutgoingMessage,
   Mailboxes, UpdateFactory, mkTextUpdate, POML, makePoml, parsePoml, parsePomlText,
   POML.TH, POML.Parser, PomlDemo, or asks how to write scenarios, add new effects,
@@ -85,6 +86,8 @@ Read more than one reference file when a task crosses layers.
 - `DefaultApp` is parameterized by the service library type: `DefaultApp serviceLib`. Use `NoServiceLib` when no services are needed.
 - `create` and `createAsIs` return `Maybe row`.
 - `ReadOnly` forbids write operations.
+- `DefaultApp` holds PostgreSQL **connection pools** (`pgDbPool` / `pgDbPoolReadOnly`, exposed via `HasPgPool` / `HasPgPoolReadOnly`), not single connections. Every DB script checks out one connection from the pool for its entire duration (`withTransaction` / RLS stay safe under concurrency; a connection is never shared between scripts). `ReadOnly` uses the read-only pool when configured, falling back to the read-write pool. Release the pools with `destroyAllResources` — after cancelling worker threads.
+- Drain the async task queue with `runAsyncWorker` (one worker) or `runAsyncWorkerPool n` (n competing workers over the shared queue; n = 0 clamps to 1 and n > 1024 to 1024, each with a warning). All workers die with the calling thread. The demo app reads the pool size from the `ASYNC_WORKERS` env var (default 1).
 - `findLocked` / `findAllLocked` acquire a row lock (`FOR UPDATE` family) via a `LockSpec`; they MUST run inside `withTransaction` (locks are released at COMMIT/ROLLBACK). `WaitNoWait` surfaces contention as a thrown `SqlError`; `WaitSkipLocked` makes an empty result ambiguous. They are allowed in `ReadOnly` and reuse `HasReadService` — no extra instances.
 - Tests in this repository use a real PostgreSQL database.
 - Test `runAsync` with `tcAsync = Mocked` (the default) captures scheduled scenarios instead of executing them; `tcAsync = Real` spawns the worker through the same test interpreter so its side effects land in the usual capture buffers (mailbox / `readTgRequests`), and `readScheduledScenarios` stays empty.
@@ -104,6 +107,7 @@ Read more than one reference file when a task crosses layers.
 - `src/LazyCircus/Script.hs`
 - `src/LazyCircus/Performer.hs`
 - `src/LazyCircus/Performer/Default.hs`
+- `src/LazyCircus/AsyncWorker.hs` and `src/LazyCircus/AsyncWorker/Types.hs` for the async worker loop / worker pool and the shared action queue
 - `src/LazyCircus/AI.hs` and `src/LazyCircus/AI/Conversation.hs` for AI request types, the agent loop, and the `Conversation` transcript
 - `src/LazyCircus/AI/POML/Types.hs` for the `POML` AST and smart constructors, `src/LazyCircus/AI/POML.hs` for `renderPOMLtoPrompt`, `src/LazyCircus/AI/POML/Parser.hs` for `parsePoml` / `parsePomlText`, and `src/LazyCircus/AI/POML/TH.hs` for the `makePoml` macro, when authoring or reviewing prompt templates
 - the relevant `src/LazyCircus/Scene/*` module for the domain you are touching
@@ -125,6 +129,8 @@ Prefer LSP navigation for Haskell modules when possible.
 - Explaining reasoning in log text instead of stating the observable decision.
 - Forgetting to wrap a scene script into `Script` before `evalScript`.
 - Treating DB `create` helpers as if they returned a plain row instead of `Maybe`.
+- Treating `DefaultApp` as holding a single `Connection` — it holds `Pool Connection` (`pgDbPool` / `pgDbPoolReadOnly`); DB access goes through a per-script `withResource` checkout in the performers.
+- Calling `destroyAllResources` on the pools before cancelling worker threads — cancel the async workers first, otherwise in-flight scripts can race the teardown.
 - Calling `findLocked` / `findAllLocked` outside `withTransaction` and expecting a held lock — Postgres auto-commits the statement, so the lock is released immediately (a no-op). Always wrap locking reads in `withTransaction`.
 - Building a `Conversation` with a leading `Chat.System` message, or pattern-matching on the unexported `Conversation` constructor instead of using `emptyConversation` / `conversationFromTurns`.
 - Constructing `AIRequest` / `AgentRequest` via raw record syntax and omitting the strict `requestParams` / `agentParams` field — it fails to compile; use `mkAIRequest` / `mkAgentRequest` plus record-update overrides.
@@ -156,3 +162,4 @@ Prefer LSP navigation for Haskell modules when possible.
 10. Was `hpack` run before build or test?
 11. If prompt templates changed (`.poml` files, `makePoml` splices, or `POML` AST), does the consumer module keep `POML(..)` + `default*Params` in scope, is `OverloadedStrings` on, and does the generated `Input -> [POML]` function match the `<let>` declarations? If `<let src="..."/>` is used, is the referenced file present (relative to the `.poml`) and treated as a compile-time constant, not a record field?
 12. If AI requests changed, are they built via `mkAIRequest` / `mkAgentRequest` (or set `requestParams` / `agentParams` explicitly), and do `AIParams` merges rely on right bias rather than concatenation?
+13. If async workers or app teardown changed: are worker threads cancelled before `destroyAllResources`, and does the worker-pool size go through `runAsyncWorkerPool` (so the 0 / >1024 clamps apply)?

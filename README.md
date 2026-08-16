@@ -34,7 +34,7 @@ Balancing these concerns often leads to messy codebases. As developers, we actua
 
 Lazy Circus ships with a rich set of built-in capabilities ready for production use:
 
-* **Orchestration Framework:** A robust control layer (`ScenarioProgram`) for executing sub-scenarios, spawning asynchronous background tasks, managing environment state, handling errors gracefully, and calling registered services. You can orchestrate the built-in effects or plug in your own.
+* **Orchestration Framework:** A robust control layer (`ScenarioProgram`) for executing sub-scenarios, spawning asynchronous background tasks (drained by a configurable pool of async workers, `runAsyncWorkerPool`), managing environment state, handling errors gracefully, and calling registered services. You can orchestrate the built-in effects or plug in your own.
 * **Database Effect DSL (via `beam`):** A comprehensive database language supporting both typed CRUD operations and raw queries. Advanced features like separate Read-Only connections, Row-Level Security (RLS), transaction management, and pessimistic row locking (`findLocked` / `findAllLocked` with `SELECT ... FOR UPDATE` semantics) are supported out-of-the-box.
 * **Telegram Bot Integration:** A ready-to-use effect for sending messages, documents, and reactions. It natively supports running multiple bots from a single application seamlessly.
 * **Mail Integration:** A robust email effect for composing and sending transactional emails.
@@ -348,24 +348,38 @@ import LazyCircus.Performer.Default
 
 -- Run scenario in production environment via the generic 'run' function
 runRIO app $ runDefaultPerformer $ run @Script @serviceLib myScenario
+
+-- Start the background workers that drain the async task queue
+-- (runAsyncWorkerPool n runs n competing workers over the shared queue;
+--  n = 0 is clamped to 1 and n > 1024 to 1024, each with a warning)
+asyncThread <- async $ runRIO app $
+    runAsyncWorkerPool 4 (runDefaultPerformer . run @Script @serviceLib)
 ```
 
 ### Requirements for `DefaultApp serviceLib` Environment
 
 `DefaultApp serviceLib` contains:
-- `Connection` — main PostgreSQL connection
-- `Maybe Connection` — optional read-only connection
+- `Pool Connection` — main PostgreSQL connection pool (`pgDbPool`; total connection cap
+  configured via `cfgPgPoolMaxResources` in `DefaultAppConfig`). Every DB script checks
+  out one connection from the pool for its entire duration, so concurrent scripts
+  (including async workers) never share a PostgreSQL session.
+- `Maybe (Pool Connection)` — optional read-only PostgreSQL pool (`pgDbPoolReadOnly`;
+  `ReadOnly` scripts fall back to the main pool when it is unset)
 - `BotEnvs` — `Map Text BotEnv` for Telegram bots
 - `Methods` — OpenAI client
 - `MailCreds` — SMTP credentials
 - `LogQueue` / `LoggingContext` — logging
 - `JWTSettings` — authorization
 - `ExtraContext` — arbitrary configuration (`HashMap Text Text`)
-- `ScheduledActions` — queue of async tasks
+- `ScheduledActions` — queue of async tasks, drained by `runAsyncWorker` / `runAsyncWorkerPool`
 - `serviceLib` — in-process service handlers (or `NoServiceLib`)
 - `appToolDescriptions` — tool descriptions available to AI interpreters
 - `toolCallExec` — closure that dispatches named tool calls with JSON arguments
 - `httpManager` — shared TLS connection manager for HTTP client requests
+
+`newDefaultApp` probes each configured pool at construction, so an unreachable database
+fails startup. The caller is responsible for releasing the pools via `destroyAllResources`
+after cancelling worker threads.
 
 ---
 
@@ -430,7 +444,7 @@ Tests reuse the same high-level runner structure as production:
 
 What changes is the capability layer underneath that runner:
 
-- DB typically uses a real PostgreSQL connection
+- DB typically uses a real PostgreSQL connection checked out from the app's pool (one connection per DB script)
 - Telegram uses capture mocks for immediate and scheduled sends
 - Mail uses real mail building but mocked send capture
 - AI returns mock answers (`Nothing` by default)
@@ -694,7 +708,7 @@ serialization is provided by `ChatStateStore`.
 
 ### Prerequisites
 
-Both examples need PostgreSQL running at `127.0.0.1:5432` (user `postgres`, password `my_password`). The demo automatically creates/drops the `lazy_circus_test` database. A `docker-compose.yml` is provided for convenience.
+Both examples need PostgreSQL running at `127.0.0.1:5432` (user `postgres`, password `my_password`). The demo automatically creates/drops the `lazy_circus_test` database. A `docker-compose.yml` is provided for convenience. Set `ASYNC_WORKERS` to configure how many background workers drain the demo's async task queue (default 1).
 
 ```bash
 docker compose up -d    # start PostgreSQL

@@ -21,13 +21,14 @@ import Text.Read (readMaybe)
 import Control.Exception (AsyncException)
 import Control.Exception qualified as CE
 
+import Data.Pool (destroyAllResources)
 import Database.PostgreSQL.Simple (Connection, Only (..), close, connectPostgreSQL, execute_, query_)
 import Database.PostgreSQL.Simple.Types (Query (..))
 
 import LazyCircus.App.Default hiding (cfgAiApiKey, cfgAiBaseUrl, DefaultAppConfig)
 import LazyCircus.App.Default qualified as LAD (DefaultAppConfig (..))
 import LazyCircus.App.Log hiding (genLogFunc, logContext, logFunc, logQueue)
-import LazyCircus.AsyncWorker (runAsyncWorker)
+import LazyCircus.AsyncWorker (runAsyncWorkerPool)
 import LazyCircus.Performer.Default (runDefaultPerformer)
 import LazyCircus.Scenario (ScenarioProgram, run)
 import LazyCircus.Script (Script)
@@ -63,6 +64,8 @@ data DemoConfig = DemoConfig
     -- ^ whether to use STARTTLS for sending
     , cfgNotificationEmail :: Maybe String
     -- ^ email address for notifications
+    , cfgAsyncWorkers :: Word
+    -- ^ number of async workers draining the deferred-task queue; must be ≥ 1 in effect — 0 is clamped to 1 by runAsyncWorkerPool
     }
 
 -- | Masks sensitive fields; tokens and passwords shown only as present/absent.
@@ -90,6 +93,8 @@ instance Show DemoConfig where
             <> show cfgSmtpUseTls
             <> ", notificationEmail="
             <> show cfgNotificationEmail
+            <> ", asyncWorkers="
+            <> show cfgAsyncWorkers
             <> " }"
 
 {- | Default demo/test configuration with local SMTP and all optional capabilities disabled.
@@ -110,11 +115,12 @@ defaultDemoConfig =
         , cfgSmtpName = ""
         , cfgSmtpUseTls = False
         , cfgNotificationEmail = Nothing
+        , cfgAsyncWorkers = 1
         }
 
 {- | Read demo configuration from environment variables.
 PRE-CONTRACT: None.
-POST-CONTRACT: SMTP fields use defaults when their env vars are unset; optional fields (Telegram, AI, notification email) are Nothing when unset.
+POST-CONTRACT: SMTP fields use defaults when their env vars are unset; optional fields (Telegram, AI, notification email) are Nothing when unset; the async worker count defaults to 1 when ASYNC_WORKERS is unset or unparseable.
 -}
 readDemoConfig :: IO DemoConfig
 readDemoConfig = do
@@ -129,6 +135,7 @@ readDemoConfig = do
     cfgSmtpName <- fmap (fromMaybe $ cfgSmtpName defaultDemoConfig) (lookupEnv "SMTP_NAME")
     cfgSmtpUseTls <- fmap (fromMaybe (cfgSmtpUseTls defaultDemoConfig) . (>>= readMaybe)) (lookupEnv "SMTP_USE_TLS")
     cfgNotificationEmail <- lookupEnv "NOTIFICATION_EMAIL"
+    cfgAsyncWorkers <- fmap (fromMaybe 1 . (>>= readMaybe)) (lookupEnv "ASYNC_WORKERS")
     pure DemoConfig{..}
   where
     -- \| Look up an environment variable and convert the result to Text.
@@ -146,6 +153,7 @@ demoConfigToAppConfig services cfg =
     LAD.DefaultAppConfig
         { LAD.cfgPgConnectionString = testConnectionString
         , LAD.cfgPgConnectionStringReadOnly = Nothing
+        , LAD.cfgPgPoolMaxResources = 10
         , LAD.cfgBotConfigs = case cfgTgToken cfg of
             Just token -> [("demo-bot", token)]
             Nothing -> []
@@ -159,7 +167,9 @@ demoConfigToAppConfig services cfg =
 
 {- | Run an action with a demo application, managing lifecycle and background workers.
 PRE-CONTRACT: PostgreSQL must be reachable at 127.0.0.1:5432.
-POST-CONTRACT: Background threads are cancelled and database connections are closed after the action completes.
+POST-CONTRACT: Worker threads (async pool, logger, service workers) are cancelled first
+so in-flight connections are released; database connection pools are then released via
+'destroyAllResources', which does not wait for in-flight users (acceptable after cancels).
 -}
 withDemoApp :: DemoConfig -> (DefaultApp AllServices -> IO ()) -> IO ()
 withDemoApp cfg action = do
@@ -177,15 +187,15 @@ withDemoApp cfg action = do
         ( do
             workerThreads <- runAllWorkers workers
             logThread <- async $ runRIO (logAppFromDefaultApp app') logWorker
-            asyncThread <- async $ runRIO app' (runAsyncWorker (runDefaultPerformer . run @Script @AllServices))
+            asyncThread <- async $ runRIO app' (runAsyncWorkerPool (cfgAsyncWorkers cfg) (runDefaultPerformer . run @Script @AllServices))
             pure (app', logThread, asyncThread, workerThreads)
         )
         ( \(_, logThread, asyncThread, workerThreads) -> do
             cancel asyncThread
             cancel logThread
             mapM_ cancel workerThreads
-            close (pgDbConnection app')
-            mapM_ close (pgDbConnectionReadOnly app')
+            destroyAllResources (pgDbPool app')
+            mapM_ destroyAllResources (pgDbPoolReadOnly app')
         )
         (action . fst4)
   where
