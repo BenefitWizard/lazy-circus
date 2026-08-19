@@ -12,6 +12,7 @@ import Database.Beam.Postgres (Postgres)
 import Database.PostgreSQL.Simple.FromRow (FromRow)
 import LazyCircus.DB.Service
 import LazyCircus.DB.Types (PgDB)
+import LazyCircus.Scene.DB.RLS (RLSContext (..))
 import RIO
 
 -- | Beam table for circus acts and its concrete aliases.
@@ -105,6 +106,11 @@ instance HasUpdateService SimpleDb CircusActT where
             ]
 
 instance HasDeleteService SimpleDb CircusActT
+
+-- | RLS context keyed by the circus domain tenant column @circus_id@,
+-- matching the @circus_acts_circus_rls@ policy in 'migration'.
+rlsCircusId :: Int32 -> RLSContext
+rlsCircusId circusId = RLSContext [("circus_id", tshow circusId)]
 
 migration :: Text
 migration =

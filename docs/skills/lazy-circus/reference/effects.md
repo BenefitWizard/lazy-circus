@@ -42,7 +42,6 @@ Main operations:
 | `rawQuery` | decoded SQL rows |
 | `withTransaction` | transactional nested script |
 | `withTransactionRLS` | transaction with row-level security context |
-| `withQSTransaction` | convenience RLS wrapper |
 
 Example:
 
@@ -69,8 +68,7 @@ Important DB semantics:
 - each DB script checks out one connection from the app's PostgreSQL pool for its entire duration — concurrent scripts (including async workers) run on separate connections, so `withTransaction` and RLS settings never interleave across scripts; `ReadOnly` uses the read-only pool when configured, falling back to the read-write pool
 - `create` and `createAsIs` use `listToMaybe`; if the interpreter returns `[]`, they yield `Nothing`
 - write operations are blocked in `ReadOnly` mode by `DbReadOnlyViolation`
-- `withTransactionRLS` applies `SET LOCAL rls.<key> = ?` inside the transaction
-- `withQSTransaction` is a convenience wrapper around `withTransactionRLS (rlsQSId qsId)`
+- `withTransactionRLS` applies `SET LOCAL rls.<key> = ?` inside the transaction; the context is built directly, e.g. `RLSContext [("circus_id", "42")]`, and contexts combine with `<>` / `mempty`
 
 ### Row Locking
 

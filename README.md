@@ -424,7 +424,7 @@ instance HasDeleteService MyDb MyTableT
 import LazyCircus.Scene.DB
 
 -- Transaction with RLS context
-withTransactionRLS (rlsCircusId 42) $ do
+withTransactionRLS (RLSContext [("circus_id", "42")]) $ do
     findAll someLookup  -- only sees rows where circus_id = 42
 ```
 

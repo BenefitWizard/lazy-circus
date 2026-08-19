@@ -24,7 +24,6 @@ module LazyCircus.Scene.DB.Lang (
     rawQuery,
     withTransaction,
     withTransactionRLS,
-    withQSTransaction,
     DBScript,
 ) where
 
@@ -42,7 +41,7 @@ import LazyCircus.DB.Service (
     LId,
     )
 import LazyCircus.DB.Types
-import LazyCircus.Scene.DB.RLS (RLSContext, rlsQSId)
+import LazyCircus.Scene.DB.RLS (RLSContext)
 import LazyCircus.Scene.Log (HasLogLang (..), LogLangF)
 import RIO
 
@@ -214,12 +213,5 @@ POST-CONTRACT: Produces a script that returns the nested result after transactio
 -}
 withTransactionRLS :: RLSContext -> DBScript db b -> F (DBLangF db) b
 withTransactionRLS ctx script = liftFC $ WithTransaction (Just ctx) script id
-
-{- | Convenience wrapper for QuickSpell RLS context.
-PRE-CONTRACT: The nested script must be valid for the same database language.
-POST-CONTRACT: Produces a script that returns the nested result after transactional execution with QuickSpell RLS applied.
--}
-withQSTransaction :: Int32 -> DBScript db b -> F (DBLangF db) b
-withQSTransaction qsId script = liftFC $ WithTransaction (Just $ rlsQSId qsId) script id
 
 type DBScript db = F (DBLangF db)

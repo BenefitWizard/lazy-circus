@@ -45,7 +45,6 @@ import LazyCircus.AI.POML.Types
     ( POML, cp_, role_, task_, list_, examples_, exampleInput_, exampleOutput_
     , json, text
     )
-import LazyCircus.Scene.DB.RLS (rlsCircusId)
 
 import Common
 
