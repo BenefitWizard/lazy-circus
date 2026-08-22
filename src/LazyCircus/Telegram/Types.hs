@@ -6,8 +6,10 @@ module LazyCircus.Telegram.Types (
     AppWithBotEnv(..),
     HasTgMessageQueue(..),
     TelegramClientError(..),
-) where
+    TelegramDownloadStatusError(..),
+ ) where
 
+import Network.HTTP.Types (Status)
 import RIO
 import Servant.Client hiding (Response)
 import Telegram.Bot.API (ReactionType (..), Token)
@@ -67,7 +69,25 @@ instance HasTgMessageQueue (AppWithBotEnv app) where
 
 -- | Wraps a Servant ClientError for typed exception handling in Telegram operations.
 newtype TelegramClientError = TelegramClientError ClientError
-    deriving (Show)
+
+-- | Redacting 'Show': never renders the wrapped servant request or URL, since
+-- the Telegram bot token lives inside the request path.
+-- LAW: the rendered text contains no URL, path, or token material.
+instance Show TelegramClientError where
+    show (TelegramClientError err) = "TelegramClientError: " <> case err of
+        FailureResponse _ resp -> "FailureResponse " <> show (responseStatusCode resp)
+        DecodeFailure msg _ -> "DecodeFailure " <> show msg
+        UnsupportedContentType ct _ -> "UnsupportedContentType " <> show ct
+        InvalidContentTypeHeader _ -> "InvalidContentTypeHeader"
+        ConnectionError _ -> "ConnectionError"
 
 -- | Enables throwing and catching TelegramClientError as a typed exception.
 instance Exception TelegramClientError
+
+-- | Non-2xx HTTP status returned by the Telegram file-download endpoint.
+-- Carries only the 'Status' — never the request URL, which embeds the bot token.
+newtype TelegramDownloadStatusError = TelegramDownloadStatusError Status
+    deriving (Show)
+
+-- | Enables throwing and catching TelegramDownloadStatusError as a typed exception.
+instance Exception TelegramDownloadStatusError

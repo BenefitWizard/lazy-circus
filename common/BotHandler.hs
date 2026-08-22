@@ -47,6 +47,9 @@ import Telegram.Bot.API (
     SomeChatId (..),
     Update,
     defSendMessage,
+    documentFileId,
+    messageDocument,
+    messageMessageId,
     messageText,
     updateMessage,
     )
@@ -67,6 +70,7 @@ import BotScenarios (
     deleteAct,
     generateReaction,
     getAct,
+    handleDocumentUpload,
     listActs,
     )
 import ChatStateStore (ChatStateStore, withChatState)
@@ -88,6 +92,11 @@ client environment, structured logging, and automatic timing. Branch logic,
 reply strings, and FSM transitions are preserved verbatim from the previous
 implementation.
 
+Updates carrying a document ('messageDocument') are routed to the demo
+'handleDocumentUpload' scenario (size-validated download, verdict reply,
+message deletion) BEFORE any text dispatch — a bare file upload carries no
+@message_text@ and was previously a silent no-op.
+
 See the module Haddock for the /AgentBusy note/: the handler processes each
 update synchronously and relies on 'ChatStateStore' for per-chat serialisation
 rather than maintaining an 'AgentBusy' non-reentrancy lock.
@@ -95,7 +104,8 @@ rather than maintaining an 'AgentBusy' non-reentrancy lock.
 PRE-CONTRACT: The caller wraps this with @runDefaultPerformer . run@ against a
 'DefaultApp' whose @botEnvs@ contains the bot named by 'bhcBotName'.
 POST-CONTRACT: Returns the updated 'Model' paired with @()@. Updates without a
-chat id or message text are no-ops and return the input model unchanged.
+chat id or message are no-ops and return the input model unchanged; a document
+upload is handled by 'handleDocumentUpload' and leaves the 'Model' unchanged.
 -}
 handleScenario ::
     BotHandlerConfig ->
@@ -106,9 +116,22 @@ handleScenario cfg model update =
     case updateChatId update of
         Nothing -> pure (model, ())
         Just chatId ->
-            case updateMessage update >>= messageText of
+            case updateMessage update of
                 Nothing -> pure (model, ())
-                Just txt -> dispatch cfg model chatId txt
+                Just msg ->
+                    case messageDocument msg of
+                        Just doc -> do
+                            handleDocumentUpload
+                                (bhcBotName cfg)
+                                documentUploadMaxBytes
+                                chatId
+                                (messageMessageId msg)
+                                (documentFileId doc)
+                            pure (model, ())
+                        Nothing ->
+                            case messageText msg of
+                                Nothing -> pure (model, ())
+                                Just txt -> dispatch cfg model chatId txt
 
 {- | Route a recognised text message to the matching command or dialog branch.
 Mirrors the previous @BotApp.handleUpdate@ prefix-matching exactly.
@@ -256,6 +279,12 @@ welcomeText =
     \/act <id> — view act details\n\
     \/react <id> — regenerate reaction\n\
     \/delete <id> — delete an act"
+
+-- | Demo size limit for document uploads: 5 MB, passed as the @maxBytes@
+-- parameter of 'handleDocumentUpload' (kept a handler-level policy so tests
+-- can re-run the scenario with a smaller limit).
+documentUploadMaxBytes :: Integer
+documentUploadMaxBytes = 5_000_000
 
 {- | Performer-agnostic driver that turns one 'Update' into one bot turn.
 

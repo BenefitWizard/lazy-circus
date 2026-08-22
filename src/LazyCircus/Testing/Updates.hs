@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Helpers for constructing fake Telegram 'Update's in tests.
 --
@@ -26,7 +27,10 @@ module LazyCircus.Testing.Updates (
     mkTextUpdateByUser,
     mkTextUpdateIn,
     mkFileUpdate,
+    mkDocumentUpdate,
     mkCallbackQueryUpdate,
+    -- * Document helpers
+    mkDocument,
     -- * Defaults
     defaultTestUserId,
     defaultTestChatId,
@@ -36,7 +40,7 @@ import Data.Aeson (Value (Object), fromJSON, object, (.=))
 import Data.Aeson.Types (Result (..))
 import RIO
 import Telegram.Bot.API (ChatId (..), Update, UserId (..))
-import Telegram.Bot.API.Types (FileId (..), MessageId (..))
+import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..))
 
 -- | Build a minimal 'Update' carrying a single text message in a private chat.
 -- Used to exercise command routing and dialog logic without a live Telegram connection.
@@ -120,14 +124,47 @@ mkTextUpdateIn :: UpdateFactory -> ChatId -> Text -> IO Update
 mkTextUpdateIn factory chatId txt =
     mkTextUpdateByUser factory defaultTestUserId chatId txt
 
--- | Build a document-message 'Update' (a file upload) from a specific user/chat.
+-- | Build a document-message 'Update' (a file upload) from a specific user/chat,
+-- carrying ONLY the file id (no client-declared metadata). The metadata-free
+-- sibling of 'mkDocumentUpdate'; see there when a scenario pre-checks
+-- @file_name@ / @mime_type@ / @file_size@.
 -- PRE-CONTRACT: 'FileId' should be a plausible non-empty identifier.
 -- POST-CONTRACT: Returns a valid 'Update' whose @message.document.file_id@
--- equals the supplied 'FileId', or 'error' on parse failure.
+-- equals the supplied 'FileId' and whose metadata fields are all 'Nothing', or
+-- 'error' on parse failure.
 mkFileUpdate :: UpdateFactory -> UserId -> ChatId -> FileId -> IO Update
-mkFileUpdate factory userId chatId (FileId fileId) =
+mkFileUpdate factory userId chatId fid =
+    mkDocumentUpdate factory userId chatId (mkDocument fid)
+
+-- | A minimal 'Document' for the given 'FileId': @file_unique_id@ mirrors the
+-- id and every client-declared metadata field (name, MIME type, size, thumbnail)
+-- is 'Nothing'. Attach metadata via record update:
+--
+-- > (mkDocument (FileId "doc-1")){documentFileName = Just "report.pdf"}
+mkDocument :: FileId -> Document
+mkDocument fid =
+    Document
+        { documentFileId = fid
+        , documentFileUniqueId = fid
+        , documentThumbnail = Nothing
+        , documentFileName = Nothing
+        , documentMimeType = Nothing
+        , documentFileSize = Nothing
+        }
+
+-- | Build a document-message 'Update' (a file upload) from a specific user/chat,
+-- carrying the FULL 'Document' — including the client-declared @file_name@ /
+-- @mime_type@ / @file_size@ metadata that scenario-level pre-checks (format or
+-- size gates reading 'Document' fields) consume. The metadata is the sender's
+-- claim and may disagree with the staged canned download (spoofing is testable
+-- that way).
+-- PRE-CONTRACT: 'documentThumbnail' is ignored — test updates never carry one.
+-- POST-CONTRACT: Returns a valid 'Update' whose @message.document@ id and
+-- metadata fields equal the supplied 'Document''s, or 'error' on parse failure.
+mkDocumentUpdate :: UpdateFactory -> UserId -> ChatId -> Document -> IO Update
+mkDocumentUpdate factory userId chatId doc =
     buildUpdate factory $ \uid ->
-        fileMessagePayload uid userId chatId fileId
+        fileMessagePayload uid userId chatId doc
 
 -- | Build a @callback_query@ 'Update' from a specific user/chat, referencing the
 -- given 'MessageId' (the message the inline keyboard is attached to) and
@@ -164,9 +201,11 @@ textMessagePayload uid (UserId userNum) (ChatId chatNum) txt =
             ]
         ]
 
--- | JSON for a private-chat document message wrapped in an 'Update'.
-fileMessagePayload :: Int -> UserId -> ChatId -> Text -> Value
-fileMessagePayload uid (UserId userNum) (ChatId chatNum) fileId =
+-- | JSON for a private-chat document message wrapped in an 'Update'. The
+-- document object preserves the client-declared metadata; absent fields are
+-- omitted (Telegram omits optional fields rather than sending nulls).
+fileMessagePayload :: Int -> UserId -> ChatId -> Document -> Value
+fileMessagePayload uid (UserId userNum) (ChatId chatNum) doc =
     Object $ mconcat
         [ "update_id" .= uid
         , "message" .= object
@@ -174,12 +213,26 @@ fileMessagePayload uid (UserId userNum) (ChatId chatNum) fileId =
             , "date" .= (0 :: Int)
             , "from" .= userObject userNum
             , "chat" .= chatObject chatNum
-            , "document" .= object
-                [ "file_id" .= fileId
-                , "file_unique_id" .= fileId
-                ]
+            , "document" .= documentObject doc
             ]
         ]
+
+-- | JSON object for a 'Document', preserving the client-declared metadata.
+documentObject :: Document -> Value
+documentObject Document{..} =
+    object $
+        [ "file_id" .= fileIdText documentFileId
+        , "file_unique_id" .= fileIdText documentFileUniqueId
+        ]
+            <> catMaybes
+                [ ("file_name" .=) <$> documentFileName
+                , ("mime_type" .=) <$> documentMimeType
+                , ("file_size" .=) <$> documentFileSize
+                ]
+
+-- | Underlying text of a 'FileId' (a newtype over 'Text').
+fileIdText :: FileId -> Text
+fileIdText (FileId txt) = txt
 
 -- | JSON for a callback_query wrapped in an 'Update', referencing a prior message.
 -- Includes the @chat_instance@ field required by 'CallbackQuery' so the payload

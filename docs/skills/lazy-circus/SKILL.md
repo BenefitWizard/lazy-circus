@@ -5,12 +5,14 @@ description: >
   Church-encoded free monads and ScenarioProgram orchestration. Use this skill whenever
   the user mentions LazyCircus, lazy-circus, ScenarioProgram, Script, DBScript,
   TelegramScript, AIScript, MailScript, HTTPScript, evalScript, tgScript, mailScript,
-  aiScript, httpScript, sendDocument, askContinuing, solveWithAgent,
+  aiScript, httpScript, sendDocument, downloadFile, downloadFileById, downloadCheckedFile,
+  deleteMessage, FileValidationError, fileSha256Hex, askContinuing, solveWithAgent,
   solveWithAgentContinuing, AIRequest, AgentRequest, AIParams, mkAIRequest, mkAgentRequest,
   withModel, withTemperature, withStop, requestParams, agentParams, ReasoningEffort,
   Conversation, DefaultPerformer, dbScript, DBScriptDef, runAsyncWorker, runAsyncWorkerPool,
   scheduleAsyncAction, HasPgPool, pgPoolL, HasPgPoolReadOnly, ASYNC_WORKERS,
-  findLocked, findAllLocked, LockSpec, HasLogLang, tgTest, TelegramTestScript, waitForReply, waitForMatching, OutgoingMessage,
+  findLocked, findAllLocked, LockSpec, HasLogLang, tgTest, TelegramTestScript, waitForReply,
+  waitForMatching, waitForDeletion, sendFileByUser, sendDocumentAs, mkDocumentUpdate, addTgDownloads, OutgoingMessage,
   Mailboxes, UpdateFactory, mkTextUpdate, POML, makePoml, parsePoml, parsePomlText,
   POML.TH, POML.Parser, PomlDemo, or asks how to write scenarios, add new effects,
   define DB service instances, author prompt templates (.poml files), or test Lazy Circus
@@ -97,7 +99,10 @@ Read more than one reference file when a task crosses layers.
 - Use `makeServiceLib` (from `LazyCircus.App.Service.TH`) to generate service libraries from request/response/tool-spec triples.
 - `tgTest` (from `LazyCircus.Testing.TgTest`) drives the bot's own `Update -> IO ()` handler via `runHeadlessBot`; `buildAction` MUST wire the test performer (`runWithMocks`) against the same `Mocks` the runner hands it.
 - The `tgTest` DSL's `waitFor*` ops block deterministically via STM `retry` on the `outgoingMailbox`; never replace them with polling. Fail with `TgTestTimeout` on timeout, `TgTestGuardFailed` on a failed `guard`.
-- Every Telegram `sendMessage` / `sendDocument` / `setMessageReaction` / `editMessageText` publishes an `OutgoingMessage` (tagged with `OutgoingKind`) to the STM mailbox; `sendMessage`/`sendDocument` responses are stamped with a fresh incremental `MessageId`.
+- Every Telegram `sendMessage` / `sendDocument` / `setMessageReaction` / `editMessageText` / `deleteMessage` publishes an `OutgoingMessage` (tagged with `OutgoingKind`) to the STM mailbox; `sendMessage`/`sendDocument` responses are stamped with a fresh incremental `MessageId`.
+- Telegram file downloads return the raw `getFile` `Response File` plus the downloaded `ByteString` — no domain wrapper types. `downloadFile` takes the `File` object (it needs `fileFilePath`); `downloadFileById` / `downloadCheckedFile` take a `FileId`. `downloadCheckedFile` gates size twice (server-reported `fileFileSize` before transfer, actual byte length after — the latter is authoritative) and yields `Left FileValidationError` ONLY for size rejects; transport errors throw (wrap with `runSafely`). `telegramMaxDownloadBytes` (20 MiB) is the protocol ceiling; `fileSha256Hex` hashes bytes for logs/dedup (all re-exported by `LazyCircus.Scene.Telegram`).
+- Mocked `getFile` / `downloadFile` serve staged canned downloads keyed by `FileId` (the third `createTgMock` argument or `addTgDownloads`); an unstaged id throws loudly, and the mocked `fileFileSize` equals the canned byte length. In `tgTest`, drive uploads with `sendFileByUser` (a known `FileId`) and assert deletions with `waitForDeletion`.
+- The client-declared document metadata (`documentFileName` / `documentMimeType` / `documentFileSize` from the update) is the sender's CLAIM — spoofable, and by design may disagree with the staged canned download (that disagreement is how size-spoofing pre-checks are tested). Inject it with `sendDocumentAs` (DSL) or `mkDocumentUpdate` / `mkDocument` (factory); `sendFile` / `mkFileUpdate` upload metadata-free documents.
 - In the `tgTest` DSL, the message-sending ops (`sendMessage` / `sendMessageIn` / `sendMessageByUser` / `sendFile` / `sendFileByUser`) return `(UpdateId, MessageId)` so the message id can be threaded into `waitForReaction` / `sendKeypress`; `sendKeypress*` return just `UpdateId`.
 - Use `LazyCircus.Testing.Updates` (`mkTextUpdate`, `mkCallbackQueryUpdate`, `UpdateFactory`) to build fake `Update`s for synchronous handler tests; use `tgTest` for end-to-end dialog tests.
 
@@ -110,6 +115,7 @@ Read more than one reference file when a task crosses layers.
 - `src/LazyCircus/AsyncWorker.hs` and `src/LazyCircus/AsyncWorker/Types.hs` for the async worker loop / worker pool and the shared action queue
 - `src/LazyCircus/AI.hs` and `src/LazyCircus/AI/Conversation.hs` for AI request types, the agent loop, and the `Conversation` transcript
 - `src/LazyCircus/AI/POML/Types.hs` for the `POML` AST and smart constructors, `src/LazyCircus/AI/POML.hs` for `renderPOMLtoPrompt`, `src/LazyCircus/AI/POML/Parser.hs` for `parsePoml` / `parsePomlText`, and `src/LazyCircus/AI/POML/TH.hs` for the `makePoml` macro, when authoring or reviewing prompt templates
+- `src/LazyCircus/Telegram/FileCheck.hs` for the pure file-download size gates and `fileSha256Hex`, when touching Telegram file operations
 - the relevant `src/LazyCircus/Scene/*` module for the domain you are touching
 - `src/LazyCircus/Testing/Performer.hs` for mock-backed scenario/script tests
 - `src/LazyCircus/Testing/TgTest.hs` for the end-to-end `tgTest` runner and `TelegramTestScript` DSL
@@ -143,6 +149,8 @@ Prefer LSP navigation for Haskell modules when possible.
 - In `tgTest`, wiring `buildAction` against a different `Mocks` than the one the runner supplied, so replies never reach the mailbox the DSL observes.
 - Asserting on Telegram side effects from `runAsync` during tests — with `tcAsync = Mocked` (default) `runAsync` only captures scheduled scenarios (assert via `readScheduledScenarios` / `mbScheduledScenarioCount`); with `tcAsync = Real` the spawned worker's side effects DO appear in the mailbox, so that assertion no longer holds.
 - Expecting `waitForFile` to return the bot's real `FileId` — the mailbox capture returns a stable placeholder suitable only for ordering assertions.
+- Forgetting to stage a canned download (the third `createTgMock` argument or `addTgDownloads`) before a Mocked `getFile` / `downloadFileById` / `downloadCheckedFile` — the mock throws for an unstaged `FileId`.
+- Treating Telegram download transport failures as `Left` — `downloadCheckedFile` returns `Left` only for `FileValidationError` (size rejects); transport errors are exceptions, so guard with `runSafely`.
 - Expecting `parsePomlText` to handle template concatenations (`{{a + " " + b}}`) or a templated `<cp caption="{{name}}">` — these are not representable in the `POML` AST and return `Left`; use the `makePoml` TH macro, which splices them at the AST level.
 - Calling `makePoml` without keeping `POML(..)` and the `default*Params` values (e.g. `defaultListParams`) in scope, or without `OverloadedStrings` enabled — the generated splice references these names directly.
 - Expecting `.poml` edits to be picked up without `addDependentFile` recompilation — `makePoml` registers the source file so GHC rebuilds on change; a stale build means the splice did not re-run.
@@ -163,3 +171,4 @@ Prefer LSP navigation for Haskell modules when possible.
 11. If prompt templates changed (`.poml` files, `makePoml` splices, or `POML` AST), does the consumer module keep `POML(..)` + `default*Params` in scope, is `OverloadedStrings` on, and does the generated `Input -> [POML]` function match the `<let>` declarations? If `<let src="..."/>` is used, is the referenced file present (relative to the `.poml`) and treated as a compile-time constant, not a record field?
 12. If AI requests changed, are they built via `mkAIRequest` / `mkAgentRequest` (or set `requestParams` / `agentParams` explicitly), and do `AIParams` merges rely on right bias rather than concatenation?
 13. If async workers or app teardown changed: are worker threads cancelled before `destroyAllResources`, and does the worker-pool size go through `runAsyncWorkerPool` (so the 0 / >1024 clamps apply)?
+14. If Telegram file downloads are used: is the size limit explicit (`downloadCheckedFile`), are only size rejects handled as `Left` (transport errors via `runSafely`), and do tests stage canned downloads by `FileId` before asserting (with `waitForDeletion` for deletes)?

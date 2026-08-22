@@ -13,18 +13,21 @@ module BotScenarios (
     getAct,
     generateReaction,
     deleteAct,
+    handleDocumentUpload,
     AudienceReaction,
     askAgent,
     askAgentContinuing,
     AgentResponse,
-) where
+    ) where
 
 import RIO hiding (ask, log, logError, logInfo, logWarn)
+import RIO.ByteString qualified as BS
+import RIO.Text qualified as Text
 
 import Common hiding (migration)
 import Control.Exception (ErrorCall (..))
 import Data.Aeson
-import LazyCircus (aiScript, dbScript, mailScript)
+import LazyCircus (aiScript, dbScript, mailScript, tgScript)
 import LazyCircus.AI (AIRequest, Conversation, emptyConversation, mkAgentRequest, mkAIRequest)
 import LazyCircus.AI.POML.Types (
     POML,
@@ -49,8 +52,11 @@ import LazyCircus.Scene.DB.Lang (
     update,
  )
 import LazyCircus.Scene.Mail.Lang (makeMail, sendMail)
+import LazyCircus.Scene.Telegram (FileValidationError (..), deleteMessage, downloadCheckedFile, fileSha256Hex, sendMessage)
 import LazyCircus.Script (Script)
 import Network.Mail.Mime (Address (..))
+import Telegram.Bot.API (ChatId, MessageId, SomeChatId (..), defSendMessage)
+import Telegram.Bot.API.Types (FileId (..))
 
 -- | AI response type for audience reaction generation.
 newtype AudienceReaction = AudienceReaction {audienceReaction :: Text}
@@ -303,3 +309,107 @@ POST-CONTRACT: The act is removed from the database.
 deleteAct :: Int32 -> ScenarioProgram Script serviceLib ()
 deleteAct actId = do
     evalScript $ dbScript simpleDb ReadWrite $ delete (CircusActId actId :: CircusActId)
+
+{- | Demo scenario for a document upload: size-validated download, verdict
+reply, and deletion of the user's message (chat hygiene).
+
+A deliberately minimal v1: it demonstrates size control and raw metadata
+only — NO format checks are performed on the downloaded bytes.
+
+Outcome handling ('downloadCheckedFile' semantics: @Left@ is exclusively a
+size reject; transport errors are exceptions):
+
+  * accepted — replies with the actual byte length and a short SHA-256
+    prefix (see 'shaPrefixLength') so a caller can correlate the reply with
+    the file; the full digest goes to the structured log context only.
+  * rejected by size — a NORMAL path, not a crash: replies with a
+    human-readable reason naming both numbers. The reply contains neither a
+    digest nor a byte length — the download never happened.
+  * transport exception — caught via 'runSafely' and answered with the
+    generic internal-error reply, mirroring the handler's defensive style.
+    The exception is deliberately NOT rendered into the log: its rendering
+    may embed the Telegram bot token (the download URL carries it), so only
+    the class of failure is logged.
+
+In every outcome the user's upload message deletion is requested afterwards
+(best-effort chat hygiene: a delete transport failure is logged and
+swallowed, never propagated).
+
+PRE-CONTRACT: @maxBytes@ is non-negative (see 'downloadCheckedFile'); the bot
+named by @botName@ is registered in the app's @botEnvs@; @chatId@ and
+@messageId@ identify the upload message, which the bot is allowed to delete.
+POST-CONTRACT: One verdict reply is sent and one 'deleteMessage' is requested
+on every outcome; a download transport error never propagates, and a delete
+transport error is logged and swallowed; the file content is never logged
+(only ids, sizes, and the digest are).
+-}
+handleDocumentUpload ::
+    Text ->
+    Integer ->
+    ChatId ->
+    MessageId ->
+    FileId ->
+    ScenarioProgram Script serviceLib ()
+handleDocumentUpload botName maxBytes chatId messageId fileId =
+    withLogContext
+        [ ("file_id", fileIdText fileId)
+        , ("chat_id", tshow chatId)
+        , ("message_id", tshow messageId)
+        ] $ do
+            result <-
+                runSafely @SomeException $
+                    evalScript $
+                        tgScript botName $
+                            downloadCheckedFile maxBytes fileId
+            case result of
+                Left _ -> do
+                    logError "Document download failed (transport)"
+                    replyTxt "❌ An internal error occurred. Please try again later."
+                Right (Left (FileSizeExceedsLimit actual limit)) -> do
+                    logWarn "Document upload rejected by size"
+                    replyTxt $
+                        "🚫 File too large: "
+                            <> tshow actual
+                            <> " bytes exceeds the "
+                            <> tshow limit
+                            <> "-byte limit. Please send a smaller file."
+                Right (Right (_, bytes)) -> do
+                    let shaHex = fileSha256Hex bytes
+                    withLogContext [("sha256", shaHex)] $
+                        logInfo "Document upload accepted"
+                    replyTxt $
+                        "✅ Document received: "
+                            <> tshow (BS.length bytes)
+                            <> " bytes, sha256: "
+                            <> Text.take shaPrefixLength shaHex
+            -- Chat hygiene is best-effort: a failed delete must not fail the turn.
+            deleteResult <-
+                runSafely @SomeException $
+                    evalScript $
+                        tgScript botName $
+                            deleteMessage chatId messageId
+            case deleteResult of
+                Left _ -> logWarn "Upload message deletion failed (transport)"
+                Right _ -> pure ()
+  where
+    -- | Length of the SHA-256 hex prefix included in the user-facing reply:
+    -- long enough for a test to correlate reply and file, short enough not
+    -- to flood the chat with hex.
+    shaPrefixLength :: Int
+    shaPrefixLength = 16
+
+    -- | Render the 'FileId' as text for the structured log context.
+    fileIdText :: FileId -> Text
+    fileIdText (FileId txt) = txt
+
+    -- | Send a plain-text verdict reply to the uploading chat through the
+    -- TelegramScript DSL.
+    -- PRE-CONTRACT: The bot named by @botName@ is registered in the app's @botEnvs@.
+    -- POST-CONTRACT: The reply is dispatched via the Telegram interpreter; the
+    -- resulting 'Telegram.Bot.API.Response' is discarded.
+    replyTxt :: Text -> ScenarioProgram Script serviceLib ()
+    replyTxt txt =
+        void $
+            evalScript $
+                tgScript botName $
+                    sendMessage (defSendMessage (SomeChatId chatId) txt)

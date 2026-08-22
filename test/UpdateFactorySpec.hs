@@ -16,6 +16,12 @@ import Telegram.Bot.API
     , UserId (..)
     , callbackQueryData
     , callbackQueryMessage
+    , documentFileId
+    , documentFileName
+    , documentFileSize
+    , documentFileUniqueId
+    , documentMimeType
+    , messageDocument
     , messageMessageId
     , messageText
     , updateMessage
@@ -26,9 +32,12 @@ import Telegram.Bot.API.GettingUpdates
     , updateChatId
     , updateUpdateId
     )
-import Telegram.Bot.API.Types (MessageId (..))
+import Telegram.Bot.API.Types (FileId (..), MessageId (..))
 import LazyCircus.Testing.Updates
     ( mkCallbackQueryUpdate
+    , mkDocument
+    , mkDocumentUpdate
+    , mkFileUpdate
     , mkTextUpdateByUser
     , newUpdateFactory
     , nextUpdateId
@@ -66,6 +75,35 @@ spec = do
             let Just cq = updateCallbackQuery u
             callbackQueryData cq `shouldBe` Just "confirm"
             (messageMessageId <$> callbackQueryMessage cq) `shouldBe` Just (MessageId 99)
+
+        it "mkDocumentUpdate carries the client-declared name, mime type, and size" $ do
+            factory <- newUpdateFactory
+            let doc =
+                    (mkDocument (FileId "doc-9"))
+                        { documentFileName = Just "report.pdf"
+                        , documentMimeType = Just "application/pdf"
+                        , documentFileSize = Just 12345
+                        }
+            u <- mkDocumentUpdate factory (UserId 7) (ChatId 42) doc
+            updateChatId u `shouldBe` Just (ChatId 42)
+            let Just msg = updateMessage u
+                Just d = messageDocument msg
+            documentFileId d `shouldBe` FileId "doc-9"
+            documentFileUniqueId d `shouldBe` FileId "doc-9"
+            documentFileName d `shouldBe` Just "report.pdf"
+            documentMimeType d `shouldBe` Just "application/pdf"
+            documentFileSize d `shouldBe` Just 12345
+
+        it "mkFileUpdate produces a metadata-free document (unique id mirrors the file id)" $ do
+            factory <- newUpdateFactory
+            u <- mkFileUpdate factory (UserId 7) (ChatId 42) (FileId "doc-1")
+            let Just msg = updateMessage u
+                Just d = messageDocument msg
+            documentFileId d `shouldBe` FileId "doc-1"
+            documentFileUniqueId d `shouldBe` FileId "doc-1"
+            documentFileName d `shouldBe` Nothing
+            documentMimeType d `shouldBe` Nothing
+            documentFileSize d `shouldBe` Nothing
 
 -- | Predicate: consecutive elements are in strictly ascending order.
 -- POST-CONTRACT: True for the empty and singleton lists.

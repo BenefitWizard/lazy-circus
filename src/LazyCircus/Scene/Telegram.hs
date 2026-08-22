@@ -8,6 +8,9 @@ module LazyCircus.Scene.Telegram (
   runTelegram,
   TelegramScriptF (..),
   getFile,
+  downloadFile,
+  downloadFileById,
+  downloadCheckedFile,
   getBotName,
   sendMessage,
   sendDocument,
@@ -18,6 +21,7 @@ module LazyCircus.Scene.Telegram (
   setMessageReaction,
   answerCallbackQuery,
   editMessageText,
+  deleteMessage,
   TelegramScript,
   -- Logging re-exports
   slogInfo,
@@ -25,6 +29,10 @@ module LazyCircus.Scene.Telegram (
   slogError,
   slogSensitive,
   swithLogCtx,
+  -- File-validation re-exports
+  FileValidationError (..),
+  telegramMaxDownloadBytes,
+  fileSha256Hex,
 )
 where
 
@@ -38,6 +46,15 @@ import LazyCircus.Scene.Telegram.Lang (TelegramScriptF (..))
 
 
 import LazyCircus.Scene.Telegram.Lang (getFile)
+
+
+import LazyCircus.Scene.Telegram.Lang (downloadFile)
+
+
+import LazyCircus.Scene.Telegram.Lang (downloadFileById)
+
+
+import LazyCircus.Scene.Telegram.Lang (downloadCheckedFile)
 
 
 import LazyCircus.Scene.Telegram.Lang (getBotName)
@@ -70,8 +87,14 @@ import LazyCircus.Scene.Telegram.Lang (answerCallbackQuery)
 import LazyCircus.Scene.Telegram.Lang (editMessageText)
 
 
+import LazyCircus.Scene.Telegram.Lang (deleteMessage)
+
+
 import LazyCircus.Scene.Telegram.Lang (TelegramScript)
 
 
 import LazyCircus.Scene.Log (slogError, slogInfo, slogSensitive, slogWarn, swithLogCtx)
+
+
+import LazyCircus.Telegram.FileCheck (FileValidationError (..), fileSha256Hex, telegramMaxDownloadBytes)
 

@@ -89,6 +89,8 @@ instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv (DefaultApp se
     sendMessage' req = timedAndLog "Telegram" "SendMessage" $ TG.sendMessage req
     sendDocument' req = timedAndLog "Telegram" "SendDocument" $ TG.sendDocument req
     getFile' fid = timedAndLog "Telegram" "GetFile" $ TG.getFile fid
+    downloadFile' f = timedAndLog "Telegram" "DownloadFile" $ TG.downloadFile f
+    deleteMessage' cid mid = timedAndLog "Telegram" "DeleteMessage" $ TG.deleteMessage cid mid
     getBotName' = TG.getBotName  -- pure reader lookup, no IO timing needed
     scheduleMessages' reqs = timedAndLog "Telegram" "ScheduleMessages" $ TG.scheduleMessages reqs
     setBotCommands' cmds = timedAndLog "Telegram" "SetBotCommands" $ TG.setBotCommands cmds

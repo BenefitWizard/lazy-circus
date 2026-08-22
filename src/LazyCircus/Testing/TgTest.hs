@@ -56,6 +56,8 @@ module LazyCircus.Testing.TgTest (
     sendMessageIn,
     sendFile,
     sendFileByUser,
+    sendDocumentByUser,
+    sendDocumentAs,
     sendKeypress,
     sendKeypressByUser,
     -- ** Waiting for bot replies
@@ -66,6 +68,7 @@ module LazyCircus.Testing.TgTest (
     waitForReplyWithKeyboardIn,
     waitForReaction,
     waitForFile,
+    waitForDeletion,
     -- ** Assertions and control
     guard,
     guardWith,
@@ -85,7 +88,7 @@ import RIO.Text qualified as Text
 
 import Telegram.Bot.API (ChatId (..), Update, UserId (..), messageMessageId, updateMessage)
 import Telegram.Bot.API.GettingUpdates (UpdateId, updateUpdateId)
-import Telegram.Bot.API.Types (FileId (..), MessageId (..))
+import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..))
 import Telegram.Bot.Extra.Headless (feedUpdates, runHeadlessBot)
 
 import LazyCircus.Testing.Performer
@@ -106,6 +109,8 @@ import LazyCircus.Testing.Updates
     , defaultTestChatId
     , defaultTestUserId
     , mkCallbackQueryUpdate
+    , mkDocument
+    , mkDocumentUpdate
     , mkFileUpdate
     , mkTextUpdateByUser
     , newUpdateFactory
@@ -399,6 +404,45 @@ sendFileByUser userId chatId fileId = do
     upd <- liftIO $ mkFileUpdate (ttrFactory rt) userId chatId fileId
     feedAndReturn rt upd
 
+-- | Send a document upload from a specific user in a specific chat, carrying the
+-- FULL 'Document' — including the client-declared @file_name@ / @mime_type@ /
+-- @file_size@ metadata — so scenario-level pre-checks that read those fields
+-- (format or size gates over the sender's claim) can be tested end-to-end.
+-- PRE-CONTRACT: The scenario's staged canned download (if any) is keyed by the
+-- document's 'documentFileId' and may deliberately disagree with the declared
+-- metadata (that disagreement is how size-spoofing is tested).
+-- POST-CONTRACT: Returns the update's 'UpdateId' and the 'MessageId' of the sent
+-- user message.
+sendDocumentByUser :: UserId -> ChatId -> Document -> TelegramTestScript (UpdateId, MessageId)
+sendDocumentByUser userId chatId doc = do
+    rt <- ttsAsk
+    upd <- liftIO $ mkDocumentUpdate (ttrFactory rt) userId chatId doc
+    feedAndReturn rt upd
+
+-- | Send a document upload from the default user in the default chat, declared
+-- as having the given name / MIME type / size (each 'Nothing' omits the field —
+-- a metadata-free upload, same as 'sendFile'). Convenience over
+-- 'sendDocumentByUser' and 'LazyCircus.Testing.Updates.mkDocument' for testing
+-- metadata-based pre-checks: the metadata rides in @message.document@ exactly
+-- as a real client would declare it.
+-- POST-CONTRACT: Same shape as 'sendFile'.
+sendDocumentAs ::
+    FileId ->
+    -- | client-declared @file_name@ (optional)
+    Maybe Text ->
+    -- | client-declared @mime_type@ (optional)
+    Maybe Text ->
+    -- | client-declared @file_size@ in bytes (optional)
+    Maybe Integer ->
+    TelegramTestScript (UpdateId, MessageId)
+sendDocumentAs fileId name mimeType size =
+    sendDocumentByUser defaultTestUserId defaultTestChatId
+        (mkDocument fileId)
+            { documentFileName = name
+            , documentMimeType = mimeType
+            , documentFileSize = size
+            }
+
 -- | Press an inline-keyboard button (a @callback_query@) attached to a message
 -- the bot previously sent, from the default user/chat.
 sendKeypress :: MessageId -> Text -> TelegramTestScript UpdateId
@@ -473,6 +517,20 @@ waitForReaction targetId =
         waitForMatching
             (\om -> omKind om == OutSetReaction && omMessageId om == Just targetId)
             ("a reaction on message " <> tshow targetId)
+
+{- | Wait for the bot to delete the message with the given id.
+
+A mirror of 'waitForReaction': blocks on the outgoing mailbox via STM (see
+'waitForMatching'; no polling) until a 'deleteMessage' side effect targeting
+@targetId@ is observed, consuming that capture. Use the 'MessageId' returned by
+a @send*@ op (the user message the bot is expected to delete).
+-}
+waitForDeletion :: MessageId -> TelegramTestScript ()
+waitForDeletion targetId =
+    void $
+        waitForMatching
+            (\om -> omKind om == OutDeleteMessage && omMessageId om == Just targetId)
+            ("a deletion of message " <> tshow targetId)
 
 {- | Wait for a document reply from the bot.
 

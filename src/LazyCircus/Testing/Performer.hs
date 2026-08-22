@@ -33,6 +33,7 @@ module LazyCircus.Testing.Performer (
     runTelegramScript,
     createTgMock,
     createSimpleTgMock,
+    addTgDownloads,
     createSimpleMailMock,
     createAiMock,
     createSimpleAiMock,
@@ -100,13 +101,15 @@ import OpenAI.V1 qualified as V1
 import OpenAI.V1.Chat.Completions qualified as Chat
 import OpenAI.V1.Usage (Usage (..))
 import RIO
+import RIO.ByteString qualified as BS
+import RIO.HashMap qualified as HM
 import RIO.Map qualified as M
 import RIO.Process (HasProcessContext (..))
 import RIO.Time (getCurrentTime)
 import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
 import Telegram.Bot.API (ChatId, Message, MessageId, Response, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, responseResult, sendDocumentCaption, sendDocumentChatId, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
-import Telegram.Bot.API.Types (File, FileId, MessageId (..))
+import Telegram.Bot.API.Types (File (..), FileId (..), MessageId (..))
 
 -- | Response factory used by the Telegram mock to derive a reply from one outgoing request.
 type OnSendMessageRequest = WithImportance SendMessageRequest -> Response Message
@@ -121,6 +124,8 @@ data OutgoingKind
     -- ^ a @setMessageReaction@ request
     | OutEditMessage
     -- ^ an @editMessageText@ request
+    | OutDeleteMessage
+    -- ^ a @deleteMessage@ request
     deriving (Eq, Show)
 
 -- | A captured outgoing Telegram side effect, observable by the @tgTest@ DSL.
@@ -129,7 +134,8 @@ data OutgoingKind
 -- for every Telegram operation that produces user-visible traffic, so the test
 -- DSL's @waitFor*@ operations can observe replies deterministically through STM.
 -- The 'omMessageId' is the /assigned/ incremental id for @sendMessage@\/@sendDocument@
--- (see 'tgMockMessageIdCounter'), or the /target/ id for @setMessageReaction@\/@editMessageText@.
+-- (see 'tgMockMessageIdCounter'), or the /target/ id for
+-- @setMessageReaction@\/@editMessageText@\/@deleteMessage@.
 data OutgoingMessage = OutgoingMessage
     { omKind :: OutgoingKind
     -- ^ which Telegram operation produced this capture
@@ -162,6 +168,11 @@ data TgMock = TgMock
     -- ^ captured outgoing immediate Telegram sends
     , scheduledMessageRequests :: SomeRef [SendMessageRequest]
     -- ^ captured deferred Telegram sends requested via 'scheduleMessages'
+    , downloadableFiles :: SomeRef (HashMap Text ByteString)
+    -- ^ canned file content keyed by the file id text, served by mocked
+    -- 'getFile'' (metadata) and 'downloadFile'' (content); inject via
+    -- 'addTgDownloads' or the 'createTgMock' argument. Keyed by 'Text' rather
+    -- than 'FileId' because 'FileId' has no 'Hashable' instance.
     , defaultResponse :: Response Message
     -- ^ fallback response used when no canned response is queued
     , outgoingMailbox :: TBQueue OutgoingMessage
@@ -355,6 +366,16 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
         case mode of
             Mocked -> getFileMock fid
             Real -> timedAndLog "Telegram" "GetFile" $ TG.getFile fid
+    downloadFile' f = do
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> do
+                tg <- askTgMock
+                downloads <- readSomeRef (downloadableFiles tg)
+                case HM.lookup (fileIdText (fileFileId f)) downloads of
+                    Just bytes -> pure bytes
+                    Nothing -> throwString $ "LazyCircus.Testing.Performer.downloadFile': no canned download staged for " <> show (fileFileId f)
+            Real -> timedAndLog "Telegram" "DownloadFile" $ TG.downloadFile f
     getBotName' = TG.getBotName
     sendMessage' request = do
         mode <- asks (tcTelegram . testConfig . app)
@@ -418,6 +439,21 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                             }
                 pure Nothing
             Real -> timedAndLog "Telegram" "EditMessageText" $ TG.editMessageText req
+    deleteMessage' chatId messageId = do
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> do
+                tg <- askTgMock
+                liftIO $
+                    publishOutgoing tg $
+                        OutgoingMessage
+                            { omKind = OutDeleteMessage
+                            , omChatId = Just chatId
+                            , omText = Nothing
+                            , omMessageId = Just messageId
+                            , omReplyMarkup = Nothing
+                            }
+            Real -> timedAndLog "Telegram" "DeleteMessage" $ TG.deleteMessage chatId messageId
     sendDocument' req = do
         mode <- asks (tcTelegram . testConfig . app)
         case mode of
@@ -613,13 +649,18 @@ runTelegramScript botName script = do
 outgoingMailboxSize :: Natural
 outgoingMailboxSize = 64
 
--- | Build a Telegram mock with a fallback response and optional queued send responses.
--- POST-CONTRACT: The returned 'TgMock' has empty request logs; queued responses are consumed FIFO by 'sendMessage'.
-createTgMock :: Response Message -> Maybe [OnSendMessageRequest] -> IO TgMock
-createTgMock fallback queuedResponses = do
+{- | Build a Telegram mock with a fallback response, optional queued send
+responses, and canned downloadable file content.
+POST-CONTRACT: The returned 'TgMock' has empty request logs; queued responses
+are consumed FIFO by 'sendMessage'; the canned downloads are served by mocked
+'getFile'' / 'downloadFile'' (inject more via 'addTgDownloads').
+-}
+createTgMock :: Response Message -> Maybe [OnSendMessageRequest] -> [(FileId, ByteString)] -> IO TgMock
+createTgMock fallback queuedResponses downloadableContent = do
     responseQueue <- newSomeRef $ fromMaybe [] queuedResponses
     requestLog <- newSomeRef []
     scheduledLog <- newSomeRef []
+    downloadsRef <- newSomeRef (HM.fromList [(fileIdText fid, bytes) | (fid, bytes) <- downloadableContent])
     mailbox <- newTBQueueIO outgoingMailboxSize
     msgIdCounter <- newTVarIO 0
     pure
@@ -627,6 +668,7 @@ createTgMock fallback queuedResponses = do
             { sendMessageResponses = responseQueue
             , sendMessageRequests = requestLog
             , scheduledMessageRequests = scheduledLog
+            , downloadableFiles = downloadsRef
             , defaultResponse = fallback
             , outgoingMailbox = mailbox
             , tgMockMessageIdCounter = msgIdCounter
@@ -634,7 +676,16 @@ createTgMock fallback queuedResponses = do
 
 -- | Build a Telegram mock that always returns the standard canned message response.
 createSimpleTgMock :: IO TgMock
-createSimpleTgMock = createTgMock (TGDefault.defaultResponse Nothing TGDefault.defaultMessage) Nothing
+createSimpleTgMock = createTgMock (TGDefault.defaultResponse Nothing TGDefault.defaultMessage) Nothing []
+
+-- | Inject canned file content into a Telegram mock's download store, so mocked
+-- 'getFile'' metadata and 'downloadFile'' content agree for the same 'FileId'.
+-- POST-CONTRACT: Re-injecting content for the same 'FileId' overwrites the
+-- earlier bytes.
+addTgDownloads :: TgMock -> [(FileId, ByteString)] -> IO ()
+addTgDownloads tg files =
+    modifySomeRef (downloadableFiles tg) $
+        HM.union (HM.fromList [(fileIdText fid, bytes) | (fid, bytes) <- files])
 
 -- | Build an empty mail mock with no captured sends.
 createSimpleMailMock :: IO MailMock
@@ -948,9 +999,38 @@ someChatIdToChatId :: SomeChatId -> Maybe ChatId
 someChatIdToChatId (SomeChatId chatId) = Just chatId
 someChatIdToChatId (SomeChatUsername _) = Nothing
 
--- | Fail fast when a test uses Telegram file loading without providing a dedicated mock path.
+-- | Extract the raw text of a 'FileId'; doubles as the mock download-store key.
+fileIdText :: FileId -> Text
+fileIdText (FileId txt) = txt
+
+{- | Serve mocked @getFile@ metadata from the mock's canned download store.
+
+The canned bytes staged for the requested 'FileId' are turned into a 'File'
+whose reported size is the ACTUAL canned byte length (so gate-A size checks in
+'downloadCheckedFile' behave truthfully) and whose path points at the mock
+store (@mock-files\/\<file_id\>@). A missing key fails loudly and
+deterministically with the requested 'FileId' in the message: a test that
+triggers @getFile@ for an unstaged file has wired its expectations wrong.
+POST-CONTRACT: The returned response always carries @responseOk = True@ and
+@fileFileSize == Just (length of the canned bytes)@.
+-}
 getFileMock :: FileId -> TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib)) (Response File)
-getFileMock _ = throwString "LazyCircus.Testing.Performer: getFile is not implemented for tests"
+getFileMock fid = do
+    tg <- askTgMock
+    downloads <- readSomeRef (downloadableFiles tg)
+    case HM.lookup (fileIdText fid) downloads of
+        Just bytes ->
+            pure $
+                TGDefault.defaultResponse Nothing $
+                    File
+                        { fileFileId = fid
+                        , fileFileUniqueId = fid
+                        , fileFileSize = Just (fromIntegral (BS.length bytes))
+                        , fileFilePath = Just ("mock-files/" <> fileIdText fid)
+                        }
+        Nothing ->
+            throwString $
+                "LazyCircus.Testing.Performer.getFileMock: no canned download staged for " <> show fid
 
 -- | Record an async scenario request without executing it ('tcAsync = Mocked').
 captureAsyncScenario :: ScenarioProgram Script serviceLib () -> TestInterpreter serviceLib ()

@@ -36,7 +36,7 @@ Lazy Circus ships with a rich set of built-in capabilities ready for production 
 
 * **Orchestration Framework:** A robust control layer (`ScenarioProgram`) for executing sub-scenarios, spawning asynchronous background tasks (drained by a configurable pool of async workers, `runAsyncWorkerPool`), managing environment state, handling errors gracefully, and calling registered services. You can orchestrate the built-in effects or plug in your own.
 * **Database Effect DSL (via `beam`):** A comprehensive database language supporting both typed CRUD operations and raw queries. Advanced features like separate Read-Only connections, Row-Level Security (RLS), transaction management, and pessimistic row locking (`findLocked` / `findAllLocked` with `SELECT ... FOR UPDATE` semantics) are supported out-of-the-box.
-* **Telegram Bot Integration:** A ready-to-use effect for sending messages, documents, and reactions. It natively supports running multiple bots from a single application seamlessly.
+* **Telegram Bot Integration:** A ready-to-use effect for sending messages, documents, and reactions, downloading user-uploaded files (with two-gate size validation: server-reported size before transfer, actual byte length after), and deleting messages. It natively supports running multiple bots from a single application seamlessly.
 * **Mail Integration:** A robust email effect for composing and sending transactional emails.
 * **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses, a request-level `AIParams` overlay — a right-biased `Monoid` assembled from `with*` smart constructors (`withModel`, `withTemperature`, `withMaxCompletionTokens`, …) via `requestParams` / `agentParams` — for OpenAI sampling parameters, an XML-like prompt templating language (`POML`) which significantly improves prompt adherence, a `makePoml` TemplateHaskell macro that compiles `.poml` files into typed Haskell (`Input -> [POML]`) at compile time (with automatic recompilation on file edit), a `<let src="..."/>` declaration that inlines an external file (e.g. a JSON response-format schema) verbatim into a prompt at compile time, a pure `parsePomlText` parser for runtime/test use, a multi-turn `Conversation` handle that threads context across calls, and an agent loop (`solveWithAgent`) that runs a ReAct cycle with tool use against registered services.
 * **Production & Test Interpreters:** Two distinct performers (`DefaultPerformer` and `TestInterpreter`). The test runtime keeps the same shared-runner architecture as production, but swaps capabilities at the edges: DB can stay real, while Telegram, mail, AI, logging, and async work are captured through mocks in the capability layer.
@@ -489,8 +489,11 @@ myTest app = do
 -- Simple mock (default response for all sendMessage)
 mocks <- makeMocks
 
--- Custom mock with response queue
-tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
+-- Custom mock with response queue and staged downloadable files
+tgMock <- createTgMock defaultResponse (Just [myCustomResponse]) [(FileId "doc-1", fileBytes)]
+
+-- Stage more canned downloads later (Mocked getFile/downloadFile serve them by FileId)
+addTgDownloads tgMock [(FileId "doc-2", moreBytes)]
 ```
 
 ### What is Mocked
@@ -501,6 +504,8 @@ tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
 | Telegram `sendDocument` | Publishes an `OutSendDocument` to the `outgoingMailbox` (incremental `MessageId`); not added to `readTgRequests` |
 | Telegram `setMessageReaction` | Publishes an `OutSetReaction` to the `outgoingMailbox` |
 | Telegram `editMessageText` | Publishes an `OutEditMessage`; still returns `Nothing` |
+| Telegram `deleteMessage` | Publishes an `OutDeleteMessage` carrying the target `MessageId` |
+| Telegram `getFile` / `downloadFile` | Serve staged canned downloads by `FileId` (third `createTgMock` argument / `addTgDownloads`); `getFile` reports the canned byte length as the file size; unstaged ids throw |
 | Telegram `scheduleMessages` | Captured in a separate list |
 | Missing Telegram bot | Throws `NoBotConfigured` during script dispatch |
 | Telegram others | no-op / default |
@@ -516,7 +521,7 @@ tgMock <- createTgMock defaultResponse $ Just [myCustomResponse]
 
 - use `readTgRequests` to inspect immediate Telegram sends
 - use `readScheduledTgRequests` to inspect deferred Telegram sends
-- use `readOutgoingMailbox` + `OutgoingKind` (`OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage`) to assert on side-effect kinds and ordering, including the incremental `MessageId` stamped on each send
+- use `readOutgoingMailbox` + `OutgoingKind` (`OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` / `OutDeleteMessage`) to assert on side-effect kinds and ordering, including the incremental `MessageId` stamped on each send
 - use `readScheduledScenarios` to inspect `runAsync` capture
 - use `readLogWithContext` when you need to assert `withLogContext`, `lang`, or call-site metadata
 - if needed, rerun a captured async scenario in the same test runtime to verify its downstream effects
@@ -543,11 +548,16 @@ newactPilot = do
 ```
 
 `waitFor*` operations block deterministically via STM (no polling) and fail with
-`TgTestTimeout` on timeout. For building fake `Update`s in synchronous handler
-tests, use `LazyCircus.Testing.Updates` (`mkTextUpdate`, `mkCallbackQueryUpdate`,
-the stateful `UpdateFactory`, etc.). See `test/TgTestSpec.hs`,
-`test/TgMockMailboxSpec.hs`, and `test/BotHandlerSpec.hs` for worked examples,
-and the skill reference ([runtime-testing.md](docs/skills/lazy-circus/reference/runtime-testing.md))
+`TgTestTimeout` on timeout. File-upload dialogs are driven with `sendFileByUser`
+(a known `FileId` keyed to the staged mock downloads), metadata-based pre-checks
+(client-declared name / MIME / size) with `sendDocumentAs`, and message
+deletions are asserted with `waitForDeletion` (see `test/TgFileOpsSpec.hs`).
+For building fake `Update`s in synchronous handler tests, use
+`LazyCircus.Testing.Updates` (`mkTextUpdate`, `mkCallbackQueryUpdate`,
+`mkFileUpdate`, `mkDocumentUpdate`, the stateful `UpdateFactory`, etc.). See
+`test/TgTestSpec.hs`, `test/TgMockMailboxSpec.hs`, `test/TgFileOpsSpec.hs`, and
+`test/BotHandlerSpec.hs` for worked examples, and the skill reference
+([runtime-testing.md](docs/skills/lazy-circus/reference/runtime-testing.md))
 for the full DSL.
 
 ---
@@ -697,6 +707,7 @@ A conversational Telegram bot that manages circus acts. Commands:
 | `/act <id>` | Shows act details |
 | `/react <id>` | Regenerates AI audience reaction for an act |
 | `/delete <id>` | Deletes an act |
+| _document upload_ | Size-validated download (`downloadCheckedFile`, ≤ 5 MB), reply with byte length + SHA-256 prefix (or a rejection notice), then deletes the upload message |
 | _free text_ | Runs the AI agent (`solveWithAgentContinuing`) and replies |
 
 The Telegram layer lives in `BotHandler` (`handleScenario` / `updateAction` /

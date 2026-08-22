@@ -166,9 +166,9 @@ capabilities at the edges.
 | Type | Purpose |
 |---|---|
 | `Mocks serviceLib` | collected mock state (Tg requests, mails, logs, async tasks) |
-| `TgMock` | Telegram mock with configurable response queue and an STM `outgoingMailbox` |
+| `TgMock` | Telegram mock with configurable response queue, staged canned downloads, and an STM `outgoingMailbox` |
 | `OutgoingMessage` | one captured outgoing Telegram side effect (kind, chat id, text, message id, reply markup) |
-| `OutgoingKind` | tag on `OutgoingMessage`: `OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` |
+| `OutgoingKind` | tag on `OutgoingMessage`: `OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` / `OutDeleteMessage` |
 | `MailMock` | Mail mock for capturing sent mails |
 | `Mode` | runtime mode for a sub-language: `Mocked` or `Real` |
 | `TestConfig` | per-sub-language mode selection (`tcTelegram`, `tcAI`, `tcMailSend`, `tcAsync`) |
@@ -206,7 +206,7 @@ Also useful for custom harnesses:
 - `createAiMock` and `createSimpleAiMock` build custom AI mock state
 - `runWithConfigEngine` is the shared engine beneath `runWithConfig` / `runWithMocks`; it awaits in-flight `tcAsync = Real` workers and drains queued logs before returning
 - `discardMocks` drops the collected capture state when only the result matters
-- `createTgMock`, `createSimpleTgMock`, and `createSimpleMailMock` help build custom mock setups
+- `createTgMock`, `createSimpleTgMock`, `createSimpleMailMock`, and `addTgDownloads` (stage canned file downloads by `FileId` for Mocked `getFile` / `downloadFile`) help build custom mock setups; `createTgMock` takes the staged downloads as its third argument
 
 ### Mocked Sub-Language Runners
 
@@ -228,11 +228,12 @@ captures side effects; `Real` delegates to production implementations without ca
 | Telegram `sendDocument` | `tcTelegram` | publishes an `OutSendDocument` to the `outgoingMailbox` (with a fresh incremental `MessageId`) and returns the mock `defaultResponse` stamped with that id; not added to the `readTgRequests` log | delegates to `TG.sendDocument` via `timedAndLog` |
 | Telegram `setMessageReaction` | `tcTelegram` | publishes an `OutSetReaction` to the `outgoingMailbox` carrying the target `MessageId` | delegates to `TG.setMessageReaction` via `timedAndLog` |
 | Telegram `editMessageText` | `tcTelegram` | publishes an `OutEditMessage` to the `outgoingMailbox`; still always returns `Nothing` | delegates to `TG.editMessageText` via `timedAndLog` (returns real response) |
+| Telegram `deleteMessage` | `tcTelegram` | publishes an `OutDeleteMessage` to the `outgoingMailbox` carrying the target `MessageId` | delegates to `TG.deleteMessage` via `timedAndLog` |
 | Telegram `setBotCommands` / `answerCallbackQuery` | `tcTelegram` | no-op (return unit) | delegates to `TG.*` via `timedAndLog` |
 | Telegram scheduled sends | `tcTelegram` | captured in a separate `SomeRef` list (`readScheduledTgRequests`) | delegates to `TG.scheduleMessages` via `timedAndLog` |
 | Telegram missing bot | `tcTelegram` | throws `NoBotConfigured` exactly like production dispatch | same |
 | Telegram `getBotName` | — (always real) | returns the supplied bot name | same |
-| Telegram file loading | `tcTelegram` | Mocked: throws `getFileMock` (not implemented for tests) | Real: delegates to `TG.getFile` via `timedAndLog` |
+| Telegram `getFile` / `downloadFile` | `tcTelegram` | Mocked: serve staged canned downloads by `FileId` (third `createTgMock` argument / `addTgDownloads`); `getFile` reports the canned byte length as `fileFileSize`, `downloadFile` returns the staged bytes; an unstaged `FileId` throws | Real: delegates to `TG.getFile` / `TG.downloadFile` via `timedAndLog` |
 | Mail `sendMail` | `tcMailSend` | captures mail values in `readSentMails` | delegates to `Mail.sendMail` (real SMTP) via `timedAndLog`; capture stays empty |
 | Mail `makeMail` | — (always real) | uses real mail construction from env creds | same |
 | AI `ask` / `askContinuing` / `solveWithAgent` / `solveWithAgentContinuing` | `tcAI` | transport-level intercept: overrides `aiMethodsL` with `buildMockAiMethods`, which captures every rendered request (`readAiRequests`) and dequeues FIFO canned `ChatCompletionObject` responses; empty queue yields `emptyCompletion` → `Nothing` | delegates to real `askAIContinuing` / `solveWithAgentLoopContinuing` WITHOUT overriding `aiMethodsL` (real OpenAI client); `readAiRequests` stays empty |
@@ -506,7 +507,8 @@ failing `guard` or `waitFor*` short-circuits to `Left`.
 | `sendMessage txt` | text from `defaultTestUserId` in `defaultTestChatId` |
 | `sendMessageIn chatId txt` | text in a specific chat |
 | `sendMessageByUser userId chatId txt` | text from a specific user/chat |
-| `sendFile fileId` / `sendFileByUser ...` | a document upload |
+| `sendFile fileId` / `sendFileByUser ...` | a document upload (metadata-free) |
+| `sendDocumentByUser userId chatId doc` / `sendDocumentAs fileId name mime size` | a document upload carrying the client-declared `file_name` / `mime_type` / `file_size` (for metadata pre-check tests) |
 | `sendKeypress msgId cbData` / `sendKeypressByUser ...` | a `callback_query` on an inline keyboard |
 
 **Waiting for bot replies** (block via STM `retry`, fail with `TgTestTimeout` on timeout):
@@ -517,6 +519,7 @@ failing `guard` or `waitFor*` short-circuits to `Left`.
 | `waitForReplies n` | `n` reply texts, earliest-first |
 | `waitForReplyWithKeyboard` / `...In chatId` | `(Text, MessageId)` for a reply carrying an inline keyboard |
 | `waitForReaction msgId` | `()` when the bot reacts on `msgId` |
+| `waitForDeletion msgId` | `()` when the bot deletes `msgId` (mirror of `waitForReaction`) |
 | `waitForFile` | `FileId` for a document reply (stable placeholder, see Haddock) |
 | `waitForMatching predicate desc` | the matched `OutgoingMessage` (the low-level primitive) |
 
@@ -637,10 +640,10 @@ it "publishes two sends with distinct incremental message ids" $ \app -> do
     [ mid | Just mid <- map omMessageId msgs ] `shouldBe` [MessageId 0, MessageId 1]
 ```
 
-`OutgoingKind` discriminates the four captured operations: `OutSendMessage`,
-`OutSendDocument`, `OutSetReaction`, `OutEditMessage`. `omMessageId` is the
-assigned incremental id for `sendMessage`/`sendDocument`, or the target id for
-`setMessageReaction`/`editMessageText`.
+`OutgoingKind` discriminates the five captured operations: `OutSendMessage`,
+`OutSendDocument`, `OutSetReaction`, `OutEditMessage`, `OutDeleteMessage`.
+`omMessageId` is the assigned incremental id for `sendMessage`/`sendDocument`,
+or the target id for `setMessageReaction`/`editMessageText`/`deleteMessage`.
 
 ### Teardown and quiescence
 
@@ -671,6 +674,11 @@ snapshot reflects all side effects once in-flight work has settled.
 - **Expecting `waitForFile` to return the bot's real `FileId`.** The MVP mailbox
   capture does not retain the full `SendDocumentRequest`; the returned id is a
   stable placeholder suitable only for ordering assertions.
+- **Forgetting to stage canned downloads.** A Mocked `getFile` /
+  `downloadFileById` / `downloadCheckedFile` throws for a `FileId` that has no
+  staged bytes — inject them via `addTgDownloads` or the third `createTgMock`
+  argument first (see `test/TgFileOpsSpec.hs` for the full upload → download →
+  reply → `waitForDeletion` pattern).
 
 ## Fake Telegram Updates
 
@@ -696,7 +704,9 @@ or any loop that needs distinct ids):
 | `nextUpdateId f` | the next id |
 | `mkTextUpdateByUser f userId chatId txt` | text from a specific user/chat |
 | `mkTextUpdateIn f chatId txt` | text in a specific chat (default user) |
-| `mkFileUpdate f userId chatId fileId` | a document upload |
+| `mkFileUpdate f userId chatId fileId` | a document upload (metadata-free) |
+| `mkDocumentUpdate f userId chatId doc` | a document upload carrying the full `Document` (client-declared name / MIME / size) |
+| `mkDocument fileId` | a minimal `Document` value; attach metadata via record update |
 | `mkCallbackQueryUpdate f userId chatId msgId cbData` | a `callback_query` on `msgId` |
 
 Defaults: `defaultTestUserId = UserId 1001`, `defaultTestChatId = ChatId 1`.

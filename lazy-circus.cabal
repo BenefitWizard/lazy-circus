@@ -84,6 +84,7 @@ library
       LazyCircus.Script
       LazyCircus.Telegram
       LazyCircus.Telegram.Default
+      LazyCircus.Telegram.FileCheck
       LazyCircus.Telegram.Types
       LazyCircus.Testing.Performer
       LazyCircus.Testing.TgTest
@@ -324,6 +325,7 @@ test-suite lazy-circus-test
       ConfigurablePerformerSpec
       DBLangSpec
       DbPoolSpec
+      FileCheckSpec
       HTTPLangSpec
       LogSpec
       PomlEquivalenceSpec
@@ -333,6 +335,7 @@ test-suite lazy-circus-test
       ServiceCallSpec
       TestDbSupport
       TestHelpers.Bot
+      TgFileOpsSpec
       TgMockMailboxSpec
       TgTestRunnerSpec
       TgTestSpec

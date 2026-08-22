@@ -11,7 +11,7 @@ import LazyCircus.Scene.Log (handleLogLang)
 import LazyCircus.Scene.Telegram.Lang
 import LazyCircus.Telegram.Types (WithImportance)
 import RIO
-import Telegram.Bot.API (Response, SendMessageRequest, SetMessageReactionRequest)
+import Telegram.Bot.API (ChatId, MessageId, Response, SendMessageRequest, SetMessageReactionRequest)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
 import Telegram.Bot.API.Methods.SendDocument (SendDocumentRequest)
 import Telegram.Bot.API.Types (File, FileId, Message)
@@ -20,8 +20,7 @@ import Telegram.Bot.API.UpdatingMessages (EditMessageResponse, EditMessageTextRe
 -- | Capability class for interpreting operations in the Telegram free language.
 class (Monad m) => TelegramScriptPerformer m where
   getFile' :: FileId -> m (Response File)
-
-  -- downloadFile' :: File -> m RawServiceAccount
+  downloadFile' :: File -> m ByteString
   getBotName' :: m Text
   sendMessage' :: WithImportance SendMessageRequest -> m (Response Message)
   sendDocument' :: SendDocumentRequest -> m (Response Message)
@@ -30,6 +29,7 @@ class (Monad m) => TelegramScriptPerformer m where
   setMessageReaction' :: SetMessageReactionRequest -> m ()
   answerCallbackQuery' :: AnswerCallbackQueryRequest -> m ()
   editMessageText' :: EditMessageTextRequest -> m (Maybe EditMessageResponse)
+  deleteMessage' :: ChatId -> MessageId -> m ()
 
 {- | Interprets a 'TelegramScript' by folding each algebra instruction into the provided 'TelegramScriptPerformer'.
 PRE-CONTRACT: The target monad must provide a 'TelegramScriptPerformer' instance that handles every 'TelegramScriptF' constructor,
@@ -42,9 +42,9 @@ runTelegram = iterM go
   go (GetFile fileId next) = do
     file <- getFile' fileId
     next file
-  -- go (DownloadFile file next) = do
-  --   content <- downloadFile' file
-  --   next content
+  go (DownloadFile file next) = do
+    content <- downloadFile' file
+    next content
   go (GetBotName next) = do
     name <- getBotName'
     next name
@@ -69,4 +69,7 @@ runTelegram = iterM go
   go (EditMessageText req next) = do
     result <- editMessageText' req
     next result
+  go (DeleteMessage chatId messageId next) = do
+    deleteMessage' chatId messageId
+    next
   go (TgLog logOp next) = handleLogLang "Telegram" runTelegram (fmap next logOp)
