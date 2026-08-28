@@ -6,6 +6,17 @@ Read this when:
 - using `evalScript`, `throw`, `runSafely`, `getDateTime`, `withLogContext`, or `runAsync`
 - reasoning about layer boundaries or overall architecture
 
+## Contents
+
+- Architecture Map
+- Key Modules
+- Writing Scenarios
+- Using Log Context
+- Using Extra Context And Feature Flags
+- Using Async Work
+- When To Use `runSafely`
+- When To Use `runArbitraryIO`
+
 ## Architecture Map
 
 ```mermaid
@@ -85,6 +96,37 @@ multiple effects and control concerns.
 | `runAsync` | schedule async work |
 | `runArbitraryIO` | **fallback** escape hatch — run an arbitrary `IO` when no structured effect fits (see below) |
 | `callService` | call a registered service via the service library |
+
+Signatures (`sl` = `serviceLib`; module `LazyCircus.Scenario`):
+
+```haskell
+evalScript            :: script a -> ScenarioProgram script sl a
+throw                 :: Exception e => e -> ScenarioProgram script sl a
+runSafely             :: Exception e => ScenarioProgram script sl a -> ScenarioProgram script sl (Either e a)
+getDateTime           :: ScenarioProgram script sl UTCTime
+logInfo, logWarn, logError, logSensitive :: HasCallStack => Text -> ScenarioProgram script sl ()
+withLogContext        :: [(Text, Text)] -> ScenarioProgram script sl a -> ScenarioProgram script sl a
+withLogEntry          :: Show a => Text -> a -> ScenarioProgram script sl b -> ScenarioProgram script sl b
+with2LogEntries       :: (Show a, Show b) => ((Text, a), (Text, b)) -> ScenarioProgram script sl z -> ScenarioProgram script sl z
+getExtraContext       :: ScenarioProgram script sl (HashMap Text Text)
+readFromExtraContext  :: Text -> ScenarioProgram script sl (Maybe Text)
+getFeatureFlag        :: Text -> ScenarioProgram script sl Bool
+runAsync              :: ScenarioProgram script sl () -> ScenarioProgram script sl ()
+runArbitraryIO        :: IO a -> ScenarioProgram script sl a
+callService           :: IsInServiceLib sl req resp => req -> ScenarioProgram script sl resp
+
+run                   :: ScenarioPerformer script sl m => ScenarioProgram script sl a -> m a
+```
+
+Top-level `Script` wrappers (module `LazyCircus`):
+
+```haskell
+tgScript   :: Text -> TelegramScript b -> Script b
+dbScript   :: PgDB db -> DbMode -> DBScript db b -> Script b
+aiScript   :: AIScript b -> Script b
+mailScript :: MailScript b -> Script b
+httpScript :: BaseUrl -> HTTPScript b -> Script b
+```
 
 ### Rule Of Thumb
 

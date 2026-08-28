@@ -29,6 +29,7 @@ extra-source-files:
     app/example/prompts/notice.poml
     app/example/prompts/outer.poml
     app/example/prompts/refer.poml
+    app/example/prompts/untrusted.poml
     app/example/prompts/refer-disclaimer.txt
     app/example/prompts/response-format.json
 

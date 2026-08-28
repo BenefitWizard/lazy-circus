@@ -26,6 +26,7 @@ import LazyCircus.AI.POML (renderPOMLtoPrompt)
 import LazyCircus.AI.POML.TH (makePoml)
 import LazyCircus.AI.POML.Types (POML (..), defaultListParams, fragment, p_)
 import RIO
+import RIO.Text qualified as Text
 import Test.Hspec
 
 -- | Generates @HelloInput@ and @hello :: HelloInput -> [POML]@ from
@@ -83,6 +84,13 @@ $(makePoml "notice" "app/example/prompts/notice.poml")
 -- Special characters in the JSON (@{@, @}@, @"@, @\\@) survive because the file
 -- is read by @readFileUtf8@ (not XML-parsed) and emitted as a 'Text' literal.
 $(makePoml "jsonFmt" "app/example/prompts/jsonFmt.poml")
+
+-- | Generates @UntrustedInput@ and @untrusted :: UntrustedInput -> [POML]@ from
+-- @app/example/prompts/untrusted.poml@ — the record's @resume@ field is
+-- @untrusted@-typed (still 'Text' in Haskell); the splice wraps the field
+-- access in an 'Untrusted' node, which the renderer isolates inside a
+-- protective fence.
+$(makePoml "untrusted" "app/example/prompts/untrusted.poml")
 
 spec :: Spec
 spec = describe "makePoml" $ do
@@ -163,6 +171,19 @@ spec = describe "makePoml" $ do
             `shouldBe` "<role>You are a structured responder.</role>"
                     <> "<task>Reply with JSON in exactly this shape:</task>"
                     <> "<code>" <> schema <> "</code>"
+
+    it "untrusted input splices to fenced node" $ do
+        let prompt = renderPOMLtoPrompt (untrusted UntrustedInput{resume = "hello"})
+        prompt `shouldSatisfy` ("```2cf24dba\nhello\n```" `Text.isInfixOf`)
+        prompt `shouldSatisfy` ("<p>```2cf24dba\nhello\n```</p>" `Text.isInfixOf`)
+        prompt `shouldSatisfy` ("<p>Analyze the following resume:</p>" `Text.isInfixOf`)
+
+    it "derives Eq on the generated untrusted input record" $
+        UntrustedInput{resume = "A"} `shouldBe` UntrustedInput{resume = "A"}
+
+    it "derives Show on the generated untrusted input record" $
+        show (UntrustedInput{resume = "X"})
+            `shouldSatisfy` ("UntrustedInput" `isInfixOf`)
 
 -- NOTE: A `.poml` with a `poml`-typed variable inside a concatenation
 -- (e.g. {{pomlVar + "text"}}) causes `makePoml` to call `fail` at compile

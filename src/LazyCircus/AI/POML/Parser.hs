@@ -94,6 +94,7 @@ data PomlType
     | PTBoolean  -- ^ @type=\"boolean\"@
     | PTNumber   -- ^ @type=\"number\"@
     | PTPoml     -- ^ @type=\"poml\"@
+    | PTUntrusted -- ^ @type=\"untrusted\"@
     deriving (Eq, Show)
 
 -- | Expression inside a @{{ ... }}@ template placeholder.
@@ -238,11 +239,12 @@ parsePomlType "string" = Right PTString
 parsePomlType "boolean" = Right PTBoolean
 parsePomlType "number" = Right PTNumber
 parsePomlType "poml" = Right PTPoml
+parsePomlType "untrusted" = Right PTUntrusted
 parsePomlType other =
     Left
         ( "Invalid <let> type: "
             <> T.unpack other
-            <> " (expected one of: string, boolean, number, poml)"
+            <> " (expected one of: string, boolean, number, poml, untrusted)"
         )
 
 -- | Convert an XML 'Element' (whose tag is whitelisted) into a body 'PomlNode'.

@@ -9,6 +9,15 @@ Read this when:
 - doing code review for cross-layer integration changes
 - checking the detailed pitfalls and final review checklist
 
+## Contents
+
+- Database Service Instances
+- Service Registration (Manual)
+- Service Library via TemplateHaskell
+- Adding A New Effect
+- Detailed Pitfalls
+- Review Checklist
+
 ## Database Service Instances
 
 To make a Beam table usable through `DBScript`, implement the service typeclasses from
@@ -107,7 +116,7 @@ The default method uses `generateFiltration`, so an empty instance is enough in 
 
 #### Locking Reads Reuse `HasReadService`
 
-`findLocked` and `findAllLocked` (the `SELECT ... FOR UPDATE` family) dispatch through the same `generateFiltration` used by `find` / `findAll`. No extra service instance is needed — once a table has `HasReadService`, locking reads work automatically. Just remember they must run inside `withTransaction` (see [effects.md](effects.md#row-locking)).
+`findLocked` and `findAllLocked` (the `SELECT ... FOR UPDATE` family) dispatch through the same `generateFiltration` used by `find` / `findAll`. No extra service instance is needed — once a table has `HasReadService`, locking reads work automatically. Just remember they must run inside `withTransaction` (see [db.md](db.md#row-locking)).
 
 #### Use `dbScript` With An Explicit `DbMode`
 

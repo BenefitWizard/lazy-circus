@@ -5,7 +5,8 @@ PURPOSE: Generate POML AST values (and optional input record types) from
   @.poml@ source files at compile time via a Template Haskell macro.
 SCOPE: Reading and parsing @.poml@ files, building the variable type
   environment, validating the parsed document (declared variables, valid
-  element names, no @poml@-typed variables inside concatenations), and
+  element names, no @poml@- or @untrusted@-typed variables inside
+  concatenations), and
   emitting a record type plus a function definition whose body constructs a
   @[POML]@ list (one entry per top-level body node).
 DEPENDS: "LazyCircus.AI.POML.Parser" for parsing, "LazyCircus.AI.POML.Types"
@@ -21,7 +22,8 @@ that calls 'makePoml' must keep them in scope:
   * 'POML' and all of its constructors from "LazyCircus.AI.POML.Types"
     (@Paragraph@, @Heading@, @Code@, @Strong@, @Italic@, @Underline@,
     @Strikethrough@, @Span@, @Br@, @Text@, @List@, @CP@, @Role@, @Task@,
-    @ExampleSet@, @Example@, @ExampleInput@, @ExampleOutput@), plus the
+    @ExampleSet@, @Example@, @ExampleInput@, @ExampleOutput@,
+    @Untrusted@), plus the
     @default*Params@ values referenced by each semantic tag
     ('defaultListParams', 'defaultCPParams', 'defaultRoleParams',
     'defaultTaskParams', 'defaultExampleSetParams',
@@ -116,8 +118,8 @@ POST-CONTRACT: On success returns at most one record type declaration (when
   the document has @<let>@ declarations) and exactly one function
   declaration whose body is a @[POML]@ list (one element per top-level body
   node). Calls 'fail' on any parse error, undeclared variable reference,
-  empty body, invalid element name, or @poml@-typed variable inside a
-  concatenation.
+  empty body, invalid element name, or @poml@- or @untrusted@-typed
+  variable inside a concatenation.
 -}
 makePoml :: String -> FilePath -> Q [Dec]
 makePoml base filePath = do
@@ -295,6 +297,10 @@ pomlTypeToHsType PTString = ConT ''Text
 pomlTypeToHsType PTBoolean = ConT ''Bool
 pomlTypeToHsType PTNumber = ConT ''Float
 pomlTypeToHsType PTPoml = ConT ''POML
+-- | @type="untrusted"@ fields stay 'Text'; the protective fence is applied at
+-- render time ('renderPOMLTag'), and the splice wraps the field access in
+-- 'Untrusted'.
+pomlTypeToHsType PTUntrusted = ConT ''Text
 
 -- | Emit the function signature and body. The function takes the input
 -- record when @<let>@ declarations exist, otherwise it is a nullary value.
@@ -423,24 +429,35 @@ genNodeText varEnv mArgName exprs =
                     (appE (varE 'tshow) (fieldAccess n mArgName))
             Just (VKInput PTPoml) ->
                 fieldAccess n mArgName
+            Just (VKInput PTUntrusted) ->
+                appE (conE 'Untrusted) (fieldAccess n mArgName)
             Just (VKConst c) ->
                 appE (conE 'Text) (textLitE c)
             Nothing ->
                 fail ("makePoml: undeclared variable: " <> T.unpack n)
 
--- | Validate that no @poml@-typed variable appears in a concatenation
--- context (its 'POML' value cannot be appended to 'Text').
+-- | Validate that no variable whose type cannot be concatenated appears in a
+-- concatenation context: @poml@-typed (a 'POML' value cannot be appended to
+-- 'Text') and @untrusted@-typed (the value must be spliced as an 'Untrusted'
+-- node, not text) variables are both rejected.
 validateNoPomlInConcat :: Map Text VarKind -> [TemplateExpr] -> Q ()
 validateNoPomlInConcat varEnv = mapM_ check
   where
-    check (TVar n)
-        | Map.lookup n varEnv == Just (VKInput PTPoml) =
-            fail
-                ( "makePoml: poml-typed variable '"
-                    <> T.unpack n
-                    <> "' cannot participate in concatenation"
-                )
+    check (TVar n) = case Map.lookup n varEnv of
+        Just (VKInput PTPoml) -> reject "poml" n
+        Just (VKInput PTUntrusted) -> reject "untrusted" n
+        _ -> pure ()
     check _ = pure ()
+
+    -- | Fail the splice, naming the variable and its offending type.
+    reject kind n =
+        fail
+            ( "makePoml: "
+                <> kind
+                <> "-typed variable '"
+                <> T.unpack n
+                <> "' cannot participate in concatenation"
+            )
 
 -- | Render one atom of a concatenation to a 'Text'-valued expression.
 genConcatPart :: Map Text VarKind -> Maybe Name -> TemplateExpr -> Q Exp
@@ -468,6 +485,13 @@ genConcatPart varEnv mArgName (TVar n) =
                     <> T.unpack n
                     <> "' cannot participate in concatenation"
                 )
+        Just (VKInput PTUntrusted) ->
+            -- Defensive: 'validateNoPomlInConcat' should have caught this already.
+            fail
+                ( "makePoml: untrusted-typed variable '"
+                    <> T.unpack n
+                    <> "' cannot participate in concatenation"
+                )
         Just (VKConst c) ->
             textLitE c
         Nothing ->
@@ -485,8 +509,9 @@ genChildren varEnv mArgName children =
 -- lookup (absent attribute = outer 'Nothing', empty value = inner 'Nothing');
 -- both cases fail here with a missing-caption error. A literal, a variable, or
 -- a concatenation is lowered by reusing the same atom-rendering logic that
--- 'genNodeText' uses for text content. A @poml@-typed variable in the caption
--- fails: @cpCaption :: Text@ cannot hold a 'POML' value.
+-- 'genNodeText' uses for text content. A @poml@- or @untrusted@-typed variable
+-- in the caption fails: @cpCaption :: Text@ cannot hold a 'POML' value nor a
+-- fence-isolated 'Untrusted' node.
 genCaptionExpr
     :: Map Text VarKind
     -> Maybe Name
@@ -596,3 +621,4 @@ capitalize (c : cs) = toUpper c : cs
 lowercaseFirst :: String -> String
 lowercaseFirst [] = []
 lowercaseFirst (c : cs) = toLower c : cs
+

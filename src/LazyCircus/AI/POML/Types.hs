@@ -25,6 +25,7 @@ module LazyCircus.AI.POML.Types
     , csvTable_
     , csvTable
     , var
+    , untrusted_
       -- ** Basic inline / block tags
     , p_
     , h_
@@ -90,6 +91,8 @@ data POML
     | Task TaskParams [POML]
     | Table TableParams T.Table
     | Var Text
+    -- | Untrusted payload (input @type=\"untrusted\"@); rendered inside a protective fence with a hash marker.
+    | Untrusted Text
     -- | Paragraph block (@<p>@).
     | Paragraph [POML]
     -- | Heading block (@<h level="n">@); the 'Maybe' 'Int' is the optional
@@ -132,6 +135,7 @@ instance Eq POML where
     Task pa ca == Task pb cb = pa == pb && ca == cb
     Table pa ta == Table pb tb = pa == pb && T.renderTable ta == T.renderTable tb
     Var a == Var b = a == b
+    Untrusted a == Untrusted b = a == b
     Paragraph ca == Paragraph cb = ca == cb
     Heading la ca == Heading lb cb = la == lb && ca == cb
     Code sa ca == Code sb cb = sa == sb && ca == cb
@@ -160,6 +164,7 @@ instance Show POML where
     show (Task ps cs) = "Task " <> show ps <> " " <> show cs
     show (Table ps t) = "Table " <> show ps <> " (rendered: " <> show (T.renderTable t) <> ")"
     show (Var x) = "Var " <> show x
+    show (Untrusted t) = "Untrusted " <> show t
     show (Paragraph cs) = "Paragraph " <> show cs
     show (Heading lvl cs) = "Heading " <> show lvl <> " " <> show cs
     show (Code syn cs) = "Code " <> show syn <> " " <> show cs
@@ -178,6 +183,10 @@ instance IsString POML where
 -- | Wrap plain text as a POML leaf node.
 text :: Text -> POML
 text = Text
+
+-- | Insert an untrusted payload node (rendered inside a protective fence).
+untrusted_ :: Text -> POML
+untrusted_ = Untrusted
 
 -- | Encode a JSON value as a plain text POML leaf.
 json :: (ToJSON a) => a -> POML

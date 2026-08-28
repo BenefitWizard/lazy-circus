@@ -557,7 +557,7 @@ For building fake `Update`s in synchronous handler tests, use
 `mkFileUpdate`, `mkDocumentUpdate`, the stateful `UpdateFactory`, etc.). See
 `test/TgTestSpec.hs`, `test/TgMockMailboxSpec.hs`, `test/TgFileOpsSpec.hs`, and
 `test/BotHandlerSpec.hs` for worked examples, and the skill reference
-([runtime-testing.md](docs/skills/lazy-circus/reference/runtime-testing.md))
+([tg-test.md](docs/skills/lazy-circus/reference/tg-test.md))
 for the full DSL.
 
 ---

@@ -15,9 +15,11 @@ module Example.PomlDemo
     ( runPomlDemo
     , HelloInput (..)
     , ContactInput (..)
+    , UntrustedInput (..)
     , hello
     , greeting
     , contact
+    , untrusted
     ) where
 
 import RIO
@@ -40,7 +42,11 @@ $(makePoml "greeting" "app/example/prompts/greeting.poml")
 -- @app/example/prompts/contact.poml@.
 $(makePoml "contact" "app/example/prompts/contact.poml")
 
--- | Render the three demo templates and print the resulting prompt text.
+-- | Generates @UntrustedInput@ and @untrusted :: UntrustedInput -> [POML]@ from
+-- @app/example/prompts/untrusted.poml@.
+$(makePoml "untrusted" "app/example/prompts/untrusted.poml")
+
+-- | Render the four demo templates and print the resulting prompt text.
 runPomlDemo :: IO ()
 runPomlDemo = do
     putStrLn "\n=== POML Template Demo ==="
@@ -57,5 +63,12 @@ runPomlDemo = do
             <> Text.unpack
                 ( renderPOMLtoPrompt
                     (contact ContactInput{firstName = "Jane", lastName = "Doe"})
+                )
+        )
+    putStrLn
+        ( "untrusted:"
+            <> Text.unpack
+                ( renderPOMLtoPrompt
+                    (untrusted UntrustedInput{resume = "Jane Doe, Haskell engineer"})
                 )
         )

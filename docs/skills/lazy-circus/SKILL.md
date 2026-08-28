@@ -1,22 +1,15 @@
 ---
 name: lazy-circus
 description: >
-  Expert guidance for working with Lazy Circus — a Haskell effect framework based on
-  Church-encoded free monads and ScenarioProgram orchestration. Use this skill whenever
-  the user mentions LazyCircus, lazy-circus, ScenarioProgram, Script, DBScript,
-  TelegramScript, AIScript, MailScript, HTTPScript, evalScript, tgScript, mailScript,
-  aiScript, httpScript, sendDocument, downloadFile, downloadFileById, downloadCheckedFile,
-  deleteMessage, FileValidationError, fileSha256Hex, askContinuing, solveWithAgent,
-  solveWithAgentContinuing, AIRequest, AgentRequest, AIParams, mkAIRequest, mkAgentRequest,
-  withModel, withTemperature, withStop, requestParams, agentParams, ReasoningEffort,
-  Conversation, DefaultPerformer, dbScript, DBScriptDef, runAsyncWorker, runAsyncWorkerPool,
-  scheduleAsyncAction, HasPgPool, pgPoolL, HasPgPoolReadOnly, ASYNC_WORKERS,
-  findLocked, findAllLocked, LockSpec, HasLogLang, tgTest, TelegramTestScript, waitForReply,
-  waitForMatching, waitForDeletion, sendFileByUser, sendDocumentAs, mkDocumentUpdate, addTgDownloads, OutgoingMessage,
-  Mailboxes, UpdateFactory, mkTextUpdate, POML, makePoml, parsePoml, parsePomlText,
-  POML.TH, POML.Parser, PomlDemo, or asks how to write scenarios, add new effects,
-  define DB service instances, author prompt templates (.poml files), or test Lazy Circus
-  programs (including end-to-end Telegram bot tests).
+  Expert guidance for Lazy Circus, a Haskell effect framework of Church-encoded
+  free monads orchestrated by ScenarioProgram. Use for any LazyCircus / lazy-circus
+  module or task about scenarios (ScenarioProgram, evalScript, runSafely, runAsync),
+  scene effect scripts (DBScript, TelegramScript, AIScript, MailScript, HTTPScript
+  and their tgScript / dbScript / aiScript / mailScript / httpScript wrappers),
+  AI requests (mkAIRequest, AIParams, Conversation) and POML prompt templates
+  (makePoml, .poml files), DB specifics (findLocked, withTransactionRLS), services
+  (callService, makeServiceLib), runtime (DefaultPerformer, runAsyncWorkerPool),
+  or testing (runWithDefaultMocks, tgTest, TelegramTestScript, mkTextUpdate).
 ---
 
 # Lazy Circus Skill
@@ -24,151 +17,71 @@ description: >
 Use this skill when the task involves writing or reviewing Lazy Circus code, extending the
 framework, or explaining how to use it correctly.
 
-The detailed material now lives in the `reference/` directory next to this file. Start here,
-then read the specific reference file for the layer you are touching.
+Detailed material lives in the `reference/` directory next to this file. Read the file(s)
+matching the layer you are touching — everything else stays out of context.
+
+**The references are self-sufficient**: every exported API is documented with its type
+signature and usage examples, so you should never need to read library source files.
+If a signature you need is genuinely missing from the references, do a POINT lookup
+instead of opening source files:
+
+```bash
+# works in any stack project that depends on lazy-circus (library repo or consumer
+# with lazy-circus as a git/path/hackage dep) — answers come from compiled interfaces,
+# no source checkout needed. <package> = your local package name (in this repo: lazy-circus).
+printf ':m +LazyCircus.Testing.Performer\n:t runWithAiMocks\n:i Mocks\n:q\n' \
+  | stack ghci <package>:lib --ghci-options "-v0"
+```
+
+- `:t name` — exact type; `:i Name` — constructors, record fields, instances; `:browse Module` — every export
+- always pass an explicit target (`<package>:lib`), otherwise `stack ghci` stops at an
+  interactive main-module prompt when piped non-interactively
+- LSP hover / goToDefinition also work when configured; prefer them over grep
+- avoid raw source reading (`rg`, opening `.hs` files) — it wastes context and invites drift
+
+The module map is in [reference/scenarios.md](reference/scenarios.md).
 
 ## Core Model
 
 Lazy Circus works in four layers:
 
-1. Scene language layer
-   One domain effect such as DB, Telegram, AI, Mail, or HTTP.
-2. Script layer
-   Wrap one scene program into `Script` so scenarios can evaluate it.
-3. Scenario layer
-   Orchestrate business flow in `ScenarioProgram`.
-4. Performer layer
-   Interpret the abstract program in production or tests.
+1. Scene language — one domain effect such as DB, Telegram, AI, Mail, or HTTP
+2. Script — wrap one scene program into `Script` so scenarios can evaluate it
+3. Scenario — orchestrate business flow in `ScenarioProgram`
+4. Performer — interpret the abstract program in production or tests
 
-Default routing:
+Routing by intent:
 
-- business orchestration -> write `ScenarioProgram`
-- one domain effect -> write a scene script
-- runtime behavior -> change a performer
-- new table integration -> implement DB service instances
+- business orchestration → write `ScenarioProgram`
+- one domain effect → write a scene script, wrapped via `tgScript` / `dbScript` / `aiScript` / `mailScript` / `httpScript`
+- runtime behavior → change a performer
+- new table integration → implement DB service instances
+- long-lived background worker → register a service, call it via `callService`
 
-## Read Reference Material When
+## Reference Map
 
 | If the task is about | Read |
 |---|---|
-| `ScenarioProgram`, `evalScript`, `runSafely`, `runAsync`, scenario logging, extra context, or the architecture map | [reference/scenarios.md](reference/scenarios.md) |
-| DB/Telegram/AI/Mail/HTTP DSL operations, smart constructors, scene-level logging, top-level wrappers like `tgScript` / `mailScript` / `aiScript` / `httpScript`, or prompt templates (`POML`, `makePoml`, `.poml` files) | [reference/effects.md](reference/effects.md) |
-| `DefaultPerformer`, `evalScriptDefault`, environment projection, async queue behavior, test interpreter behavior, mocks, DB test setup, end-to-end Telegram bot tests (`tgTest` / `TelegramTestScript`), or fake Telegram `Update`s | [reference/runtime-testing.md](reference/runtime-testing.md) |
-| DB service instances, service registration, adding a new public effect, integration checklists, or the detailed pitfalls/review checklist | [reference/extension.md](reference/extension.md) |
-| Where to place logs, what to log vs what not to log, debug vs prod, context propagation, or logging anti-patterns | [reference/logging.md](reference/logging.md) |
+| `ScenarioProgram`, `evalScript`, `runSafely`, `runAsync`, `runArbitraryIO`, architecture map, key modules | [reference/scenarios.md](reference/scenarios.md) |
+| `DBScript`, transactions, row locking (`findLocked`), RLS (`withTransactionRLS`), update patch semantics | [reference/db.md](reference/db.md) |
+| `TelegramScript`, file downloads, size gates (`downloadCheckedFile`) | [reference/telegram.md](reference/telegram.md) |
+| `AIScript`, `AIRequest` / `AgentRequest`, `AIParams`, `Conversation`, tool-aware scripts | [reference/ai.md](reference/ai.md) |
+| Prompt templates: `POML` AST, `.poml` files, `makePoml`, `parsePomlText` | [reference/poml.md](reference/poml.md) |
+| `MailScript`, `HTTPScript` | [reference/mail-http.md](reference/mail-http.md) |
+| `DefaultPerformer`, `DefaultApp`, pools, dispatch paths, async worker pool, teardown | [reference/runtime.md](reference/runtime.md) |
+| Test performer, mocks, `TestConfig`, capture buffers (`readLog`, `readTgRequests`, ...), fake `Update`s, DB test setup | [reference/testing.md](reference/testing.md) |
+| End-to-end bot tests: `tgTest`, `TelegramTestScript`, `waitFor*`, `Mailboxes` | [reference/tg-test.md](reference/tg-test.md) |
+| DB service instances, service registration, `makeServiceLib`, adding a new effect, integration pitfalls and checklist | [reference/extension.md](reference/extension.md) |
+| Logging placement, WHAT-not-WHY, user-data ban, debug vs prod, `slog*` API | [reference/logging.md](reference/logging.md) |
 
 Read more than one reference file when a task crosses layers.
 
-## High-Signal Rules
+## Global Rules
 
-- Use `logInfo`, `logWarn`, `logError`, and `logSensitive` in `ScenarioProgram`.
-- Use `slogInfo`, `slogWarn`, `slogError`, `slogSensitive`, and `swithLogCtx` inside scene languages.
-- Log WHAT happened and WHAT decision was made. Not WHY — the "why" lives in the code.
-- Put traceability context (IDs, keys) in `withLogContext` / `withLogEntry`, not in the log message string.
-- Never log user data (message text, LLM output, file content). Use IDs in structured context instead.
-- Timing is automatic (`timedAndLog` in performers). Do not log start/finish manually.
-- `logSensitive` / `slogSensitive` = debug only. Everything else is visible in production.
-- Wrap scene programs before `evalScript`:
-  - Telegram -> `tgScript "bot-name" ...`
-   - Mail -> `mailScript ...`
-   - AI -> `aiScript ...` (empty tools) or `aiScriptWithAll ...` / `aiScriptWith tools ...` (TH-generated, with tools)
-   - DB -> `dbScript db mode ...` (or the underlying `DBScriptDef` constructor directly)
-   - HTTP -> `httpScript baseUrl ...`
-- `AIScriptDef` takes a `[ToolDescription]` as its first argument; `aiScript` passes `[]` for backward compatibility.
-- For multi-turn AI, thread a `Conversation` with `askContinuing` / `solveWithAgentContinuing`. Stateless `ask` / `solveWithAgent` inject `emptyConversation` and discard the transcript.
-- A `Conversation` never holds a `Chat.System` message; build it only via `emptyConversation` or `conversationFromTurns`.
-- Build AI requests with `mkAIRequest` / `mkAgentRequest` (`LazyCircus.AI`, re-exported via `LazyCircus.Scene.AI`): the `requestParams` / `agentParams` fields are strict, so raw record construction must set them explicitly. Override OpenAI sampling parameters per request through the right-biased `AIParams` monoid: `(mkAgentRequest prompt sys 10){ agentParams = withModel "m" <> withTemperature 0.7 }`. `mempty` keeps the defaults (model falls back to `deepseek-v4-flash`); `<>` never concatenates (`withStop ["a"] <> withStop ["b"]` = `Just ["b"]`); the overlay applies in `ask` requests and in every agent-loop iteration. `thinkingEnabled` stays a separate `Bool` (DeepSeek `extra`), not an `AIParams` field; `response_format` and `tools` are intentionally not overridable.
-- Author prompts as `[POML]` fragments (the `prompt` / `systemPrompt` fields of `AIRequest` / `AgentRequest`). Prefer the `makePoml` TH macro (`LazyCircus.AI.POML.TH`) over hand-built AST: it reads a `.poml` file at compile time, emits a typed `Input` record (from `<let type="…">` runtime-input declarations) plus an `Input -> [POML]` function, and registers the file with `addDependentFile` so edits trigger recompilation. A `.poml` body may contain one or more top-level elements (e.g. `<role>` and `<task>` as siblings) — each is lowered to one `[POML]` entry, so a real prompt no longer needs to be wrapped in a single outer tag. The consumer module must keep `POML(..)` + the `default*Params` values in scope and enable `OverloadedStrings`.
-- A `<let name="…" src="file"/>` declaration inlines the file's entire contents **verbatim as a compile-time `Text` constant** (path relative to the `.poml`, registered with `addDependentFile`). It is **not** a runtime record field: a document whose only `<let>`s are `src` constants yields a nullary function. There is no JSON parsing or attribute navigation — the raw file text becomes prompt text (e.g. embed an expected response-format schema). `type` and `src` are mutually exclusive (specifying both, or neither, is a parse error).
-- `parsePomlText` (`LazyCircus.AI.POML.Parser`) is the pure, TH-free path from `.poml` text to a `[POML]` list (for tests / runtime). It cannot represent template concatenations (`{{a + " " + b}}`) or templated `<cp caption="{{...}}">` — those require the `makePoml` macro, which lowers them at the AST level. `renderPOMLtoPrompt :: [POML] -> Text` turns any `[POML]` list into the prompt text sent to the model.
-- To splice one template's `[POML]` output into another template's `type="poml"` slot, wrap it with `fragment :: [POML] -> POML` (`LazyCircus.AI.POML.Types`): `outer (OuterInput{ body = fragment (inner inp), … })`. Empty → `Text ""`, singleton → the node itself, multi-node → a transparent `Fragment` group. The parser never produces `Fragment`; it is eDSL/composition-only.
-- Use `callService` to invoke registered services from `ScenarioProgram`.
-- `runArbitraryIO` is a **last-resort escape hatch** for one-off `IO` that fits no scene language or service. It runs for real in BOTH production and tests (no mocking/capture) and is invisible to automatic timing — prefer a scene language / service instead.
-- `ScenarioProgram` has two type parameters: `ScenarioProgram script serviceLib a`.
-- `DefaultApp` is parameterized by the service library type: `DefaultApp serviceLib`. Use `NoServiceLib` when no services are needed.
-- `create` and `createAsIs` return `Maybe row`.
-- `ReadOnly` forbids write operations.
-- `DefaultApp` holds PostgreSQL **connection pools** (`pgDbPool` / `pgDbPoolReadOnly`, exposed via `HasPgPool` / `HasPgPoolReadOnly`), not single connections. Every DB script checks out one connection from the pool for its entire duration (`withTransaction` / RLS stay safe under concurrency; a connection is never shared between scripts). `ReadOnly` uses the read-only pool when configured, falling back to the read-write pool. Release the pools with `destroyAllResources` — after cancelling worker threads.
-- Drain the async task queue with `runAsyncWorker` (one worker) or `runAsyncWorkerPool n` (n competing workers over the shared queue; n = 0 clamps to 1 and n > 1024 to 1024, each with a warning). All workers die with the calling thread. The demo app reads the pool size from the `ASYNC_WORKERS` env var (default 1).
-- `findLocked` / `findAllLocked` acquire a row lock (`FOR UPDATE` family) via a `LockSpec`; they MUST run inside `withTransaction` (locks are released at COMMIT/ROLLBACK). `WaitNoWait` surfaces contention as a thrown `SqlError`; `WaitSkipLocked` makes an empty result ambiguous. They are allowed in `ReadOnly` and reuse `HasReadService` — no extra instances.
-- Tests in this repository use a real PostgreSQL database.
-- Test `runAsync` with `tcAsync = Mocked` (the default) captures scheduled scenarios instead of executing them; `tcAsync = Real` spawns the worker through the same test interpreter so its side effects land in the usual capture buffers (mailbox / `readTgRequests`), and `readScheduledScenarios` stays empty.
-- Always run `hpack` before build or tests.
-- Do not manually edit `exposed-modules` in `package.yaml`.
-- Every exported function, type, typeclass, and non-trivial instance follows the repo Haddock style.
-- Use `makeServiceLib` (from `LazyCircus.App.Service.TH`) to generate service libraries from request/response/tool-spec triples.
-- `tgTest` (from `LazyCircus.Testing.TgTest`) drives the bot's own `Update -> IO ()` handler via `runHeadlessBot`; `buildAction` MUST wire the test performer (`runWithMocks`) against the same `Mocks` the runner hands it.
-- The `tgTest` DSL's `waitFor*` ops block deterministically via STM `retry` on the `outgoingMailbox`; never replace them with polling. Fail with `TgTestTimeout` on timeout, `TgTestGuardFailed` on a failed `guard`.
-- Every Telegram `sendMessage` / `sendDocument` / `setMessageReaction` / `editMessageText` / `deleteMessage` publishes an `OutgoingMessage` (tagged with `OutgoingKind`) to the STM mailbox; `sendMessage`/`sendDocument` responses are stamped with a fresh incremental `MessageId`.
-- Telegram file downloads return the raw `getFile` `Response File` plus the downloaded `ByteString` — no domain wrapper types. `downloadFile` takes the `File` object (it needs `fileFilePath`); `downloadFileById` / `downloadCheckedFile` take a `FileId`. `downloadCheckedFile` gates size twice (server-reported `fileFileSize` before transfer, actual byte length after — the latter is authoritative) and yields `Left FileValidationError` ONLY for size rejects; transport errors throw (wrap with `runSafely`). `telegramMaxDownloadBytes` (20 MiB) is the protocol ceiling; `fileSha256Hex` hashes bytes for logs/dedup (all re-exported by `LazyCircus.Scene.Telegram`).
-- Mocked `getFile` / `downloadFile` serve staged canned downloads keyed by `FileId` (the third `createTgMock` argument or `addTgDownloads`); an unstaged id throws loudly, and the mocked `fileFileSize` equals the canned byte length. In `tgTest`, drive uploads with `sendFileByUser` (a known `FileId`) and assert deletions with `waitForDeletion`.
-- The client-declared document metadata (`documentFileName` / `documentMimeType` / `documentFileSize` from the update) is the sender's CLAIM — spoofable, and by design may disagree with the staged canned download (that disagreement is how size-spoofing pre-checks are tested). Inject it with `sendDocumentAs` (DSL) or `mkDocumentUpdate` / `mkDocument` (factory); `sendFile` / `mkFileUpdate` upload metadata-free documents.
-- In the `tgTest` DSL, the message-sending ops (`sendMessage` / `sendMessageIn` / `sendMessageByUser` / `sendFile` / `sendFileByUser`) return `(UpdateId, MessageId)` so the message id can be threaded into `waitForReaction` / `sendKeypress`; `sendKeypress*` return just `UpdateId`.
-- Use `LazyCircus.Testing.Updates` (`mkTextUpdate`, `mkCallbackQueryUpdate`, `UpdateFactory`) to build fake `Update`s for synchronous handler tests; use `tgTest` for end-to-end dialog tests.
+- `logInfo` / `logWarn` / `logError` / `logSensitive` in `ScenarioProgram`; `slog*` / `swithLogCtx` inside scene languages. Details and anti-patterns: [reference/logging.md](reference/logging.md).
+- `runArbitraryIO` is a last-resort escape hatch: the `IO` runs for real in BOTH production and tests, cannot be mocked, and is invisible to automatic timing.
+- Run `hpack` before every build or test; never edit `exposed-modules` in `package.yaml` manually.
+- Every exported function and type follows the repo Haddock contract style (see AGENTS.md).
+- Tests run against a real PostgreSQL database — DB is never mocked (details: [reference/testing.md](reference/testing.md)).
 
-## Inspect First
-
-- `src/LazyCircus/Scenario.hs`
-- `src/LazyCircus/Script.hs`
-- `src/LazyCircus/Performer.hs`
-- `src/LazyCircus/Performer/Default.hs`
-- `src/LazyCircus/AsyncWorker.hs` and `src/LazyCircus/AsyncWorker/Types.hs` for the async worker loop / worker pool and the shared action queue
-- `src/LazyCircus/AI.hs` and `src/LazyCircus/AI/Conversation.hs` for AI request types, the agent loop, and the `Conversation` transcript
-- `src/LazyCircus/AI/POML/Types.hs` for the `POML` AST and smart constructors, `src/LazyCircus/AI/POML.hs` for `renderPOMLtoPrompt`, `src/LazyCircus/AI/POML/Parser.hs` for `parsePoml` / `parsePomlText`, and `src/LazyCircus/AI/POML/TH.hs` for the `makePoml` macro, when authoring or reviewing prompt templates
-- `src/LazyCircus/Telegram/FileCheck.hs` for the pure file-download size gates and `fileSha256Hex`, when touching Telegram file operations
-- the relevant `src/LazyCircus/Scene/*` module for the domain you are touching
-- `src/LazyCircus/Testing/Performer.hs` for mock-backed scenario/script tests
-- `src/LazyCircus/Testing/TgTest.hs` for the end-to-end `tgTest` runner and `TelegramTestScript` DSL
-- `src/LazyCircus/Testing/Updates.hs` for fake Telegram `Update` factories
-- `src/LazyCircus/DB/Service.hs` plus the concrete table module for DB integration work
-- `src/LazyCircus/App/Service.hs` for service registration
-- `src/LazyCircus/App/Service/TH.hs` for TH-generated service libraries and tool plumbing
-
-Prefer LSP navigation for Haskell modules when possible.
-
-## Common Mistakes
-
-- Writing orchestration logic inside a scene DSL instead of `ScenarioProgram`.
-- Calling `logInfo` inside a scene language or `slogInfo` inside `ScenarioProgram`.
-- Putting user data (query text, AI response, email body) into log message strings instead of structured context.
-- Logging manual start/finish timing when `timedAndLog` already handles it in the performer.
-- Explaining reasoning in log text instead of stating the observable decision.
-- Forgetting to wrap a scene script into `Script` before `evalScript`.
-- Treating DB `create` helpers as if they returned a plain row instead of `Maybe`.
-- Treating `DefaultApp` as holding a single `Connection` — it holds `Pool Connection` (`pgDbPool` / `pgDbPoolReadOnly`); DB access goes through a per-script `withResource` checkout in the performers.
-- Calling `destroyAllResources` on the pools before cancelling worker threads — cancel the async workers first, otherwise in-flight scripts can race the teardown.
-- Calling `findLocked` / `findAllLocked` outside `withTransaction` and expecting a held lock — Postgres auto-commits the statement, so the lock is released immediately (a no-op). Always wrap locking reads in `withTransaction`.
-- Building a `Conversation` with a leading `Chat.System` message, or pattern-matching on the unexported `Conversation` constructor instead of using `emptyConversation` / `conversationFromTurns`.
-- Constructing `AIRequest` / `AgentRequest` via raw record syntax and omitting the strict `requestParams` / `agentParams` field — it fails to compile; use `mkAIRequest` / `mkAgentRequest` plus record-update overrides.
-- Expecting `AIParams` fragments to concatenate list fields (`withStop ["a"] <> withStop ["b"]`) — the `Semigroup` is right-biased and overrides wholesale.
-- Assuming tests execute async work or fake DB behavior.
-- Adding a new public effect without the supporting `Script` dispatch and stable public facade when needed.
-- Using `makeServiceLib` with `(Name, Name)` pairs instead of `(Name, Name, [(Name, String, String)])` triples.
-- Forgetting `FromJSON`/`ToJSON` instances on request/response types when tool specs are provided to `makeServiceLib`.
-- Writing a custom Telegram-test wait that polls the mailbox instead of using the built-in `waitFor*` / `waitForMatching` (which block on STM `retry` and wake deterministically).
-- In `tgTest`, wiring `buildAction` against a different `Mocks` than the one the runner supplied, so replies never reach the mailbox the DSL observes.
-- Asserting on Telegram side effects from `runAsync` during tests — with `tcAsync = Mocked` (default) `runAsync` only captures scheduled scenarios (assert via `readScheduledScenarios` / `mbScheduledScenarioCount`); with `tcAsync = Real` the spawned worker's side effects DO appear in the mailbox, so that assertion no longer holds.
-- Expecting `waitForFile` to return the bot's real `FileId` — the mailbox capture returns a stable placeholder suitable only for ordering assertions.
-- Forgetting to stage a canned download (the third `createTgMock` argument or `addTgDownloads`) before a Mocked `getFile` / `downloadFileById` / `downloadCheckedFile` — the mock throws for an unstaged `FileId`.
-- Treating Telegram download transport failures as `Left` — `downloadCheckedFile` returns `Left` only for `FileValidationError` (size rejects); transport errors are exceptions, so guard with `runSafely`.
-- Expecting `parsePomlText` to handle template concatenations (`{{a + " " + b}}`) or a templated `<cp caption="{{name}}">` — these are not representable in the `POML` AST and return `Left`; use the `makePoml` TH macro, which splices them at the AST level.
-- Calling `makePoml` without keeping `POML(..)` and the `default*Params` values (e.g. `defaultListParams`) in scope, or without `OverloadedStrings` enabled — the generated splice references these names directly.
-- Expecting `.poml` edits to be picked up without `addDependentFile` recompilation — `makePoml` registers the source file so GHC rebuilds on change; a stale build means the splice did not re-run.
-- Treating a `<let src="..."/>` constant as a runtime input — it is inlined verbatim at compile time and never appears in the `{Base}Input` record (so a `src`-only document produces a nullary function), and editing the referenced file triggers recompilation via `addDependentFile`.
-
-## Review Checklist
-
-1. Is the code in the correct layer?
-2. Are logging APIs used at the correct layer?
-3. Do scenario logs capture decisions at branch points?
-4. Is user data kept out of log text (only IDs in structured context)?
-5. Are exported APIs documented with Haddock contracts?
-6. If DB tables changed, are the service instances complete?
-7. If locking reads (`findLocked` / `findAllLocked`) are used, are they inside `withTransaction` and is the `WaitNoWait` / `WaitSkipLocked` ambiguity handled?
-8. If a new effect was added, was dispatch updated everywhere?
-9. Are tests aligned with real async and DB behavior?
-10. Was `hpack` run before build or test?
-11. If prompt templates changed (`.poml` files, `makePoml` splices, or `POML` AST), does the consumer module keep `POML(..)` + `default*Params` in scope, is `OverloadedStrings` on, and does the generated `Input -> [POML]` function match the `<let>` declarations? If `<let src="..."/>` is used, is the referenced file present (relative to the `.poml`) and treated as a compile-time constant, not a record field?
-12. If AI requests changed, are they built via `mkAIRequest` / `mkAgentRequest` (or set `requestParams` / `agentParams` explicitly), and do `AIParams` merges rely on right bias rather than concatenation?
-13. If async workers or app teardown changed: are worker threads cancelled before `destroyAllResources`, and does the worker-pool size go through `runAsyncWorkerPool` (so the 0 / >1024 clamps apply)?
-14. If Telegram file downloads are used: is the size limit explicit (`downloadCheckedFile`), are only size rejects handled as `Left` (transport errors via `runSafely`), and do tests stage canned downloads by `FileId` before asserting (with `waitForDeletion` for deletes)?
+Each reference file ends with a domain review checklist; consult the relevant one when reviewing changes.

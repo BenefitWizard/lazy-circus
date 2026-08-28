@@ -1,0 +1,5 @@
+<poml>
+  <let name="resume" type="untrusted"/>
+  <p>Analyze the following resume:</p>
+  <p>{{resume}}</p>
+</poml>

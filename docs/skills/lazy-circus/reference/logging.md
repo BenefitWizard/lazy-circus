@@ -8,9 +8,17 @@ Read this when:
 - deciding whether to put data into log text or into logging context
 - understanding the debug vs prod visibility model
 
-For the syntax of logging APIs (which function to call, in which layer), see
-[reference/scenarios.md](scenarios.md) for scenario-level and
-[reference/effects.md](effects.md) for scene-level.
+For the scenario-level API surface (`logInfo` family, `withLogContext`), see
+[scenarios.md](scenarios.md); for the scene-level API, see
+[Scene-Level API](#scene-level-api) below.
+
+## Contents
+
+- Two-Layer Model
+- Six Principles
+- Placement Checklist
+- Anti-Patterns
+- Scene-Level API
 
 ## Two-Layer Model
 
@@ -226,3 +234,33 @@ case result of
     Left err -> logWarn $ "AI call failed: " <> tshow err
     Right a -> pure a
 ```
+
+## Scene-Level API
+
+Module: `LazyCircus.Scene.Log`
+
+Use these inside DB, Telegram, AI, Mail, and HTTP scripts (module `LazyCircus.Scene.Log`;
+they work in any free-monad scene language with a `HasLogLang` instance):
+
+```haskell
+slogInfo, slogWarn, slogError, slogSensitive :: HasCallStack => Text -> m ()
+swithLogCtx :: [(Text, Text)] -> prog b -> m b
+```
+
+Example:
+
+```haskell
+dbStep :: DBScript SimpleDb ()
+dbStep =
+    swithLogCtx [("phase", "db-read")] $ do
+        slogInfo "About to fetch rows"
+        _ <- findAll (CircusActId 42)
+        pure ()
+```
+
+`handleLogLang` is the shared interpreter helper that:
+
+- reads the current `LoggingContext`
+- adds the language tag such as `DB` or `Telegram`
+- preserves nested log context
+- emits `AppLogMsgWithContext`

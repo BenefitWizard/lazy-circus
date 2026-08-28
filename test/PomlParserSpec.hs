@@ -57,6 +57,12 @@ spec = do
                 Right PomlDoc{pdLets} ->
                     pdLets `shouldBe` [LetFile "disclaimer" "disclaimer.txt"]
 
+        it "parses <let type=\"untrusted\"> into a LetInput declaration" $
+            case parsePoml "<poml><let name=\"x\" type=\"untrusted\"/><p>a</p></poml>" of
+                Left err -> expectationFailure ("expected Right, got Left: " <> err)
+                Right PomlDoc{pdLets} ->
+                    pdLets `shouldBe` [LetInput "x" PTUntrusted]
+
         it "rejects a <let> specifying both type and src with Left" $
             parsePoml "<poml><let name=\"x\" type=\"string\" src=\"f.txt\"/></poml>"
                 `shouldSatisfy` isLeft
@@ -69,6 +75,13 @@ spec = do
 
         it "rejects an invalid <let> type with Left" $
             parsePoml "<poml><let name=\"x\" type=\"integer\"/></poml>" `shouldSatisfy` isLeft
+
+        it "rejects a near-miss <let> type with Left naming the allowed types" $
+            case parsePoml "<poml><let name=\"x\" type=\"untruste\"/><p>a</p></poml>" of
+                Left err -> do
+                    err `shouldSatisfy` ("untruste" `isInfixOf`)
+                    err `shouldSatisfy` ("untrusted" `isInfixOf`)
+                Right _ -> expectationFailure "expected Left, got Right"
 
         it "rejects a non-<poml> root element with Left" $
             parsePoml "<doc/>" `shouldSatisfy` isLeft

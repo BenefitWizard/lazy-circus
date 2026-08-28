@@ -2,9 +2,11 @@
 
 -- | Tests for the POML renderer ('renderPOMLtoPrompt') covering the
 -- standardized tag names, heading/code attributes, the self-closing <br/> tag,
--- variable-name preservation, and nested inline content.
+-- variable-name preservation, nested inline content, and the 'Untrusted'
+-- protective fence rendering.
 module PomlRendererSpec (spec) where
 
+import Data.Text qualified as T
 import LazyCircus.AI.POML (renderPOMLtoPrompt)
 import LazyCircus.AI.POML.Types
     ( POML (..)
@@ -26,6 +28,7 @@ import LazyCircus.AI.POML.Types
     , span_
     , task_
     , u_
+    , untrusted_
     , var
     )
 import Test.Hspec
@@ -109,3 +112,36 @@ spec = describe "renderPOMLtoPrompt" $ do
 
         it "renders the empty fragment as nothing" $
             fragment [] `shouldBe` (Text "" :: POML)
+
+    describe "Untrusted fence" $ do
+        it "renders simple content inside the exact 3-backtick fence with its SHA-256 marker" $
+            renderPOMLtoPrompt [untrusted_ "hello"] `shouldBe` "```2cf24dba\nhello\n```"
+
+        it "lengthens the fence to 4 backticks for an interior backtick run of 3" $ do
+            let out = renderPOMLtoPrompt [untrusted_ "a ``` b"]
+            out `shouldSatisfy` T.isPrefixOf "````"
+            out `shouldSatisfy` not . T.isPrefixOf "`````"
+            out `shouldSatisfy` T.isInfixOf "\n````"
+
+        it "lengthens the fence to 6 backticks for an interior backtick run of 5" $ do
+            let out = renderPOMLtoPrompt [untrusted_ "x ````` y"]
+            out `shouldSatisfy` T.isPrefixOf "``````"
+            out `shouldSatisfy` not . T.isPrefixOf "```````"
+
+        it "renders identical input identically on repeated calls" $ do
+            let first = renderPOMLtoPrompt [untrusted_ "hello"]
+                second = renderPOMLtoPrompt [untrusted_ "hello"]
+            first `shouldBe` second
+
+        it "derives distinct content-dependent markers (hardcoded SHA-256 prefixes)" $ do
+            renderPOMLtoPrompt [untrusted_ "a"] `shouldBe` "```ca978112\na\n```"
+            renderPOMLtoPrompt [untrusted_ "b"] `shouldBe` "```3e23e816\nb\n```"
+
+        it "compares equal on the Untrusted constructor for equal payloads" $
+            untrusted_ "x" == untrusted_ "x" `shouldBe` True
+
+        it "shows the Untrusted constructor structurally" $
+            show (untrusted_ "x") `shouldBe` "Untrusted \"x\""
+
+        it "strips trailing newlines from the fenced content" $
+            renderPOMLtoPrompt [untrusted_ "hi\n\n"] `shouldSatisfy` T.isSuffixOf "hi\n```"
