@@ -64,6 +64,10 @@ data Observation app
         , obsMsgId :: MessageId
         -- ^ incremental mock id assigned to the sent message (matches the id
         -- published to the outgoing mailbox for the same effect)
+        , obsMarkup :: Maybe SomeReplyMarkup
+        -- ^ reply markup attached to the message, when the send carried one.
+        -- The markup type is opaque: equality sees only its presence (see the
+        -- 'Eq' instance) and 'Show' renders a placeholder
         }
     | ObsTgDocument
         { obsChatId :: Maybe ChatId
@@ -94,7 +98,49 @@ data Observation app
         }
     | ObsApp app
       -- ^ an app-specific observation produced by a caller-supplied hook
-    deriving (Eq, Show)
+
+-- | Field-wise equality. The opaque 'SomeReplyMarkup' is compared by presence
+-- only (the type exposes no 'Eq'), mirroring how the outgoing mailbox treats
+-- markup; all other fields compare exactly.
+instance Eq app => Eq (Observation app) where
+    a == b = case (a, b) of
+        (ObsTgMessage{obsChatId = chat1, obsText = text1, obsMsgId = msg1, obsMarkup = markup1}, ObsTgMessage{obsChatId = chat2, obsText = text2, obsMsgId = msg2, obsMarkup = markup2}) ->
+            chat1 == chat2
+                && text1 == text2
+                && msg1 == msg2
+                && isJust markup1 == isJust markup2
+        (ObsTgDocument{obsChatId = chat1, obsFileId = file1}, ObsTgDocument{obsChatId = chat2, obsFileId = file2}) ->
+            chat1 == chat2 && file1 == file2
+        (ObsTgReaction reaction1, ObsTgReaction reaction2) -> reaction1 == reaction2
+        (ObsTgEdit{obsTargetMsgId = target1, obsNewText = text1}, ObsTgEdit{obsTargetMsgId = target2, obsNewText = text2}) ->
+            target1 == target2 && text1 == text2
+        (ObsTgDelete delete1, ObsTgDelete delete2) -> delete1 == delete2
+        (ObsAsyncScheduled desc1, ObsAsyncScheduled desc2) -> desc1 == desc2
+        (ObsApp x, ObsApp y) -> x == y
+        _ -> False
+
+-- | Manual 'Show' because 'SomeReplyMarkup' has no 'Show' instance; the
+-- opaque markup is rendered as a placeholder (mirrors the manual 'Show' of
+-- the performer's 'OutgoingMessage').
+instance Show app => Show (Observation app) where
+    show obs = case obs of
+        ObsTgMessage{obsChatId = chat, obsText = text, obsMsgId = msg, obsMarkup = markup} ->
+            "ObsTgMessage{obsChatId = " <> show chat
+                <> ", obsText = " <> show text
+                <> ", obsMsgId = " <> show msg
+                <> ", obsMarkup = " <> maybe "Nothing" (const "(markup)") markup
+                <> "}"
+        ObsTgDocument{obsChatId = chat, obsFileId = file} ->
+            "ObsTgDocument{obsChatId = " <> show chat <> ", obsFileId = " <> show file <> "}"
+        ObsTgReaction{obsTargetMsgId = target} ->
+            "ObsTgReaction{obsTargetMsgId = " <> show target <> "}"
+        ObsTgEdit{obsTargetMsgId = target, obsNewText = newText} ->
+            "ObsTgEdit{obsTargetMsgId = " <> show target <> ", obsNewText = " <> show newText <> "}"
+        ObsTgDelete{obsTargetMsgId = target} ->
+            "ObsTgDelete{obsTargetMsgId = " <> show target <> "}"
+        ObsAsyncScheduled{obsScenarioDesc = desc} ->
+            "ObsAsyncScheduled{obsScenarioDesc = " <> show desc <> "}"
+        ObsApp x -> "ObsApp " <> show x
 
 -- | A journal entry stamped with the position (0-based) it was committed at.
 data Sequenced a = Sequenced
@@ -167,8 +213,8 @@ data DialogState = DialogState
     { dsLastReply :: !(Maybe Text)
     -- ^ text of the last consumed 'ObsTgMessage' ('Nothing' before the first)
     , dsLastKeyboard :: !(Maybe SomeReplyMarkup)
-    -- ^ keyboard attached to the last reply; always 'Nothing' for now because
-    -- 'Observation' does not yet carry reply keyboards
+    -- ^ keyboard attached to the last consumed 'ObsTgMessage' ('Nothing'
+    -- before the first, or when the message carried no reply markup)
     }
 
 -- | Dialog state before anything has been consumed.
@@ -241,8 +287,8 @@ Semantics:
   transaction; when the budget expires the wait fails with 'Left' carrying an
   'AwaitTimeout'. The timeout is the ONLY source of non-determinism.
 * /Dialog/: a matched 'ObsTgMessage' folds into the derived dialog state
-  ('dsLastReply'; 'dsLastKeyboard' is cleared — a plain message carries no
-  keyboard). Other observations leave the dialog untouched. Convention: one
+  ('dsLastReply' from the message text, 'dsLastKeyboard' from its
+  'obsMarkup'). Other observations leave the dialog untouched. Convention: one
   'awaitObservation' on 'ObsTgMessage' corresponds to exactly one bot message.
 
 PRE-CONTRACT: None. (The state may be freshly allocated; the budget is
@@ -314,9 +360,10 @@ peekLastConsumed st = case ssLastConsumed st of
         pure (find ((== lastN) . sqNumber) entries)
 
 -- | Fold one matched observation into the derived dialog state. Only
--- 'ObsTgMessage' is interpreted: it becomes 'dsLastReply' and clears
--- 'dsLastKeyboard'. Everything else leaves the dialog untouched.
+-- 'ObsTgMessage' is interpreted: it sets 'dsLastReply' from the message text
+-- and 'dsLastKeyboard' from its 'obsMarkup'. Everything else leaves the
+-- dialog untouched.
 updateDialog :: DialogState -> Observation app -> DialogState
-updateDialog _ ObsTgMessage{obsText = txt} =
-    DialogState{dsLastReply = Just txt, dsLastKeyboard = Nothing}
+updateDialog _ ObsTgMessage{obsText = txt, obsMarkup = markup} =
+    DialogState{dsLastReply = Just txt, dsLastKeyboard = markup}
 updateDialog ds _ = ds

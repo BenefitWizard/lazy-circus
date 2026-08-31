@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lazy-circus-testing — BDD-слой и работа с feature-файлами</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+<script>
+  (function(){
+    var saved = null;
+    try { saved = localStorage.getItem("lc-bdd-theme"); } catch (e) {}
+    if (saved === "dark" || saved === "light") {
+      document.documentElement.setAttribute("data-theme", saved);
+    }
+  })();
+</script>
+<style>
+  :root {
+    --bg: #F1EEE7;
+    --bg-raised: #F8F6F0;
+    --ink: #24221E;
+    --ink-soft: #5A564C;
+    --ink-faint: #8B8578;
+    --accent: #BE3B2F;
+    --accent-ink: #FFFFFF;
+    --brass: #9A7B24;
+    --panel: #20241F;
+    --panel-ink: #EDE8DA;
+    --panel-soft: #A8AD9C;
+    --hairline: #D8D3C6;
+    --ok: #3E7C4F;
+    --tag-bg: #E4DFD2;
+    --shadow: 0 1px 0 rgba(36,34,30,.06), 0 12px 32px -18px rgba(36,34,30,.35);
+  }
+  :root[data-theme="dark"] {
+    --bg: #16171B;
+    --bg-raised: #1D1F24;
+    --ink: #EAE6DC;
+    --ink-soft: #B4AF9F;
+    --ink-faint: #7E7A6E;
+    --accent: #E2604F;
+    --accent-ink: #16171B;
+    --brass: #D2AC46;
+    --panel: #0D0E11;
+    --panel-ink: #E4DFCF;
+    --panel-soft: #8F9484;
+    --hairline: #2C2E34;
+    --ok: #7BC491;
+    --tag-bg: #26282E;
+    --shadow: 0 1px 0 rgba(0,0,0,.4), 0 14px 36px -18px rgba(0,0,0,.7);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Instrument Sans", system-ui, sans-serif;
+    font-size: 16.5px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 28px; }
+  .measure { max-width: 72ch; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:hover { text-decoration-thickness: 2px; }
+  ::selection { background: var(--accent); color: var(--accent-ink); }
+
+  /* ---------- theme toggle ---------- */
+  .theme-toggle {
+    position: fixed; top: 18px; right: 18px; z-index: 50;
+    font: 600 12px/1 "Instrument Sans", sans-serif;
+    letter-spacing: .08em; text-transform: uppercase;
+    padding: 9px 14px; border-radius: 999px;
+    border: 1px solid var(--hairline);
+    background: var(--bg-raised); color: var(--ink-soft);
+    cursor: pointer;
+  }
+  .theme-toggle:hover { color: var(--ink); border-color: var(--ink-faint); }
+  .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- masthead ---------- */
+  .masthead { padding: 84px 0 56px; border-bottom: 3px solid var(--ink); position: relative; overflow: hidden; }
+  .masthead::after {
+    content: ""; position: absolute; right: -140px; top: -140px; width: 380px; height: 380px;
+    border: 3px solid var(--hairline); border-radius: 50%;
+    background:
+      radial-gradient(circle at 50% 50%, transparent 0 31%, var(--accent) 31% 33%, transparent 33% 49%, var(--brass) 49% 51%, transparent 51% 66%, var(--accent) 66% 68%, transparent 68%);
+    opacity: .5; pointer-events: none;
+  }
+  .eyebrow {
+    font: 700 12px/1 "Instrument Sans", sans-serif;
+    letter-spacing: .22em; text-transform: uppercase; color: var(--accent);
+    display: flex; align-items: center; gap: 12px; margin: 0 0 22px;
+  }
+  .eyebrow::before { content: ""; width: 34px; height: 3px; background: var(--accent); }
+  h1 {
+    font-family: "Alfa Slab One", serif;
+    font-weight: 400; font-size: clamp(2.4rem, 6vw, 4.4rem);
+    line-height: 1.02; letter-spacing: .01em;
+    margin: 0 0 20px; text-wrap: balance;
+  }
+  h1 .thin { color: var(--accent); }
+  .lede { font-size: 1.18rem; max-width: 60ch; color: var(--ink-soft); margin: 0 0 30px; }
+  .lede b { color: var(--ink); }
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; }
+  .chip {
+    font: 600 13px/1.4 "JetBrains Mono", monospace;
+    padding: 8px 14px; border: 1.5px solid var(--ink);
+    border-radius: 999px; background: var(--bg-raised);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .chip em { font-style: normal; color: var(--accent); font-weight: 700; }
+
+  /* ---------- sections ---------- */
+  section { padding: 64px 0 24px; }
+  .sec-head { display: flex; align-items: baseline; gap: 18px; margin-bottom: 12px; }
+  .sec-num {
+    font-family: "Alfa Slab One", serif;
+    font-size: 2.6rem; line-height: 1; color: var(--accent);
+    flex: none;
+  }
+  h2 {
+    font-size: 1.65rem; font-weight: 700; letter-spacing: -.01em;
+    margin: 0; text-wrap: balance;
+  }
+  .sec-sub { color: var(--ink-soft); max-width: 68ch; margin: 0 0 34px; }
+
+  /* ---------- architecture cards ---------- */
+  .arch { display: grid; grid-template-columns: 1fr 44px 1fr; gap: 0; align-items: stretch; }
+  .arch-col { border: 2px solid var(--ink); background: var(--bg-raised); padding: 22px 24px; box-shadow: var(--shadow); }
+  .arch-col h3 {
+    margin: 0 0 4px; font: 700 12px/1.3 "Instrument Sans", sans-serif;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--ink-faint);
+  }
+  .arch-col .pkg { font: 700 17px/1.3 "JetBrains Mono", monospace; margin-bottom: 14px; }
+  .arch-col .pkg b { color: var(--accent); }
+  .arch ul { margin: 0; padding: 0; list-style: none; }
+  .arch li { padding: 7px 0 7px 20px; position: relative; font-size: .95rem; color: var(--ink-soft); border-top: 1px dashed var(--hairline); }
+  .arch li:first-child { border-top: 0; }
+  .arch li::before { content: "·"; position: absolute; left: 6px; color: var(--accent); font-weight: 700; }
+  .arch li b { color: var(--ink); font-weight: 600; }
+  .arch-arrow { display: flex; align-items: center; justify-content: center; font-size: 1.5rem; color: var(--accent); font-weight: 700; }
+  .arch-note {
+    margin-top: 18px; padding: 14px 18px; border-left: 4px solid var(--brass);
+    background: var(--bg-raised); font-size: .93rem; color: var(--ink-soft);
+  }
+  .arch-note code { color: var(--ink); }
+
+  /* ---------- module map ---------- */
+  .modmap { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; margin-top: 26px; }
+  .mod {
+    border: 1.5px solid var(--hairline); background: var(--bg-raised);
+    padding: 16px 18px 14px; box-shadow: var(--shadow);
+  }
+  .mod.core { border-color: var(--ink); }
+  .mod-name { font: 700 13.5px/1.4 "JetBrains Mono", monospace; }
+  .mod-name .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--accent); }
+  .mod.moved .mod-name .dot { background: var(--brass); }
+  .mod p { margin: 8px 0 0; font-size: .87rem; color: var(--ink-soft); line-height: 1.5; }
+  .mod-legend { margin-top: 14px; font-size: .85rem; color: var(--ink-faint); display: flex; gap: 22px; flex-wrap: wrap; }
+  .mod-legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; }
+
+  /* ---------- pipeline ---------- */
+  .pipe { counter-reset: step; margin-top: 30px; display: grid; gap: 0; }
+  .pipe-step { display: grid; grid-template-columns: 74px 1fr; gap: 20px; padding: 22px 0; border-top: 1px solid var(--hairline); }
+  .pipe-step:first-child { border-top: 0; }
+  .pipe-num {
+    counter-increment: step;
+    font-family: "Alfa Slab One", serif; font-size: 2.1rem; line-height: 1;
+    color: var(--accent);
+  }
+  .pipe-num::before { content: counter(step, decimal-leading-zero); }
+  .pipe-body h3 { margin: 2px 0 6px; font-size: 1.05rem; }
+  .pipe-body p { margin: 0; color: var(--ink-soft); font-size: .95rem; max-width: 70ch; }
+  .pipe-body code { font-size: .86em; }
+  .pipe-aside {
+    margin-top: 10px; font-size: .85rem; color: var(--brass);
+    font-weight: 600;
+  }
+
+  /* ---------- code blocks ---------- */
+  .codewrap { margin: 26px 0; border: 2px solid var(--ink); background: var(--panel); box-shadow: var(--shadow); }
+  .codehead {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid rgba(237,232,218,.14);
+  }
+  .codehead .fname { font: 500 12.5px/1 "JetBrains Mono", monospace; color: var(--panel-soft); }
+  pre {
+    margin: 0; padding: 20px 22px; overflow-x: auto;
+    font: 400 13.5px/1.7 "JetBrains Mono", monospace;
+    color: var(--panel-ink);
+  }
+  pre code { display: block; }
+  .c-kw { color: #E2604F; font-weight: 500; }
+  .c-tag { color: #D2AC46; }
+  .c-str { color: #9FC58A; }
+  .c-com { color: #7B837A; font-style: italic; }
+  .c-fn  { color: #E8C97E; }
+  .c-par { color: #F1EEE7; }
+
+  /* ---------- anatomy: margin labels ---------- */
+  .anatomy { display: grid; grid-template-columns: 1fr 250px; gap: 30px; align-items: start; margin-top: 26px; }
+  .anat-notes { display: grid; gap: 14px; position: sticky; top: 24px; }
+  .anat-note { border-left: 3px solid var(--accent); padding: 2px 0 2px 14px; font-size: .87rem; color: var(--ink-soft); }
+  .anat-note b { color: var(--ink); display: block; font-size: .8rem; letter-spacing: .1em; text-transform: uppercase; margin-bottom: 3px; }
+  .anat-note brass { border-left-color: var(--brass); }
+
+  /* ---------- grammar table ---------- */
+  .tblwrap { overflow-x: auto; margin: 24px 0; border: 1.5px solid var(--hairline); }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; background: var(--bg-raised); }
+  th, td { text-align: left; padding: 11px 16px; border-top: 1px solid var(--hairline); vertical-align: top; }
+  th {
+    font: 700 11.5px/1.4 "Instrument Sans", sans-serif; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--ink-faint); border-top: 0; background: var(--tag-bg);
+  }
+  td code, p code, li code {
+    font: 500 .88em "JetBrains Mono", monospace;
+    background: var(--tag-bg); color: var(--ink);
+    padding: 2px 6px; border-radius: 4px; white-space: nowrap;
+  }
+  td.yes { color: var(--ok); font-weight: 600; white-space: nowrap; }
+  td.no { color: var(--accent); font-weight: 600; white-space: nowrap; }
+
+  /* ---------- dictionary cards ---------- */
+  .dict { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; margin-top: 26px; }
+  .dcard { border: 1.5px solid var(--hairline); border-top: 3px solid var(--accent); background: var(--bg-raised); padding: 16px 18px; box-shadow: var(--shadow); }
+  .dcard.given { border-top-color: var(--brass); }
+  .dcard .dk {
+    font: 700 10.5px/1 "Instrument Sans", sans-serif; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--ink-faint); display: block; margin-bottom: 9px;
+  }
+  .dcard .dp { font: 500 13.5px/1.55 "JetBrains Mono", monospace; margin: 0 0 8px; word-break: break-word; }
+  .dcard p { margin: 0; font-size: .86rem; color: var(--ink-soft); }
+  .dcard p b { color: var(--ink); }
+
+  /* ---------- playground ---------- */
+  .play { border: 2px solid var(--ink); background: var(--bg-raised); box-shadow: var(--shadow); margin-top: 26px; }
+  .play-head { padding: 16px 22px; border-bottom: 1px solid var(--hairline); display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .play-head h3 { margin: 0; font-size: 1.05rem; }
+  .play-head .hint { font-size: .83rem; color: var(--ink-faint); }
+  .play-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+  .play-field { padding: 20px 22px; }
+  .play-field + .play-field { border-left: 1px solid var(--hairline); }
+  label.pf {
+    display: block; font: 700 11px/1 "Instrument Sans", sans-serif;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 9px;
+  }
+  .play textarea {
+    width: 100%; min-height: 84px; resize: vertical;
+    font: 500 13.5px/1.65 "JetBrains Mono", monospace;
+    background: var(--panel); color: var(--panel-ink);
+    border: 1px solid var(--hairline); padding: 12px 14px; border-radius: 6px;
+  }
+  .play textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .presets { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 22px 8px; }
+  .preset {
+    font: 500 12px/1.4 "JetBrains Mono", monospace;
+    padding: 7px 12px; border: 1px solid var(--hairline); border-radius: 999px;
+    background: transparent; color: var(--ink-soft); cursor: pointer;
+  }
+  .preset:hover { border-color: var(--accent); color: var(--accent); }
+  .preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .play-out { padding: 18px 22px 24px; border-top: 1px solid var(--hairline); }
+  .verdict { font: 700 15px/1.4 "Instrument Sans", sans-serif; margin: 0 0 12px; }
+  .verdict.ok { color: var(--ok); }
+  .verdict.bad { color: var(--accent); }
+  .pairs { display: flex; flex-wrap: wrap; gap: 10px; }
+  .pair {
+    font: 500 13px/1.5 "JetBrains Mono", monospace;
+    padding: 8px 13px; border: 1.5px solid var(--ink); border-radius: 6px; background: var(--bg);
+  }
+  .pair .pname { color: var(--accent); font-weight: 700; }
+  .pair .sep { color: var(--ink-faint); margin: 0 7px; }
+  .why { margin: 12px 0 0; font-size: .86rem; color: var(--ink-soft); }
+
+  /* ---------- status footer ---------- */
+  footer { margin-top: 72px; border-top: 3px solid var(--ink); padding: 40px 0 64px; }
+  .status-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 24px; }
+  .stat { border: 1.5px solid var(--hairline); background: var(--bg-raised); padding: 18px 20px; }
+  .stat .sk { font: 700 11px/1 "Instrument Sans", sans-serif; letter-spacing: .16em; text-transform: uppercase; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .stat .sk::before { content: ""; width: 9px; height: 9px; border-radius: 50%; }
+  .stat.done .sk { color: var(--ok); } .stat.done .sk::before { background: var(--ok); }
+  .stat.wait .sk { color: var(--brass); } .stat.wait .sk::before { background: var(--brass); }
+  .stat p { margin: 0; font-size: .9rem; color: var(--ink-soft); }
+  .foot-links { margin-top: 26px; font-size: .88rem; color: var(--ink-faint); display: flex; flex-wrap: wrap; gap: 6px 26px; }
+
+  /* ---------- responsive ---------- */
+  @media (max-width: 880px) {
+    .arch { grid-template-columns: 1fr; }
+    .arch-arrow { padding: 10px 0; transform: rotate(90deg); }
+    .anatomy { grid-template-columns: 1fr; }
+    .anat-notes { position: static; grid-template-columns: 1fr 1fr; }
+    .play-grid { grid-template-columns: 1fr; }
+    .play-field + .play-field { border-left: 0; border-top: 1px solid var(--hairline); }
+    .status-row { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 560px) {
+    .anat-notes { grid-template-columns: 1fr; }
+    .pipe-step { grid-template-columns: 54px 1fr; }
+    .wrap { padding: 0 18px; }
+  }
+</style>
+</head>
+<body>
+<button class="theme-toggle" id="themeToggle" type="button" aria-label="Переключить тему">Тема</button>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">lazy-circus · подпакет lazy-circus-testing</p>
+    <h1>Спека исполняется,<br>дрейф <span class="thin">невозможен</span></h1>
+    <p class="lede">
+      В монорепо появился подпакет <b>lazy-circus-testing</b>: Gherkin-фичи на <b>своём словаре приложения</b>
+      превращаются в исполняемые hspec-сценарии над моками телеграм-исполнителя. Каждый шаг сматчен реестром
+      <b>до</b> прогона — расхождение «спека ↔ код» ловится мета-тестом, а не ревью.
+    </p>
+    <div class="chips">
+      <span class="chip"><em>7</em> новых Bdd-модулей</span>
+      <span class="chip"><em>3</em> модуля переехали без переименований</span>
+      <span class="chip"><em>92</em> теста, 0 падений</span>
+      <span class="chip"><em>0</em> обращений к PostgreSQL</span>
+      <span class="chip">hspec — <em>вне</em> рантайма ядра</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ============ 01. ЧТО ПОСТРОЕНО ============ -->
+  <section id="built">
+    <div class="sec-head"><span class="sec-num" aria-hidden="true">1</span><h2>Что построено</h2></div>
+    <p class="sec-sub">
+      Один пакет — теперь два. Ядро освобождено от тестовых зависимостей, потребители пинят оба пакета
+      из <b>одного git-коммита</b> (<code>subdirs: [., testing]</code> — проверено спайком на stack 3.3.1).
+    </p>
+
+    <div class="arch">
+      <div class="arch-col">
+        <h3>Было</h3>
+        <div class="pkg">lazy-circus <b>+ Testing.* внутри</b></div>
+        <ul>
+          <li><b>hspec и хелперы</b> жили в рантайм-библиотеке</li>
+          <li>каждый потребитель тянул тестовые зав-сти ядра</li>
+          <li>словарь шагов запекался под одного бота</li>
+        </ul>
+      </div>
+      <div class="arch-arrow" aria-hidden="true">→</div>
+      <div class="arch-col">
+        <h3>Стало</h3>
+        <div class="pkg">lazy-circus <b>+</b> lazy-circus-testing</div>
+        <ul>
+          <li><b>ядро</b> — рантайм, ни одного тестового dep</li>
+          <li><b>testing</b> — hspec как библиотечная зав-сть только здесь</li>
+          <li>resumeace: один пин, две записи <code>subdirs</code></li>
+        </ul>
+      </div>
+    </div>
+    <div class="arch-note">
+      Нюанс сборки: корневой тест-сьют компилирует <code>testing/src</code> напрямую (<code>source-dirs</code>),
+      потому что пакетная зависимость <code>lazy-circus:test → lazy-circus-testing → lazy-circus</code> —
+      цикл, который отвергают и stack, и cabal. Источники остаются собственностью подпакета.
+    </div>
+
+    <div class="modmap">
+      <div class="mod core"><div class="mod-name"><span class="dot"></span>Bdd.Gherkin</div><p>Чистый парсер подмножества Gherkin: AST с номерами строк, And/But наследуют ключевое слово, Outline+Examples раскрываются при парсинге.</p></div>
+      <div class="mod core"><div class="mod-name"><span class="dot"></span>Bdd.Pattern</div><p>Матчерт шаблонов: параметры в <code>"..."</code> и <code>«...»</code>, нормализация пробелов, <code>matchAll</code> для пробы неоднозначности.</p></div>
+      <div class="mod core"><div class="mod-name"><span class="dot"></span>Bdd.Journal</div><p>Журнал наблюдений <code>Observation app</code>: append-only STM, курсорные ожидания <code>awaitObservation</code>, And-продолжения через <code>peekLastConsumed</code>.</p></div>
+      <div class="mod core"><div class="mod-name"><span class="dot"></span>Bdd.Step</div><p>Контракт <code>StepDef m c s a</code>: фазы Given/Dialog, реестр «первый зарегистрированный выигрывает», структурные ошибки вместо исключений.</p></div>
+      <div class="mod core"><div class="mod-name"><span class="dot"></span>Bdd.Tg</div><p>Готовый телеграм-словарь Then: ответ, фрагмент, клавиатура, реакция, удаление, документ.</p></div>
+      <div class="mod core"><div class="mod-name"><span class="dot"></span>Bdd.Given</div><p>Комбинаторы Given: canned-загрузки, очередь AI-ответов, слот сидов. Пустой контекст по умолчанию — тестом зафиксирован.</p></div>
+      <div class="mod core"><div class="mod-name"><span class="dot"></span>Bdd.Runner</div><p><code>gherkinSpec</code>: дерево describe/it, мета-тест покрытия, проба неоднозначности, <code>@blocked</code> → pending.</p></div>
+      <div class="mod moved"><div class="mod-name"><span class="dot"></span>Testing.Performer</div><p>Мок-исполнитель: теперь <code>TestConfig app</code> с журналом и хуками Mail/AI; запись наблюдения — в одной STM-транзакции с mailbox.</p></div>
+      <div class="mod moved"><div class="mod-name"><span class="dot"></span>Testing.TgTest</div><p>Сценарный раннер телеграма: <code>TgTestConfig app</code>, таймаут-бюджет; параметр волной прошёл call-site'ы.</p></div>
+      <div class="mod moved"><div class="mod-name"><span class="dot"></span>Testing.Updates</div><p>Фабрика апдейтов: переехала байт-в-байт, имена модулей сохранены — потребителям нужен только новый dep.</p></div>
+    </div>
+    <div class="mod-legend">
+      <span><span class="dot" style="background:var(--accent)"></span>новый BDD-механизм</span>
+      <span><span class="dot" style="background:var(--brass)"></span>перенесён из ядра</span>
+    </div>
+  </section>
+
+  <!-- ============ 02. КАК ИСПОЛНЯЕТСЯ СЦЕНАРИЙ ============ -->
+  <section id="pipeline">
+    <div class="sec-head"><span class="sec-num" aria-hidden="true">2</span><h2>Как исполняется сценарий</h2></div>
+    <p class="sec-sub">
+      Порядок — это данные: шаги исполняются в порядке документа, потребление журнала двигает
+      курсор только через матч. Ниже — путь от текста фичи до вердикта.
+    </p>
+    <div class="pipe">
+      <div class="pipe-step"><div class="pipe-num" aria-hidden="true"></div><div class="pipe-body">
+        <h3>Парсинг и мета-тест — до всякого прогона</h3>
+        <p><code>parseFeature</code> строит AST с номерами строк и раскрывает Outline по строкам Examples.
+        Мета-тест требует, чтобы <b>каждый шаг каждой фичи</b> сматчился реестром по разрешённому
+        ключевому слову; иначе — один красный тест со списком «фича / сценарий / строка / текст».</p>
+        <div class="pipe-aside">несматченный шаг = ошибка сборки спеки, а не зависший прогон</div>
+      </div></div>
+      <div class="pipe-step"><div class="pipe-num" aria-hidden="true"></div><div class="pipe-body">
+        <h3>Given — материализация контекста</h3>
+        <p>Действия Given копят контекст: canned-загрузки файлов, очередь AI-ответов, сиды приложения.
+        Контекст по умолчанию <b>пуст</b> — фикстура обязана быть декларирована в спеке явно.</p>
+      </div></div>
+      <div class="pipe-step"><div class="pipe-num" aria-hidden="true"></div><div class="pipe-body">
+        <h3>When — пилот через мок-исполнителя</h3>
+        <p>Диалоговые шаги исполняются в <code>TelegramTestScript</code>: <code>sendMessage</code> и иные
+        эффекты уходят в мок-исполнителя, который в <b>той же STM-транзакции</b> публикует сообщение
+        в mailbox и пишет наблюдение в журнал — порядок двух механизмов стабилен по построению.</p>
+        <div class="pipe-aside">Mail и AI журналятся через хуки приложения — словарь ваш</div>
+      </div></div>
+      <div class="pipe-step"><div class="pipe-num" aria-hidden="true"></div><div class="pipe-body">
+        <h3>Then — курсорное ожидание</h3>
+        <p><code>awaitObservation</code> сканирует журнал, пропуская потреблённое; первый матч
+        потребляется, недождавшее — <code>AwaitTimeout</code> с явной ошибкой. Селективный шаг,
+        пропустивший чужое наблюдение, не прячет его от следующих шагов (обобщение deferred-buffer).</p>
+      </div></div>
+      <div class="pipe-step"><div class="pipe-num" aria-hidden="true"></div><div class="pipe-body">
+        <h3>And-продолжение и снапшот</h3>
+        <p>«Сообщение содержит …» читает последний потреблённый ответ <b>без ожидания и без движения
+        курсора</b>. После сценария раннер отдаёт приложению полный снапшот журнала — негативные
+        проверки («больше ничего не отправлено») делаются по нему.</p>
+      </div></div>
+    </div>
+  </section>
+
+  <!-- ============ 03. FEATURE-ФАЙЛ ============ -->
+  <section id="feature">
+    <div class="sec-head"><span class="sec-num" aria-hidden="true">3</span><h2>Анатомия feature-файла</h2></div>
+    <p class="sec-sub">
+      Реальный пример из echo-smoke: три сценария, And-продолжение и видимый <code>@blocked</code>-скип.
+      Справа — что именно читает парсер.
+    </p>
+
+    <div class="anatomy">
+      <div class="codewrap">
+        <div class="codehead"><span class="fname">эхо-бот.feature — инлайн в EchoSmokeSpec.hs</span></div>
+<pre><code><span class="c-kw">Feature:</span> Echo bot dialog
+
+  <span class="c-kw">Scenario:</span> echoes the words of the user
+    <span class="c-kw">Given</span> the echo bot is awake
+    <span class="c-kw">When</span> the user sends <span class="c-str">"hello, echo"</span>
+    <span class="c-kw">Then</span> the bot replies with <span class="c-str">"hello, echo"</span>
+
+  <span class="c-kw">Scenario:</span> reuses the reply in an And-continuation
+    <span class="c-kw">Given</span> the echo bot is awake
+    <span class="c-kw">When</span> the user sends <span class="c-str">"the road is long"</span>
+    <span class="c-kw">Then</span> the bot replies with <span class="c-str">"the road is long"</span>
+    <span class="c-kw">And</span> the bot replies with a message containing <span class="c-str">"road"</span>
+
+  <span class="c-tag">@blocked</span>
+  <span class="c-kw">Scenario:</span> sings a lullaby (not implemented yet)
+    <span class="c-kw">Given</span> the echo bot is awake
+    <span class="c-kw">When</span> the user sends <span class="c-str">"lullaby"</span>
+    <span class="c-kw">Then</span> the bot replies with <span class="c-str">"lullaby"</span></code></pre>
+      </div>
+      <div class="anat-notes">
+        <div class="anat-note"><b>Параметры</b>Закавыченные спаны <code>"…"</code> и <code>«…»</code> в <i>шаблоне</i> шага — места захвата; текст внутри кавычек шага становится значением.</div>
+        <div class="anat-note"><b>And наследует фазу</b><code>And</code> и <code>But</code> получают ключевое слово предыдущего шага: этот And — тоже Then. Шаг <code>Then</code> никогда не подхватит When-шаблон.</div>
+        <div class="anat-note"><b>@blocked</b>Сценарий помечается как <code>pending</code> — скип виден в отчёте, но шаги всё равно обязаны быть в реестре.</div>
+        <div class="anat-note brass"><b>Порядок документа</b>Второй <code>When</code> после <code>Then</code> легален; все <code>Given</code> — только до первого <code>When</code>/<code>Then</code>, иначе ошибка с номером строки.</div>
+      </div>
+    </div>
+
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Конструкция</th><th>Поддержка</th><th>Примечание</th></tr></thead>
+        <tbody>
+          <tr><td><code>Feature:</code> + описание</td><td class="yes">да</td><td>строки описания до первого сценария попадают в AST</td></tr>
+          <tr><td>Теги <code>@blocked</code>, <code>@focus</code></td><td class="yes">да</td><td>над фичей и сценарием; <code>@blocked</code> обрабатывает раннер</td></tr>
+          <tr><td><code>Scenario:</code> с именем</td><td class="yes">да</td><td>—</td></tr>
+          <tr><td><code>Scenario Outline:</code> + <code>Examples:</code></td><td class="yes">да</td><td><code>&lt;param&gt;</code> подставляется в шаги <b>и в имя</b>; строка Examples = отдельный сценарий</td></tr>
+          <tr><td><code>And</code> / <code>But</code></td><td class="yes">да</td><td>в AST хранится <b>разрешённое</b> ключевое слово</td></tr>
+          <tr><td>Комментарии <code>#</code>, пустые строки</td><td class="yes">да</td><td>игнорируются везде, включая Examples</td></tr>
+          <tr><td>Ошибки с номером строки</td><td class="yes">да</td><td>шаг вне сценария; Examples без заголовка; And/But до первого Given/When/Then</td></tr>
+          <tr><td>Docstrings <code>"""</code> и таблицы данных в шагах</td><td class="no">нет</td><td>осознанно за пределами подмножества (follow-up)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 04. СЛОВАРЬ ШАГОВ ============ -->
+  <section id="dict">
+    <div class="sec-head"><span class="sec-num" aria-hidden="true">4</span><h2>Словарь шагов из коробки</h2></div>
+    <p class="sec-sub">
+      Библиотека даёт готовые Then-конструкторы и Given-комбинаторы. Словарь <b>приложенческий</b>:
+      свои шаги регистрируются рядом, и «первый зарегистрированный матч выигрывает» — порядок
+      регистрации часть контракта.
+    </p>
+    <div class="dict">
+      <div class="dcard"><span class="dk">Then</span><p class="dp">the bot replies with "$text"</p><p><b>Точный ответ.</b> Ждёт сообщение бота и потребляет его; текст сверяется дословно.</p></div>
+      <div class="dcard"><span class="dk">Then · And-продолжение</span><p class="dp">the bot replies with a message containing "$frag"</p><p><b>Фрагмент последнего ответа.</b> Читает уже потреблённое сообщение — <b>без ожидания и без движения курсора</b>.</p></div>
+      <div class="dcard"><span class="dk">Then</span><p class="dp">the bot replies with a keyboard</p><p><b>Клавиатура.</b> Наблюдение несёт markup ответа; потребление наполняет <code>dsLastKeyboard</code>.</p></div>
+      <div class="dcard"><span class="dk">Then</span><p class="dp">the bot reacts to a message</p><p><b>Реакция.</b> Ждёт <code>ObsTgReaction</code> по целевому сообщению.</p></div>
+      <div class="dcard"><span class="dk">Then</span><p class="dp">the bot deletes a message</p><p><b>Удаление.</b> Ждёт <code>ObsTgDelete</code>.</p></div>
+      <div class="dcard"><span class="dk">Then</span><p class="dp">the bot sends a document</p><p><b>Документ.</b> Ждёт <code>ObsTgDocument</code>; fileId фиксируется в журнале.</p></div>
+      <div class="dcard given"><span class="dk">Given</span><p class="dp">stagedTgDownloads</p><p><b>Canned-загрузки.</b> Регистрирует файлы, которые бот сможет «скачать» в сценарии.</p></div>
+      <div class="dcard given"><span class="dk">Given</span><p class="dp">queuedAiAnswers</p><p><b>Очередь AI-ответов.</b> Canned-ответы потребляются AI-моком FIFO.</p></div>
+      <div class="dcard given"><span class="dk">Given</span><p class="dp">withAppSeed</p><p><b>Слот сидов приложения.</b> DB-фикстуры — забота приложения; комбинатор даёт им место в контексте. Контекст по умолчанию пуст.</p></div>
+    </div>
+  </section>
+
+  <!-- ============ 05. РЕЕСТР И РАННЕР ============ -->
+  <section id="runner">
+    <div class="sec-head"><span class="sec-num" aria-hidden="true">5</span><h2>Реестр и раннер: точка сборки</h2></div>
+    <p class="sec-sub">
+      Фича + реестр + бутстрап приложения = вызов <code>gherkinSpec</code>. Реестр собирается
+      <b>на сценарий</b> — параметры из его шагов доступны при сборке (так echo-реестр достаёт
+      <code>"$msg"</code> из When-шага).
+    </p>
+    <div class="codewrap">
+      <div class="codehead"><span class="fname">минимальный боевой каркас (по мотивам EchoSmokeSpec.hs)</span></div>
+<pre><code><span class="c-com">-- фича из файла или инлайном</span>
+<span class="c-par">spec</span> :: <span class="c-kw">Spec</span>
+<span class="c-par">spec</span> =
+  <span class="c-fn">gherkinSpec</span>
+    (<span class="c-kw">FeatureInline</span> <span class="c-str">"эхо.feature"</span> echoFeature)
+    <span class="c-com">-- реестр на сценарий: параметры шагов уже видны</span>
+    (\scenario -&gt; <span class="c-kw">pure</span> (<span class="c-fn">echoRegistryFor</span> scenario))
+    <span class="c-com">-- бутстрап: приложение без БД, журнал через tcJournal</span>
+    (\journal -&gt; <span class="c-kw">pure</span> (echoExecutor journal))
+    <span class="c-com">-- вердикт после сценария: снапшот журнала в ваших руках</span>
+    echoVerifier
+
+<span class="c-fn">echoRegistryFor</span> :: <span class="c-kw">GherkinScenario</span> -&gt; <span class="c-kw">ScenarioRegistry</span> NoServiceLib () TelegramTestScript
+<span class="c-fn">echoRegistryFor</span> scenario = <span class="c-fn">mkRegistry</span> $
+  [ <span class="c-fn">givenDef</span> <span class="c-str">"the echo bot is awake"</span> (<span class="c-kw">pure</span> . id)
+  , <span class="c-fn">whenDef</span>  <span class="c-str">"the user sends \"$msg\""</span> $ \st -&gt; <span class="c-kw">do</span>
+      _ &lt;- <span class="c-fn">sendMessage</span> msg          <span class="c-com">-- пилот уходит в мок-исполнителя</span>
+      <span class="c-kw">pure</span> (st, <span class="c-kw">Nothing</span>)
+  ]
+  &lt;&gt; <span class="c-kw">maybe</span> [] (<span class="c-kw">pure</span> . <span class="c-fn">botReplyContains</span>) containsFrag
+  &lt;&gt; [<span class="c-fn">botRepliesWithMessage</span> msg]   <span class="c-com">-- точный ответ из When-шага</span></code></pre>
+    </div>
+    <div class="arch-note">
+      Дерево отчёта: <code>describe</code> на фичу → <code>it</code> на сценарий (строка Outline — свой <code>it</code>
+      с подставленным именем), впереди — мета-тест покрытия и проба неоднозначности реестра.
+      Ограничение: атрибуция упавшего шага — на уровне сценария (Either приходит после прогона пилота);
+      точный шаг виден в тексте <code>StepError</code>.
+    </div>
+  </section>
+
+  <!-- ============ 06. ПЛЕЙГРАУНД ============ -->
+  <section id="playground">
+    <div class="sec-head"><span class="sec-num" aria-hidden="true">6</span><h2>Матчерт шагов — вживую</h2></div>
+    <p class="sec-sub">
+      Точная JS-копия семантики <code>matchStep</code>: закавыченный спан шаблона — параметр
+      (имя = текст внутри кавычек), остальной текст обязан совпасть буквально после нормализации пробелов.
+      Попробуйте свои шаблон и шаг.
+    </p>
+    <div class="play">
+      <div class="play-head">
+        <h3>pattern → шаг</h3>
+        <span class="hint">параметры: "имя" и «имя» · захват непустой · первый матч выигрывает</span>
+      </div>
+      <div class="play-grid">
+        <div class="play-field">
+          <label class="pf" for="patIn">Шаблон (pattern)</label>
+          <textarea id="patIn" spellcheck="false">the bot replies with "$text"</textarea>
+        </div>
+        <div class="play-field">
+          <label class="pf" for="stepIn">Шаг из фичи (текст)</label>
+          <textarea id="stepIn" spellcheck="false">the bot replies with "hello, echo"</textarea>
+        </div>
+      </div>
+      <div class="presets" role="group" aria-label="Примеры">
+        <button class="preset" type="button" data-p='the bot replies with "$text"' data-s='the bot replies with "hello, echo"'>точный ответ</button>
+        <button class="preset" type="button" data-p='the user sends "$msg"' data-s='the user sends "the   road   is   long"'>нормализация пробелов</button>
+        <button class="preset" type="button" data-p='add «товар» to cart' data-s='add молоко to cart'>кириллица в «»</button>
+        <button class="preset" type="button" data-p='"first" "second"' data-s='one two'>два параметра</button>
+        <button class="preset" type="button" data-p='bot replies «(.*?)» to "user"' data-s='bot replies (.*?) to maria'>метасимволы буквально</button>
+        <button class="preset" type="button" data-p='the bot replies with "$text"' data-s='the bot is silent "silence"'>не совпало</button>
+      </div>
+      <div class="play-out">
+        <p class="verdict" id="verdict" role="status" aria-live="polite"></p>
+        <div class="pairs" id="pairs"></div>
+        <p class="why" id="why"></p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num" aria-hidden="true">≠</span><h2>Статус и документы</h2></div>
+    <div class="status-row">
+      <div class="stat done">
+        <div class="sk">Библиотечная часть — готова</div>
+        <p>T1–T12, T14 выполнены: подпакет собирается, сьюты зелёные (92 + 254), echo-smoke проходит
+        при остановленном PostgreSQL, старый план <code>bdd-gherkin.md</code> помечен superseded.</p>
+      </div>
+      <div class="stat wait">
+        <div class="sk">T13 — ждёт одобрения</div>
+        <p>Перепин <code>resumeace</code> на оба пакета из одного коммита: yaml + точечные аннотации,
+        PR на ревью. Сниппет пина готов в <code>docs/internal/stack-pin-two-packages.md</code>.</p>
+      </div>
+    </div>
+    <div class="foot-links">
+      <span>План: docs/plans/2026-08-29-lazy-circus-testing-bdd.md</span>
+      <span>Отчёт: docs/plans/lazy-circus-testing-bdd/review.md</span>
+      <span>Пин: docs/internal/stack-pin-two-packages.md</span>
+      <span>Пример: testing/test/Bdd/EchoSmokeSpec.hs</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // ---------- theme toggle ----------
+  (function () {
+    var root = document.documentElement;
+    var btn = document.getElementById("themeToggle");
+    btn.addEventListener("click", function () {
+      var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("lc-bdd-theme", next); } catch (e) {}
+    });
+  })();
+
+  // ---------- JS-порт matchStep ----------
+  // Семантика LazyCircus.Testing.Bdd.Pattern.matchStep:
+  //  - спаны "..." и «...» в шаблоне = параметры; имя = текст спана, значение = захваченный текст;
+  //  - захват непустой; при развилке берётся кратчайший (leftmost-shortest);
+  //  - остальной текст шаблона обязан совпасть буквально после нормализации пробелов.
+  function normalizeWs(s) {
+    return s.replace(/[\t\n\r ]+/g, " ").replace(/^ | $/g, "");
+  }
+
+  // Разбор шаблона на литералы и спаны-захваты.
+  function tokenize(pattern) {
+    var tokens = [], lit = "", i = 0;
+    while (i < pattern.length) {
+      var q = pattern[i];
+      if (q === '"' || q === "\u00AB") {
+        var close = q === "\u00AB" ? "\u00BB" : '"';
+        var end = pattern.indexOf(close, i + 1);
+        if (end === -1) { lit += q; i += 1; continue; }
+        if (lit) { tokens.push({ t: "lit", v: lit }); lit = ""; }
+        tokens.push({ t: "cap", v: pattern.slice(i + 1, end) });
+        i = end + 1;
+      } else { lit += q; i += 1; }
+    }
+    if (lit) tokens.push({ t: "lit", v: lit });
+    return tokens;
+  }
+
+  function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+  // matchStep: возвращает null или [[имя, значение], ...]
+  function matchStep(pattern, text) {
+    var pat = normalizeWs(pattern), step = normalizeWs(text);
+    if (!pat) return [];
+    var tokens = tokenize(pat), re = "^", names = [];
+    for (var k = 0; k < tokens.length; k++) {
+      if (tokens[k].t === "lit") re += escapeRe(tokens[k].v);
+      else { re += "(.+?)"; names.push(tokens[k].v); }
+    }
+    re += "$";
+    var m = new RegExp(re).exec(step);
+    if (!m) return null;
+    var out = [];
+    for (var j = 0; j < names.length; j++) out.push([names[j], m[j + 1]]);
+    return out;
+  }
+
+  // ---------- playground ----------
+  (function () {
+    var patIn = document.getElementById("patIn");
+    var stepIn = document.getElementById("stepIn");
+    var verdict = document.getElementById("verdict");
+    var pairs = document.getElementById("pairs");
+    var why = document.getElementById("why");
+
+    function esc(s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function run() {
+      var res = matchStep(patIn.value, stepIn.value);
+      pairs.innerHTML = "";
+      if (res === null) {
+        verdict.textContent = "Не совпало";
+        verdict.className = "verdict bad";
+        why.textContent = "Либо закавыченный спан не нашёл непустого текста, либо незакавыченная часть шаблона не совпала буквально (после нормализации пробелов).";
+        return;
+      }
+      verdict.textContent = res.length ? "Матч: " + res.length + " параметр(ов)" : "Матч: шаблон без параметров";
+      verdict.className = "verdict ok";
+      if (res.length) {
+        res.forEach(function (p) {
+          var el = document.createElement("span");
+          el.className = "pair";
+          el.innerHTML = '<span class="pname">' + esc(p[0]) + '</span><span class="sep">=</span>"' + esc(p[1]) + '"';
+          pairs.appendChild(el);
+        });
+        why.textContent = "Имя параметра — текст закавыченного спана шаблона; значение — захваченный текст шага.";
+      } else {
+        why.textContent = "Незакавыченный шаблон матчится буквально — параметры не объявлены.";
+      }
+    }
+
+    patIn.addEventListener("input", run);
+    stepIn.addEventListener("input", run);
+    Array.prototype.forEach.call(document.querySelectorAll(".preset"), function (b) {
+      b.addEventListener("click", function () {
+        patIn.value = b.getAttribute("data-p");
+        stepIn.value = b.getAttribute("data-s");
+        run();
+      });
+    });
+    run();
+  })();
+</script>
+</body>
+</html>

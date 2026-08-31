@@ -9,7 +9,9 @@ description: >
   AI requests (mkAIRequest, AIParams, Conversation) and POML prompt templates
   (makePoml, .poml files), DB specifics (findLocked, withTransactionRLS), services
   (callService, makeServiceLib), runtime (DefaultPerformer, runAsyncWorkerPool),
-  or testing (runWithDefaultMocks, tgTest, TelegramTestScript, mkTextUpdate).
+  testing (runWithDefaultMocks, tgTest, TelegramTestScript, mkTextUpdate),
+  or BDD feature specs (gherkinSpec, .feature files, StepDef, awaitObservation,
+  Observation journal).
 ---
 
 # Lazy Circus Skill
@@ -71,6 +73,7 @@ Routing by intent:
 | `DefaultPerformer`, `DefaultApp`, pools, dispatch paths, async worker pool, teardown | [reference/runtime.md](reference/runtime.md) |
 | Test performer, mocks, `TestConfig`, capture buffers (`readLog`, `readTgRequests`, ...), fake `Update`s, DB test setup | [reference/testing.md](reference/testing.md) |
 | End-to-end bot tests: `tgTest`, `TelegramTestScript`, `waitFor*`, `Mailboxes` | [reference/tg-test.md](reference/tg-test.md) |
+| BDD feature specs: `.feature` files, `gherkinSpec`, `StepDef` registries, the `Observation` journal, `awaitObservation`, `@blocked` | [reference/bdd.md](reference/bdd.md) |
 | DB service instances, service registration, `makeServiceLib`, adding a new effect, integration pitfalls and checklist | [reference/extension.md](reference/extension.md) |
 | Logging placement, WHAT-not-WHY, user-data ban, debug vs prod, `slog*` API | [reference/logging.md](reference/logging.md) |
 
@@ -80,8 +83,8 @@ Read more than one reference file when a task crosses layers.
 
 - `logInfo` / `logWarn` / `logError` / `logSensitive` in `ScenarioProgram`; `slog*` / `swithLogCtx` inside scene languages. Details and anti-patterns: [reference/logging.md](reference/logging.md).
 - `runArbitraryIO` is a last-resort escape hatch: the `IO` runs for real in BOTH production and tests, cannot be mocked, and is invisible to automatic timing.
-- Run `hpack` before every build or test; never edit `exposed-modules` in `package.yaml` manually.
+- Run `hpack` AND `hpack testing` before every build or test (two packages: the library and the `lazy-circus-testing` subpackage); never edit `exposed-modules` in `package.yaml` manually.
 - Every exported function and type follows the repo Haddock contract style (see AGENTS.md).
-- Tests run against a real PostgreSQL database — DB is never mocked (details: [reference/testing.md](reference/testing.md)).
+- DB is never mocked: the root test suite runs against a real PostgreSQL database, while the `lazy-circus-testing` suite (including the BDD specs) is DB-free and passes with PostgreSQL stopped (details: [reference/testing.md](reference/testing.md), [reference/bdd.md](reference/bdd.md)).
 
 Each reference file ends with a domain review checklist; consult the relevant one when reviewing changes.

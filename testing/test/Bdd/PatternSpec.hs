@@ -40,6 +40,10 @@ spec = do
                 matchStep "добавить «товар» в корзину" "добавить молоко в корзину" `shouldBe`
                     Just [("товар", "молоко")]
 
+            it "captures regex metacharacters inside quoted spans literally" $
+                matchStep "bot replies «(.*?)» to \"user\"" "bot replies (.*?) to maria" `shouldBe`
+                    Just [("(.*?)", "(.*?)"), ("user", "maria")]
+
             it "captures multi-word values with inner whitespace normalized" $
                 matchStep "user \"name\" said \"phrase\"" "user maria   tetereva said hello\tworld" `shouldBe`
                     Just [("name", "maria tetereva"), ("phrase", "hello world")]

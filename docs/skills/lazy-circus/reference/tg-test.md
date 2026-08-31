@@ -55,8 +55,8 @@ scenario cannot.
 
 ```haskell
 tgTest ::
-    TgTestConfig ->
-    (TestConfig -> Mocks serviceLib -> IO (Update -> IO ())) ->
+    TgTestConfig app ->
+    (TestConfig app -> Mocks serviceLib -> IO (Update -> IO ())) ->
     TelegramTestScript a ->
     IO (Mailboxes, Either TgTestError a)
 ```
@@ -76,12 +76,12 @@ production performer. That is how the test runs the bot's ordinary script with
 the configured mock/real modes.
 
 ```haskell
-data TgTestConfig = TgTestConfig
-    { ttgTimeout         :: Int         -- microseconds for waitFor* timeout
-    , ttgPerformerConfig :: TestConfig  -- per-sub-language mock/real mode
+data TgTestConfig app = TgTestConfig
+    { ttgTimeout         :: Int               -- microseconds for waitFor* timeout
+    , ttgPerformerConfig :: TestConfig app    -- per-sub-language mock/real mode + journal hooks
     }
 
-defaultTgTestConfig :: TgTestConfig   -- 2-second timeout, all-mocked performer config
+defaultTgTestConfig :: TgTestConfig app   -- 2-second timeout, all-mocked performer config (polymorphic)
 ```
 
 **Runtime guard:** `tgTest` throws `TgTestConfigError` **before** starting the
@@ -106,8 +106,10 @@ import Telegram.Bot.API (Update)
 
 -- | Your bot's update-driver, identical to production except the performer is
 -- the test performer. 'runYourDriver' is whatever turns an @Update@ into an
--- @IO ()@ by running the handler's ScenarioProgram.
-buildAction :: DefaultApp serviceLib -> TestConfig -> Mocks serviceLib -> IO (Update -> IO ())
+-- @IO ()@ by running the handler's ScenarioProgram. The @app@ slot of
+-- 'TestConfig' is inferred; annotate with 'Void' when the app records no
+-- observations of its own.
+buildAction :: DefaultApp serviceLib -> TestConfig app -> Mocks serviceLib -> IO (Update -> IO ())
 buildAction app cfg mocks =
     pure $ runYourDriver (runWithConfig app cfg mocks . runScenarioProgram) handlerCfg
 

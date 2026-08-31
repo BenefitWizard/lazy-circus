@@ -8,7 +8,11 @@ Read this when:
 - building fake Telegram `Update`s (`LazyCircus.Testing.Updates`)
 
 For end-to-end tests that drive the bot's own update handler (routing, dialog state,
-inline keyboards), see [tg-test.md](tg-test.md).
+inline keyboards), see [tg-test.md](tg-test.md). For executable Gherkin feature specs
+(`.feature` files, step registries, the observation journal), see [bdd.md](bdd.md).
+
+Everything in this reference lives in the `lazy-circus-testing` subpackage (`testing/`),
+not in the core library — the module names (`LazyCircus.Testing.*`) are unchanged.
 
 ## Contents
 
@@ -66,9 +70,10 @@ capabilities at the edges.
 | `OutgoingKind` | tag on `OutgoingMessage`: `OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` / `OutDeleteMessage` |
 | `MailMock` | Mail mock for capturing sent mails |
 | `Mode` | runtime mode for a sub-language: `Mocked` or `Real` |
-| `TestConfig` | per-sub-language mode selection (`tcTelegram`, `tcAI`, `tcMailSend`, `tcAsync`) |
-| `EnvWithMocks serviceLib` | environment extended with mock state and `TestConfig` |
-| `TestInterpreter serviceLib a` | the test-performer monad |
+| `TestConfig app` | per-sub-language mode selection (`tcTelegram`, `tcAI`, `tcMailSend`, `tcAsync`) plus optional observation journaling (`tcJournal`, `tcMailHook`, `tcAiHook`) |
+| `EnvWithMocks serviceLib app` | environment extended with mock state and `TestConfig app` |
+| `TestInterpreter serviceLib app a` | the test-performer monad |
+| `ObservationLog app` / `Observation app` | append-only observation journal (`LazyCircus.Testing.Bdd.Journal`); wired via `tcJournal` — see [bdd.md](bdd.md) |
 | `OnSendMessageRequest` | callback type for custom Telegram send handling |
 
 ## Main Helpers
@@ -98,15 +103,15 @@ Signatures (module `LazyCircus.Testing.Performer`; `sl` = `serviceLib`):
 
 ```haskell
 makeMocks                 :: IO (Mocks sl)
-runWithMocks              :: DefaultApp sl -> Mocks sl -> TestInterpreter sl a -> IO a
-runWithDefaultMocks       :: DefaultApp sl -> TestInterpreter sl a -> IO (Mocks sl, a)
-runWithConfig             :: DefaultApp sl -> TestConfig -> Mocks sl -> TestInterpreter sl a -> IO a
-runWithDefaultConfig      :: DefaultApp sl -> TestConfig -> TestInterpreter sl a -> IO (Mocks sl, a)
-runInsideWithConfig       :: TestConfig -> Mocks sl -> TestInterpreter sl a -> RIO (DefaultApp sl) a
-runInsideWithDefaultConfig:: TestConfig -> TestInterpreter sl a -> RIO (DefaultApp sl) (Mocks sl, a)
-runScenarioProgram        :: ScenarioProgram Script sl a -> TestInterpreter sl a
-runScript                 :: Script a -> TestInterpreter sl a
-runTestInterpreter        :: TestInterpreter sl a -> RIO (EnvWithMocks sl) a
+runWithMocks              :: DefaultApp sl -> Mocks sl -> TestInterpreter sl app a -> IO a
+runWithDefaultMocks       :: DefaultApp sl -> TestInterpreter sl app a -> IO (Mocks sl, a)
+runWithConfig             :: DefaultApp sl -> TestConfig app -> Mocks sl -> TestInterpreter sl app a -> IO a
+runWithDefaultConfig      :: DefaultApp sl -> TestConfig app -> TestInterpreter sl app a -> IO (Mocks sl, a)
+runInsideWithConfig       :: TestConfig app -> Mocks sl -> TestInterpreter sl app a -> RIO (DefaultApp sl) a
+runInsideWithDefaultConfig:: TestConfig app -> TestInterpreter sl app a -> RIO (DefaultApp sl) (Mocks sl, a)
+runScenarioProgram        :: ScenarioProgram Script sl a -> TestInterpreter sl app a
+runScript                 :: Script a -> TestInterpreter sl app a
+runTestInterpreter        :: TestInterpreter sl app a -> RIO (EnvWithMocks sl app) a
 
 readTgRequests            :: Mocks sl -> IO [WithImportance SendMessageRequest]
 readScheduledTgRequests   :: Mocks sl -> IO [SendMessageRequest]
@@ -114,8 +119,15 @@ readOutgoingMailbox       :: Mocks sl -> IO [OutgoingMessage]      -- destructiv
 readLog                   :: Mocks sl -> IO [AppLogMsg]
 readLogWithContext        :: Mocks sl -> IO [AppLogMsgWithContext]
 readSentMails             :: Mocks sl -> IO [Mail]
+readAiRequests            :: Mocks sl -> IO [Chat.CreateChatCompletion]
 readScheduledScenarios    :: Mocks sl -> IO [ScenarioProgram Script sl ()]
 ```
+
+The `app` parameter is the observation-journal slot (see `TestConfig`'s `tcJournal` /
+`tcMailHook` / `tcAiHook` below and [bdd.md](bdd.md)). It is inferred from usage;
+`defaultTestConfig :: TestConfig app` and `defaultTgTestConfig :: TgTestConfig app` stay
+polymorphic, so most call sites need no annotation — only explicit signatures gain the
+slot (use `Void` when an app records no observations of its own).
 
 Also useful for custom harnesses:
 
@@ -127,7 +139,8 @@ Also useful for custom harnesses:
 
 ## AI Mocks (Canned Completions)
 
-All helpers live in `LazyCircus.Testing.Performer` (source: `src/LazyCircus/Testing/Performer.hs`);
+All helpers live in `LazyCircus.Testing.Performer` (source:
+`testing/src/LazyCircus/Testing/Performer.hs` in the `lazy-circus-testing` subpackage);
 the canned-response type comes from `OpenAI.V1.Chat.Completions` (import qualified as `Chat`).
 
 ```haskell
@@ -141,10 +154,10 @@ makeMocksWithAi :: [Chat.ChatCompletionObject] -> IO (Mocks serviceLib)
 
 -- | runWithDefaults-style runner whose fresh mocks are pre-seeded with canned responses.
 runWithAiMocks :: App.DefaultApp serviceLib -> [Chat.ChatCompletionObject]
-               -> TestInterpreter serviceLib a -> IO (Mocks serviceLib, a)
+               -> TestInterpreter serviceLib app a -> IO (Mocks serviceLib, a)
 
 -- | Same as runWithAiMocks, but inside RIO DefaultApp (app comes from ask).
-runInsideWithAiMocks :: [Chat.ChatCompletionObject] -> TestInterpreter serviceLib a
+runInsideWithAiMocks :: [Chat.ChatCompletionObject] -> TestInterpreter serviceLib app a
                      -> RIO (App.DefaultApp serviceLib) (Mocks serviceLib, a)
 
 -- | Captured rendered requests, earliest-first. Only meaningful when tcAI = Mocked.
@@ -377,15 +390,25 @@ switched to `Real` via `TestConfig`:
 ```haskell
 data Mode = Mocked | Real
 
-data TestConfig = TestConfig
-    { tcTelegram :: Mode   -- Telegram send/receive
-    , tcAI       :: Mode   -- AI ask / solveWithAgent
-    , tcMailSend :: Mode   -- Mail send (SMTP)
-    , tcAsync    :: Mode   -- runAsync (capture vs spawn)
+data TestConfig app = TestConfig
+    { tcTelegram :: Mode                        -- Telegram send/receive
+    , tcAI       :: Mode                        -- AI ask / solveWithAgent (direct asks AND agent loop)
+    , tcMailSend :: Mode                        -- Mail send (SMTP)
+    , tcAsync    :: Mode                        -- runAsync (capture vs spawn)
+    , tcJournal  :: Maybe (ObservationLog app)  -- append one Observation per intercepted side effect
+    , tcMailHook :: Maybe (Mail -> Observation app)                       -- app projection of sent mail
+    , tcAiHook   :: Maybe (forall a. AIRequest a -> Text -> Observation app)  -- app projection of AI replies
     }
 
-defaultTestConfig :: TestConfig   -- all Mocked (backward-compatible)
+defaultTestConfig :: TestConfig app   -- all Mocked, journal and hooks unset (polymorphic)
 ```
+
+With `tcJournal` set, the performer records one `Observation` per intercepted side effect:
+every Telegram operation in Mocked mode (appended in the SAME STM transaction that
+publishes to the outgoing mailbox), `runAsync` captures, and — when the hooks are also
+set — the app projections of sent mail and AI replies (in both Mocked and Real mode).
+`Nothing` disables journaling. The journal, its cursor waits (`awaitObservation`), and the
+BDD layer built on top are covered in [bdd.md](bdd.md).
 
 **Mode semantics:**
 
@@ -403,8 +426,8 @@ through the same test interpreter.
 **Configurable runners:**
 
 ```haskell
-runWithConfig        :: DefaultApp sl -> TestConfig -> Mocks sl -> TestInterpreter sl a -> IO a
-runWithDefaultConfig :: DefaultApp sl -> TestConfig -> TestInterpreter sl a -> IO (Mocks sl, a)
+runWithConfig        :: DefaultApp sl -> TestConfig app -> Mocks sl -> TestInterpreter sl app a -> IO a
+runWithDefaultConfig :: DefaultApp sl -> TestConfig app -> TestInterpreter sl app a -> IO (Mocks sl, a)
 ```
 
 The existing `runWithMocks` / `runWithDefaultMocks` use `defaultTestConfig` (all-mocked) and remain
@@ -513,3 +536,5 @@ does not exercise the headless dispatch loop or the STM mailbox.
 - Are async assertions aligned with the async mode (`readScheduledScenarios` / `mbScheduledScenarioCount` for `Mocked`; capture buffers / mailbox for `Real`)?
 - Are logs read via `readLog` / `readLogWithContext` instead of expected in terminal output?
 - Are canned downloads staged by `FileId` (third `createTgMock` argument or `addTgDownloads`) before Mocked download assertions?
+- Do new `TestConfig` / `TestInterpreter` annotations carry the `app` slot (`Void` when the app records no `ObsApp` observations)?
+- When journaling is on, are app facts observed through `tcMailHook` / `tcAiHook` or `ObsApp` rather than overloading the Telegram constructors?

@@ -24,7 +24,13 @@ source-repository head
 
 library
   exposed-modules:
+      LazyCircus.Testing.Bdd.Gherkin
+      LazyCircus.Testing.Bdd.Given
       LazyCircus.Testing.Bdd.Journal
+      LazyCircus.Testing.Bdd.Pattern
+      LazyCircus.Testing.Bdd.Runner
+      LazyCircus.Testing.Bdd.Step
+      LazyCircus.Testing.Bdd.Tg
       LazyCircus.Testing.Performer
       LazyCircus.Testing.TgTest
       LazyCircus.Testing.Updates
@@ -66,8 +72,16 @@ test-suite test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      Bdd.EchoSmokeSpec
+      Bdd.GherkinSpec
+      Bdd.GivenSpec
       Bdd.JournalSpec
+      Bdd.PatternSpec
+      Bdd.RunnerSpec
+      Bdd.StepSpec
+      Bdd.TgSpec
       LazyCircus.Testing.SmokeSpec
+      TestSupport.DbFreeApp
       Paths_lazy_circus_testing
   hs-source-dirs:
       test
@@ -75,7 +89,10 @@ test-suite test
   build-depends:
       aeson
     , base >=4.7 && <5
+    , directory
     , hspec
+    , http-client-tls
+    , jose
     , lazy-circus
     , lazy-circus-testing
     , mime-mail
@@ -83,6 +100,7 @@ test-suite test
     , postgresql-simple
     , resource-pool
     , rio
+    , servant-auth-server
     , servant-client
     , stm
     , telegram-bot-api

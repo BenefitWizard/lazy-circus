@@ -9,6 +9,27 @@ and this project adheres to the
 ## Unreleased
 
 ### Added
+- **New subpackage `lazy-circus-testing`** (`testing/`): the test layer
+  (`LazyCircus.Testing.Performer` / `TgTest` / `Updates`, module names unchanged)
+  moved out of the core library, which no longer carries hspec or any test
+  dependency. Consumers pin both packages from one git commit via
+  `subdirs: [., testing]`.
+- `LazyCircus.Testing.Bdd.*`: an executable BDD layer over the mock runtime —
+  a pure Gherkin-subset parser (`parseFeature`, line-numbered AST,
+  `Scenario Outline` + `Examples` expansion), a quoted-parameter pattern
+  matcher (`matchStep`, `matchAll`), an STM observation journal
+  (`Observation app`, `ObservationLog`, `awaitObservation` with consumed-set
+  semantics and explicit timeouts, `peekLastConsumed`), the `StepDef m c s a`
+  contract with first-registered-match-wins registries, a Telegram `Then`
+  dictionary, `Given` staging combinators over an empty-by-default
+  `AppContext app`, and the `gherkinSpec` hspec runner (coverage meta-test,
+  ambiguity probe, `@blocked` → pending). The suite is database-free and
+  passes with PostgreSQL stopped.
+- `TestConfig` gained an observation-journal slot: `TestConfig app` with
+  `tcJournal :: Maybe (ObservationLog app)` plus `tcMailHook` /
+  `tcAiHook` app projections; `TgTestConfig` cascades the parameter
+  (`ttgPerformerConfig :: TestConfig app`) while `defaultTestConfig` /
+  `defaultTgTestConfig` stay polymorphic.
 - `runArbitraryIO :: IO a -> ScenarioProgram script serviceLib a`: escape-hatch
   scenario operation that runs an arbitrary `IO` action. Documented as a
   last-resort fallback when no structured effect (DB, Telegram, AI, Mail, HTTP,

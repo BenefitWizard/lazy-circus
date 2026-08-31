@@ -69,3 +69,8 @@ tests:
     dependencies:
       - lazy-circus-testing
       - hspec
+      # Deps used by Bdd/RunnerSpec.hs (mirrors of library-level deps).
+      - directory
+      - servant-auth-server
+      - jose
+      - http-client-tls

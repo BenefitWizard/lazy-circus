@@ -66,7 +66,7 @@ flowchart TB
 - `LazyCircus.Script`: coproduct of supported sub-languages
 - `LazyCircus.Performer`: generic `ScenarioPerformer Script` dispatch
 - `LazyCircus.Performer.Default`: production interpreter stack
-- `LazyCircus.Testing.Performer`: mock-based test interpreter
+- `LazyCircus.Testing.Performer`, `LazyCircus.Testing.TgTest`, `LazyCircus.Testing.Updates`, and the `LazyCircus.Testing.Bdd.*` layer: shipped in the separate `lazy-circus-testing` subpackage (`testing/`), not in the core library (see [testing.md](testing.md) and [bdd.md](bdd.md))
 - `LazyCircus.Scene.DB`, `LazyCircus.Scene.Telegram`, `LazyCircus.Scene.AI`, `LazyCircus.Scene.Mail`, `LazyCircus.Scene.HTTP`: stable public facades that re-export scene APIs and logging helpers
 - `LazyCircus.Scene.*.Lang`: each effect language
 - `LazyCircus.Scene.*.Class`: each effect performer interface and runner

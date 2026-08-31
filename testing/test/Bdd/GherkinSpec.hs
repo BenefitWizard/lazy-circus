@@ -154,6 +154,16 @@ spec = do
                     other -> expectationFailure ("unexpected parse result: " <> show other)
 
         describe "scenario outlines" $ do
+            it "expands an Outline with a header but zero Examples rows into zero scenarios" $
+                parseFeature (T.unlines
+                    [ "Feature: Z0"
+                    , "  Scenario Outline: never runs <a>"
+                    , "    Given I do <a>"
+                    , "    Examples:"
+                    , "      | a |"
+                    ]) `shouldBe`
+                    Right (GherkinFeature "Z0" [] [] [])
+
             it "expands each Examples row into a scenario, substituting name and steps" $
                 parseFeature (T.unlines
                     [ "Feature: Lunch"

@@ -19,20 +19,20 @@ import RIO
 import RIO.Set qualified as Set
 import RIO.Vector qualified as V
 import Test.Hspec
+import TestSupport.DbFreeApp (mkDbFreeApp)
 
 import Data.Aeson (Value)
 import Data.Pool (destroyAllResources)
 import LazyCircus (mailScript, tgScript)
-import LazyCircus.AI (AIRequest, mkAIRequest)
+import LazyCircus.AI (AIRequest, AgentRequest, mkAIRequest, mkAgentRequest)
 import LazyCircus.App.Default
     ( DefaultApp (pgDbPool)
     , DefaultAppConfig (..)
     , MailCreds (..)
-    , newDefaultApp
     )
 import LazyCircus.App.Service (NoServiceLib (..))
 import LazyCircus.Scenario (ScenarioProgram, evalScript, runAsync)
-import LazyCircus.Scene.AI qualified as Scene (ask)
+import LazyCircus.Scene.AI qualified as Scene (ask, solveWithAgent)
 import LazyCircus.Scene.Mail.Lang qualified as Mail (sendMail)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg
     ( deleteMessage
@@ -82,35 +82,23 @@ import Telegram.Bot.API
     )
 import Telegram.Bot.API.Types (MessageId (..))
 
--- | PostgreSQL connection string for the journal app fixture. Points at the
--- PostgreSQL maintenance database (which always exists), because the journal
--- scenarios below never touch the database — 'newDefaultApp' merely probes the
--- pool at construction.
-fixtureConnectionString :: ByteString
-fixtureConnectionString = "host=127.0.0.1 port=5432 user=postgres password=my_password dbname=postgres"
+-- | PostgreSQL connection string for the journal app fixture.
+--
+-- UNUSED since the fixture switched to the database-free app builder
+-- ('TestSupport.DbFreeApp.mkDbFreeApp'): the journal scenarios below never
+-- touch the database, and 'newDefaultApp' probes its pool (and therefore the
+-- database) EAGERLY at construction, which would make this suite require a
+-- live PostgreSQL.
 
-{- | Run an action with a minimal 'DefaultApp' that has one Telegram bot
-(@demo-bot@) registered, so @tgScript "demo-bot"@ effects are captured by the
-test performer.
-PRE-CONTRACT: PostgreSQL must be reachable at 127.0.0.1:5432.
-POST-CONTRACT: The read-write pool is destroyed after the action completes.
+{- | Run an action with a minimal database-free 'DefaultApp' that has one
+Telegram bot (@demo-bot@) registered, so @tgScript "demo-bot"@ effects are
+captured by the test performer.
+POST-CONTRACT: The app never contacts PostgreSQL (its pool create action fails
+on any accidental checkout); the pool is destroyed after the action completes.
 -}
 withJournalApp :: (DefaultApp NoServiceLib -> IO ()) -> IO ()
 withJournalApp action = do
-    app <-
-        newDefaultApp
-            DefaultAppConfig
-                { cfgPgConnectionString = fixtureConnectionString
-                , cfgPgConnectionStringReadOnly = Nothing
-                , cfgPgPoolMaxResources = 1
-                , cfgBotConfigs = [("demo-bot", "123456:test-token")]
-                , cfgAiApiKey = Nothing
-                , cfgAiBaseUrl = Nothing
-                , cfgMailCreds = MailCreds "127.0.0.1" 1025 "" "" "" False
-                , cfgExtraContext = mempty
-                , cfgSqlLogAction = Just (\_ -> pure ())
-                , cfgServiceLib = NoServiceLib
-                }
+    app <- mkDbFreeApp "demo-bot"
     action app `finally` destroyAllResources (pgDbPool app)
 
 -- | Send a @sendMessage@ reply as @demo-bot@ to the given chat, discarding the response.
@@ -128,6 +116,16 @@ calcAiReq = mkAIRequest ["Calculate 2+2"] ["You are a calculator."]
 -- | A simple @ask@ script used by the AI-hook test.
 askScript :: Script (Maybe Value)
 askScript = AIScriptDef [] (Scene.ask calcAiReq)
+
+-- | A representative tool-free agent request (mirrors test/AiMockSpec.hs).
+calcAgentReq :: AgentRequest Value
+calcAgentReq = mkAgentRequest ["Calculate 2+2"] ["You are a calculator."] 5
+
+-- | A tool-free @solveWithAgent@ script used by the agent AI-hook test: one
+-- agent-loop iteration whose completion carries no tool calls, so the loop
+-- decodes the assistant text as the final answer.
+agentScript :: Script (Maybe Value)
+agentScript = AIScriptDef [] (Scene.solveWithAgent calcAgentReq)
 
 -- | Build a 'Chat.ChatCompletionObject' with a single Assistant choice
 -- carrying the given content text (mirrors test/AiMockSpec.hs).
@@ -163,7 +161,13 @@ mockCompletion contentText =
 
 -- | A bot text-message observation addressed to chat 1.
 tgMsg :: Text -> MessageId -> Observation ()
-tgMsg txt mid = ObsTgMessage{obsChatId = Just (ChatId 1), obsText = txt, obsMsgId = mid}
+tgMsg txt mid =
+    ObsTgMessage
+        { obsChatId = Just (ChatId 1)
+        , obsText = txt
+        , obsMsgId = mid
+        , obsMarkup = Nothing
+        }
 
 -- | Predicate: an observation is a bot text message carrying the given text.
 isTextReply :: Text -> Observation app -> Bool
@@ -190,8 +194,8 @@ spec = aroundAll withJournalApp $
 
             observed <- readObservations journal
             observed
-                `shouldBe` [ ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "first", obsMsgId = MessageId 0}
-                           , ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "second", obsMsgId = MessageId 1}
+                `shouldBe` [ ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "first", obsMsgId = MessageId 0, obsMarkup = Nothing}
+                           , ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "second", obsMsgId = MessageId 1, obsMarkup = Nothing}
                            ]
 
             -- journal message ids are consistent with the mailbox contents
@@ -221,7 +225,7 @@ spec = aroundAll withJournalApp $
 
             observed <- readObservations journal
             observed
-                `shouldBe` [ ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "draft", obsMsgId = MessageId 0}
+                `shouldBe` [ ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "draft", obsMsgId = MessageId 0, obsMarkup = Nothing}
                            , ObsTgEdit{obsTargetMsgId = Just (MessageId 0), obsNewText = "final text"}
                            , ObsTgReaction{obsTargetMsgId = Just (MessageId 0)}
                            , ObsTgDelete{obsTargetMsgId = Just (MessageId 0)}
@@ -256,6 +260,15 @@ spec = aroundAll withJournalApp $
             let cfg = defaultTestConfig{tcJournal = Just journal, tcAiHook = Just (\_req reply -> ObsApp reply)}
             mocks <- makeMocksWithAi [mockCompletion "{\"a\":4}"]
             _ <- runWithConfig app cfg mocks $ runScenarioProgram (evalScript askScript)
+
+            observed <- readObservations journal
+            observed `shouldBe` [ObsApp "{\"a\":4}"]
+
+        it "applies tcAiHook through the solveWithAgent agent loop and journals it" $ \app -> do
+            journal <- newObservationLog
+            let cfg = defaultTestConfig{tcJournal = Just journal, tcAiHook = Just (\_req reply -> ObsApp reply)}
+            mocks <- makeMocksWithAi [mockCompletion "{\"a\":4}"]
+            _ <- runWithConfig app cfg mocks $ runScenarioProgram (evalScript agentScript)
 
             observed <- readObservations journal
             observed `shouldBe` [ObsApp "{\"a\":4}"]
@@ -299,6 +312,29 @@ spec = aroundAll withJournalApp $
                             Left err -> expectationFailure ("expected a match, timed out: " <> show err)
                             Right (obs2, st2) -> do
                                 obs2 `shouldBe` tgMsg "first" (MessageId 0)
+                                ssConsumed st2 `shouldBe` Set.fromList [0, 1]
+
+            it "consumes exactly one message per await when two identical messages are journalled" $ \_app -> do
+                st0 <- newScenarioState :: IO (ScenarioState ())
+                let journal = ssLog st0
+                atomically $ do
+                    appendObservation journal (tgMsg "same" (MessageId 0))
+                    appendObservation journal (tgMsg "same" (MessageId 1))
+                -- "one awaitObservation on ObsTgMessage = one message": the
+                -- first call consumes the FIRST identical entry only
+                result1 <- awaitObservation defaultAwaitBudgetUs st0 (isTextReply "same") "the reply"
+                case result1 of
+                    Left err -> expectationFailure ("expected a match, timed out: " <> show err)
+                    Right (obs1, st1) -> do
+                        obs1 `shouldBe` tgMsg "same" (MessageId 0)
+                        ssConsumed st1 `shouldBe` Set.singleton 0
+                        -- the second call skips the consumed entry and matches
+                        -- the second identical message
+                        result2 <- awaitObservation defaultAwaitBudgetUs st1 (isTextReply "same") "the reply"
+                        case result2 of
+                            Left err -> expectationFailure ("expected a match, timed out: " <> show err)
+                            Right (obs2, st2) -> do
+                                obs2 `shouldBe` tgMsg "same" (MessageId 1)
                                 ssConsumed st2 `shouldBe` Set.fromList [0, 1]
 
             it "fails with an explicit AwaitTimeout error when the budget expires" $ \_app -> do

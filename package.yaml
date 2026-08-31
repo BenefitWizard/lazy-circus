@@ -149,6 +149,11 @@ tests:
       # (lazy-circus:test -> lazy-circus-testing -> lazy-circus), which both
       # stack and cabal reject. Sources stay owned by the lazy-circus-testing package.
       - testing/src
+    # OverloadedStrings is mirrored from the lazy-circus-testing package: the
+    # testing/src modules compiled here rely on it (the rest of their
+    # default-extensions is either inert or per-file in these sources).
+    default-extensions:
+      - OverloadedStrings
     verbatim:
       build-tool-depends: hspec-discover:hspec-discover == 2.*
     ghc-options:

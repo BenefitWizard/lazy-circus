@@ -339,7 +339,13 @@ test-suite lazy-circus-test
       TgTestSpec
       ToolSchemaSpec
       UpdateFactorySpec
+      LazyCircus.Testing.Bdd.Gherkin
+      LazyCircus.Testing.Bdd.Given
       LazyCircus.Testing.Bdd.Journal
+      LazyCircus.Testing.Bdd.Pattern
+      LazyCircus.Testing.Bdd.Runner
+      LazyCircus.Testing.Bdd.Step
+      LazyCircus.Testing.Bdd.Tg
       LazyCircus.Testing.Performer
       LazyCircus.Testing.TgTest
       LazyCircus.Testing.Updates
@@ -349,6 +355,8 @@ test-suite lazy-circus-test
   hs-source-dirs:
       test
       testing/src
+  default-extensions:
+      OverloadedStrings
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson

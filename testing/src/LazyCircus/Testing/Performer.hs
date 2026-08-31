@@ -76,7 +76,13 @@ where
 
 import Data.Pool (Pool, withResource)
 import Database.PostgreSQL.Simple qualified as Simple
-import LazyCircus.AI (AIRequest, HasAIMethods (..), askAIContinuing, solveWithAgentLoopContinuing)
+import LazyCircus.AI
+    ( AIRequest (AIRequest, outputType, prompt, requestParams, systemPrompt, thinkingEnabled)
+    , AgentRequest (..)
+    , HasAIMethods (..)
+    , askAIContinuing
+    , solveWithAgentLoopContinuing
+    )
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
 import LazyCircus.App.Service (HasServiceLib (..), HasToolCallExec (..), HasToolDescriptions (..), callViaServiceLib)
@@ -269,8 +275,9 @@ data TestConfig app = TestConfig
     -- this and 'tcJournal' are both set
     , tcAiHook :: !(Maybe (forall (a :: *). AIRequest a -> Text -> Observation app))
     -- ^ pure projection from an AI request and the assistant's response text to
-    -- an app-specific observation; applied at the @ask@ transport seam (Mocked
-    -- and Real mode) when this and 'tcJournal' are both set. Polymorphic in the
+    -- an app-specific observation; applied at the transport seam of BOTH the
+    -- @ask@ path and the @solveWithAgent@ agent loop (Mocked and Real mode)
+    -- when this and 'tcJournal' are both set. Polymorphic in the
     -- request's phantom result type so one hook serves every script.
     }
 
@@ -441,7 +448,7 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                                 (sendMessageReplyMarkup req)
                         )
                         -- journal observation, recorded in the SAME transaction
-                        (\mid -> ObsTgMessage{obsChatId = chatId, obsText = sendMessageText req, obsMsgId = mid})
+                        (\mid -> ObsTgMessage{obsChatId = chatId, obsText = sendMessageText req, obsMsgId = mid, obsMarkup = sendMessageReplyMarkup req})
                 resp <- dequeueTgResponse request
                 pure (stampMessageId assignedId resp)
             Real -> timedAndLog "Telegram" "SendMessage" $ TG.sendMessage request
@@ -658,13 +665,35 @@ instance AILangPerformer (TestPerformer (EnvWithMocks serviceLib app)) where
                 _ -> inner
         local (aiMethodsL .~ methods) (askAIContinuing req conv)
     solveWithAgentContinuing' req conv = do
-        mode <- asks (tcAI . testConfig)
-        case mode of
-            Mocked -> do
-                base <- view aiMethodsL
-                aiM <- asks (aiMock . mocks)
-                local (aiMethodsL .~ buildMockAiMethods base aiM) (solveWithAgentLoopContinuing req conv)
-            Real -> solveWithAgentLoopContinuing req conv
+        cfg <- asks testConfig
+        -- tcAiHook carries an embedded forall, so it must be projected by
+        -- pattern matching rather than through its record selector.
+        let TestConfig{tcJournal = mJournal, tcAiHook = mHook} = cfg
+        base <- view aiMethodsL
+        aiM <- asks (aiMock . mocks)
+        let inner = case tcAI cfg of
+                Mocked -> buildMockAiMethods base aiM
+                Real -> base
+            -- Journal the request + assistant response text through the AI hook
+            -- when both a journal and a hook are configured (any mode).
+            methods = case mHook of
+                Just mkObs -> case mJournal of
+                    Just logRef -> journalAiTransport logRef (mkObs (agentRequestToAiRequest req)) inner
+                    _ -> inner
+                _ -> inner
+        local (aiMethodsL .~ methods) (solveWithAgentLoopContinuing req conv)
+      where
+        -- | Projects an 'AgentRequest' onto the 'AIRequest' shape 'tcAiHook'
+        -- expects, carrying over every field the two request types share.
+        agentRequestToAiRequest :: AgentRequest b -> AIRequest b
+        agentRequestToAiRequest AgentRequest{agentPrompt, agentSystemPrompt, thinkingEnabled, agentParams} =
+            AIRequest
+                { prompt = agentPrompt
+                , systemPrompt = agentSystemPrompt
+                , outputType = Proxy
+                , thinkingEnabled = thinkingEnabled
+                , requestParams = agentParams
+                }
 
 -- | Executes servant-client actions against the real HTTP backend using the client environment.
 instance HTTPPerformer (TestPerformer (AppWithClientEnv (EnvWithMocks serviceLib app))) where

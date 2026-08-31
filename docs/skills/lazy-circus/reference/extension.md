@@ -666,10 +666,11 @@ Problem:
 
 Fix:
 
-Run:
+The repository is a two-package monorepo (the library plus the `lazy-circus-testing`
+subpackage) — regenerate BOTH cabal files:
 
 ```bash
-hpack
+hpack && hpack testing
 stack build
 ```
 
