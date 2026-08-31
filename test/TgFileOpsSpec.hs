@@ -113,7 +113,7 @@ buildFileOpsAction ::
     DefaultApp AllServices ->
     Integer ->
     [(FileId, ByteString)] ->
-    TestConfig ->
+    TestConfig app ->
     Mocks AllServices ->
     IO (Update -> IO ())
 buildFileOpsAction app maxBytes downloads cfg mocks = do
@@ -196,7 +196,7 @@ directDownloadScenario botName chatId fid = do
 buildDirectDownloadAction ::
     DefaultApp AllServices ->
     [(FileId, ByteString)] ->
-    TestConfig ->
+    TestConfig app ->
     Mocks AllServices ->
     IO (Update -> IO ())
 buildDirectDownloadAction app downloads cfg mocks = do
@@ -264,7 +264,7 @@ metadataEchoScenario botName chatId doc =
 -- staged — the scenario must NOT download anything.
 buildMetadataEchoAction ::
     DefaultApp AllServices ->
-    TestConfig ->
+    TestConfig app ->
     Mocks AllServices ->
     IO (Update -> IO ())
 buildMetadataEchoAction app cfg mocks =

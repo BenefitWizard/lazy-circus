@@ -87,9 +87,6 @@ library
       LazyCircus.Telegram.Default
       LazyCircus.Telegram.FileCheck
       LazyCircus.Telegram.Types
-      LazyCircus.Testing.Performer
-      LazyCircus.Testing.TgTest
-      LazyCircus.Testing.Updates
   other-modules:
       Paths_lazy_circus
   autogen-modules:
@@ -342,11 +339,16 @@ test-suite lazy-circus-test
       TgTestSpec
       ToolSchemaSpec
       UpdateFactorySpec
+      LazyCircus.Testing.Bdd.Journal
+      LazyCircus.Testing.Performer
+      LazyCircus.Testing.TgTest
+      LazyCircus.Testing.Updates
       Paths_lazy_circus
   autogen-modules:
       Paths_lazy_circus
   hs-source-dirs:
       test
+      testing/src
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson

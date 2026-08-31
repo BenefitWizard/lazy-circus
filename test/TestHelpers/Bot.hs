@@ -53,7 +53,7 @@ withBotTestApp action = withDemoApp botTestConfig $ \app -> action app
 -- The bot runs its ordinary script ('runUpdate' + 'handleScenario'); only the
 -- performer is the test performer (configured by the supplied 'TestConfig'), so
 -- every Telegram side effect is mocked and captured in the shared mailbox.
-buildDemoAction :: DefaultApp AllServices -> TestConfig -> Mocks AllServices -> IO (Update -> IO ())
+buildDemoAction :: DefaultApp AllServices -> TestConfig app -> Mocks AllServices -> IO (Update -> IO ())
 buildDemoAction app cfg mocks = do
     store <- newChatStateStore
     pure $ runUpdate (runWithConfig app cfg mocks . runScenarioProgram) demoHandlerConfig store

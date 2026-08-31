@@ -1,0 +1,94 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.38.0.
+--
+-- see: https://github.com/sol/hpack
+
+name:           lazy-circus-testing
+version:        0.1.0.0
+synopsis:       Internal testing toolkit for Lazy Circus
+description:    Mocks, test performers and scenario helpers for testing Lazy Circus programs. Please see testing/README.md.
+homepage:       https://github.com/BenefitWizard/lazy-circus#readme
+bug-reports:    https://github.com/BenefitWizard/lazy-circus/issues
+author:         Aleksandr Tortsev
+maintainer:     acialo@yandex.ru
+copyright:      2026 Author name here
+license:        MIT
+build-type:     Simple
+extra-source-files:
+    README.md
+
+source-repository head
+  type: git
+  location: https://github.com/BenefitWizard/lazy-circus
+
+library
+  exposed-modules:
+      LazyCircus.Testing.Bdd.Journal
+      LazyCircus.Testing.Performer
+      LazyCircus.Testing.TgTest
+      LazyCircus.Testing.Updates
+  other-modules:
+      Paths_lazy_circus_testing
+  hs-source-dirs:
+      src
+  default-extensions:
+      MultiWayIf
+      OverloadedStrings
+      NoImplicitPrelude
+      GADTs
+      FlexibleContexts
+      FlexibleInstances
+      TypeFamilies
+      TypeApplications
+      StrictData
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , hspec
+    , lazy-circus
+    , mime-mail
+    , openai
+    , postgresql-simple
+    , resource-pool
+    , rio
+    , servant-client
+    , stm
+    , telegram-bot-api
+    , telegram-bot-extra
+    , telegram-bot-simple
+    , text
+    , transformers
+  default-language: GHC2021
+
+test-suite test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Bdd.JournalSpec
+      LazyCircus.Testing.SmokeSpec
+      Paths_lazy_circus_testing
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , hspec
+    , lazy-circus
+    , lazy-circus-testing
+    , mime-mail
+    , openai
+    , postgresql-simple
+    , resource-pool
+    , rio
+    , servant-client
+    , stm
+    , telegram-bot-api
+    , telegram-bot-extra
+    , telegram-bot-simple
+    , text
+    , transformers
+  default-language: GHC2021
+  build-tool-depends: hspec-discover:hspec-discover == 2.*
