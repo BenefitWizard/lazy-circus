@@ -51,7 +51,7 @@ all mockable sub-languages are mocked:
 - Mail capability reuses real mail construction but captures sends (`tcMailSend = Mocked`)
 - AI capability uses a transport-level mock with FIFO canned responses (`tcAI = Mocked`)
 - HTTP capability executes real servant-client requests via the configured manager and base URL (always real)
-- async capability captures scheduled scenarios instead of executing them (`tcAsync = Mocked`, the default); with `tcAsync = Real` it spawns the scenario on a background thread through the same test interpreter
+- async capability captures scheduled scenarios (`runAsync`) and timers (`runAsyncAfter`, each paired with its delay) instead of executing them (`tcAsync = Mocked`, the default — one knob for both); with `tcAsync = Real` it spawns the scenario on a background thread through the same test interpreter
 - logging capability captures structured entries instead of draining the production queue
 
 Each mockable sub-language (Telegram, AI, Mail-send, async) can be switched to `Real` mode individually via
@@ -98,6 +98,8 @@ capabilities at the edges.
 | `readSentMails` | read outgoing mails |
 | `readAiRequests` | read captured AI chat-completion requests (Mocked mode only) |
 | `readScheduledScenarios` | read captured async scenario requests |
+| `readScheduledTimers` | read captured `runAsyncAfter` requests as `(delay, program)` pairs, in capture order (buffer not cleared) |
+| `fireScheduledTimers` | execute captured timer programs immediately, in capture order, through the same test interpreter and clear the buffer (idempotent) |
 
 Signatures (module `LazyCircus.Testing.Performer`; `sl` = `serviceLib`):
 
@@ -121,6 +123,8 @@ readLogWithContext        :: Mocks sl -> IO [AppLogMsgWithContext]
 readSentMails             :: Mocks sl -> IO [Mail]
 readAiRequests            :: Mocks sl -> IO [Chat.CreateChatCompletion]
 readScheduledScenarios    :: Mocks sl -> IO [ScenarioProgram Script sl ()]
+readScheduledTimers       :: Mocks sl -> IO [(NominalDiffTime, ScenarioProgram Script sl ())]
+fireScheduledTimers       :: TestInterpreter sl app ()
 ```
 
 The `app` parameter is the observation-journal slot (see `TestConfig`'s `tcJournal` /
@@ -283,7 +287,7 @@ captures side effects; `Real` delegates to production implementations without ca
 | HTTP `runClient` | — (always real) | real execution via servant-client against target base URL | same |
 | DB | — (always real) | runs against a real DB (one pooled connection per script) | same |
 | Logging | — (always captured) | captured in refs, not pushed to shared queue | same |
-| `runAsync` | `tcAsync` | captures scenario without executing it (`readScheduledScenarios`) | spawns the scenario on a background thread through the same test interpreter; side effects land in the usual capture buffers / mailbox (no capture in `readScheduledScenarios`) |
+| `runAsync` / `runAsyncAfter` | `tcAsync` | one knob for both primitives: `runAsync` captures the scenario without executing it (`readScheduledScenarios`); `runAsyncAfter` captures the `(delay, scenario)` pair in the `scheduledTimers` buffer (`readScheduledTimers`, executed via `fireScheduledTimers`) | spawns the scenario on a background thread through the same test interpreter (for `runAsyncAfter` once the requested delay elapses); side effects land in the usual capture buffers / mailbox (no capture in `readScheduledScenarios` / `scheduledTimers`) |
 
 ## Typical Test Pattern
 
@@ -338,6 +342,24 @@ it "schedules background cleanup" $ do
 
 If you want to verify the deferred effect itself, explicitly run the captured scenario later with
 the same test runtime and then inspect the corresponding capture buffer.
+
+Deferred `runAsyncAfter` requests are captured the same way (same `tcAsync` knob), each paired
+with its requested delay. `readScheduledTimers` only reads — firing is explicit and executes the
+captured programs immediately, in capture order:
+
+```haskell
+it "schedules a delayed reminder" $ do
+    (mocks, _) <- runWithDefaultMocks app $ do
+        runScenarioProgram myScenario
+
+    timers <- readScheduledTimers mocks
+    map fst timers `shouldBe` [3600]
+
+    -- fire the captured timer programs immediately (same mocks), then assert their effects:
+    (_, ()) <- runWithConfig app defaultTestConfig mocks fireScheduledTimers
+    mails <- readSentMails mocks
+    length mails `shouldBe` 1
+```
 
 ## Debugging: Where Did My Logs Go?
 
@@ -394,7 +416,7 @@ data TestConfig app = TestConfig
     { tcTelegram :: Mode                        -- Telegram send/receive
     , tcAI       :: Mode                        -- AI ask / solveWithAgent (direct asks AND agent loop)
     , tcMailSend :: Mode                        -- Mail send (SMTP)
-    , tcAsync    :: Mode                        -- runAsync (capture vs spawn)
+    , tcAsync    :: Mode                        -- runAsync / runAsyncAfter (capture vs spawn; one knob for both)
     , tcJournal  :: Maybe (ObservationLog app)  -- append one Observation per intercepted side effect
     , tcMailHook :: Maybe (Mail -> Observation app)                       -- app projection of sent mail
     , tcAiHook   :: Maybe (forall a. AIRequest a -> Text -> Observation app)  -- app projection of AI replies
@@ -417,7 +439,7 @@ BDD layer built on top are covered in [bdd.md](bdd.md).
 | Telegram | mailbox capture + canned responses | `TG.*` API calls (real bot token required) |
 | AI | transport intercept via `buildMockAiMethods` with FIFO canned responses | real `askAIContinuing` without override (real `cfgAiApiKey` required) |
 | Mail send | capture in `readSentMails` | real SMTP via `Mail.sendMail` |
-| Async (`runAsync`) | capture in `readScheduledScenarios` (no execution) | spawn on a background thread through the same test interpreter; side effects land in the usual capture buffers / mailbox |
+| Async (`runAsync` and `runAsyncAfter` — one `tcAsync` knob for both) | capture in `readScheduledScenarios` / `readScheduledTimers` + `fireScheduledTimers` (no execution) | spawn on a background thread through the same test interpreter; side effects land in the usual capture buffers / mailbox |
 
 DB and HTTP are **always real** — there is no mock for them. Async (`runAsync`) is the only
 sub-language whose `Real` mode still captures side effects, because the spawned worker runs
@@ -533,7 +555,7 @@ does not exercise the headless dispatch loop or the STM mailbox.
 
 ## Review Checklist
 
-- Are async assertions aligned with the async mode (`readScheduledScenarios` / `mbScheduledScenarioCount` for `Mocked`; capture buffers / mailbox for `Real`)?
+- Are async assertions aligned with the async mode (`readScheduledScenarios` / `readScheduledTimers` + `fireScheduledTimers` / `mbScheduledScenarioCount` for `Mocked`; capture buffers / mailbox for `Real`)?
 - Are logs read via `readLog` / `readLogWithContext` instead of expected in terminal output?
 - Are canned downloads staged by `FileId` (third `createTgMock` argument or `addTgDownloads`) before Mocked download assertions?
 - Do new `TestConfig` / `TestInterpreter` annotations carry the `app` slot (`Void` when the app records no `ObsApp` observations)?

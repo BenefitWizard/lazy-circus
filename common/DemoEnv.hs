@@ -28,7 +28,7 @@ import Database.PostgreSQL.Simple.Types (Query (..))
 import LazyCircus.App.Default hiding (cfgAiApiKey, cfgAiBaseUrl, DefaultAppConfig)
 import LazyCircus.App.Default qualified as LAD (DefaultAppConfig (..))
 import LazyCircus.App.Log hiding (genLogFunc, logContext, logFunc, logQueue)
-import LazyCircus.AsyncWorker (runAsyncWorkerPool)
+import LazyCircus.AsyncWorker (runAsyncWorkerPool, runTimerService)
 import LazyCircus.Performer.Default (runDefaultPerformer)
 import LazyCircus.Scenario (ScenarioProgram, run)
 import LazyCircus.Script (Script)
@@ -167,7 +167,7 @@ demoConfigToAppConfig services cfg =
 
 {- | Run an action with a demo application, managing lifecycle and background workers.
 PRE-CONTRACT: PostgreSQL must be reachable at 127.0.0.1:5432.
-POST-CONTRACT: Worker threads (async pool, logger, service workers) are cancelled first
+POST-CONTRACT: Worker threads (async pool, timer service, logger, service workers) are cancelled first
 so in-flight connections are released; database connection pools are then released via
 'destroyAllResources', which does not wait for in-flight users (acceptable after cancels).
 -}
@@ -188,19 +188,21 @@ withDemoApp cfg action = do
             workerThreads <- runAllWorkers workers
             logThread <- async $ runRIO (logAppFromDefaultApp app') logWorker
             asyncThread <- async $ runRIO app' (runAsyncWorkerPool (cfgAsyncWorkers cfg) (runDefaultPerformer . run @Script @AllServices))
-            pure (app', logThread, asyncThread, workerThreads)
+            timerThread <- async $ runRIO app' (runTimerService @Script @AllServices)
+            pure (app', logThread, asyncThread, timerThread, workerThreads)
         )
-        ( \(_, logThread, asyncThread, workerThreads) -> do
+        ( \(_, logThread, asyncThread, timerThread, workerThreads) -> do
             cancel asyncThread
+            cancel timerThread
             cancel logThread
             mapM_ cancel workerThreads
             destroyAllResources (pgDbPool app')
             mapM_ destroyAllResources (pgDbPoolReadOnly app')
         )
-        (action . fst4)
+        (action . fst5)
   where
-    -- \| Extract the first element of a 4-tuple.
-    fst4 (a, _, _, _) = a
+    -- \| Extract the first element of a 5-tuple.
+    fst5 (a, _, _, _, _) = a
 
 {- | Execute a scenario program against the demo application's default performer stack.
 PRE-CONTRACT: The DefaultApp must have a live database connection.

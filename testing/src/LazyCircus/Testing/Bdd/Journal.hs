@@ -96,6 +96,10 @@ data Observation app
         { obsScenarioDesc :: Text
         -- ^ human-readable description of the captured async scenario
         }
+    | ObsTimerScheduled
+        { obsScenarioDesc :: Text
+        -- ^ human-readable description of the captured timer scenario
+        }
     | ObsApp app
       -- ^ an app-specific observation produced by a caller-supplied hook
 
@@ -116,6 +120,7 @@ instance Eq app => Eq (Observation app) where
             target1 == target2 && text1 == text2
         (ObsTgDelete delete1, ObsTgDelete delete2) -> delete1 == delete2
         (ObsAsyncScheduled desc1, ObsAsyncScheduled desc2) -> desc1 == desc2
+        (ObsTimerScheduled desc1, ObsTimerScheduled desc2) -> desc1 == desc2
         (ObsApp x, ObsApp y) -> x == y
         _ -> False
 
@@ -140,6 +145,8 @@ instance Show app => Show (Observation app) where
             "ObsTgDelete{obsTargetMsgId = " <> show target <> "}"
         ObsAsyncScheduled{obsScenarioDesc = desc} ->
             "ObsAsyncScheduled{obsScenarioDesc = " <> show desc <> "}"
+        ObsTimerScheduled{obsScenarioDesc = desc} ->
+            "ObsTimerScheduled{obsScenarioDesc = " <> show desc <> "}"
         ObsApp x -> "ObsApp " <> show x
 
 -- | A journal entry stamped with the position (0-based) it was committed at.

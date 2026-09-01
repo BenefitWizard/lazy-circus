@@ -10,8 +10,8 @@ Drives small scenarios through the standard mock runner
 ('LazyCircus.Testing.Performer.runWithDefaultConfig' / 'runWithConfig') with a
 journal configured, and asserts that the snapshot contains the expected
 @ObsTg*@ sequence in commit order with incremental 'MessageId's consistent
-with the outgoing mailbox contents, plus coverage of the @runAsync@ capture
-and the mail\/AI app hooks.
+with the outgoing mailbox contents, plus coverage of the @runAsync@ and
+@runAsyncAfter@ captures and the mail\/AI app hooks.
 -}
 module Bdd.JournalSpec (spec) where
 
@@ -31,7 +31,7 @@ import LazyCircus.App.Default
     , MailCreds (..)
     )
 import LazyCircus.App.Service (NoServiceLib (..))
-import LazyCircus.Scenario (ScenarioProgram, evalScript, runAsync)
+import LazyCircus.Scenario (ScenarioProgram, evalScript, runAsync, runAsyncAfter)
 import LazyCircus.Scene.AI qualified as Scene (ask, solveWithAgent)
 import LazyCircus.Scene.Mail.Lang qualified as Mail (sendMail)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg
@@ -241,6 +241,17 @@ spec = aroundAll withJournalApp $
 
             observed <- readObservations journal
             observed `shouldBe` [ObsAsyncScheduled{obsScenarioDesc = "runAsync scenario"}]
+
+        it "journals ObsTimerScheduled for a runAsyncAfter capture in Mocked mode" $ \app -> do
+            journal <- newObservationLog :: IO (ObservationLog ())
+            let cfg = defaultTestConfig{tcJournal = Just journal}
+            _ <-
+                runWithDefaultConfig app cfg $
+                    runScenarioProgram $
+                        runAsyncAfter 0.1 $ sendTo (ChatId 1) "later"
+
+            observed <- readObservations journal
+            observed `shouldBe` [ObsTimerScheduled{obsScenarioDesc = "runAsyncAfter scenario"}]
 
         it "applies tcMailHook and journals the resulting ObsApp" $ \app -> do
             journal <- newObservationLog

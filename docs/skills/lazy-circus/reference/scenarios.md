@@ -94,6 +94,7 @@ multiple effects and control concerns.
 | `withLogContext` / `withLogEntry` / `with2LogEntries` | enrich logging context |
 | `getExtraContext` / `readFromExtraContext` / `getFeatureFlag` | read runtime config |
 | `runAsync` | schedule async work |
+| `runAsyncAfter` | schedule deferred async work (one-shot timer: fires once, not before the delay, on an async worker; `delay <= 0` = immediate) |
 | `runArbitraryIO` | **fallback** escape hatch — run an arbitrary `IO` when no structured effect fits (see below) |
 | `callService` | call a registered service via the service library |
 
@@ -112,6 +113,7 @@ getExtraContext       :: ScenarioProgram script sl (HashMap Text Text)
 readFromExtraContext  :: Text -> ScenarioProgram script sl (Maybe Text)
 getFeatureFlag        :: Text -> ScenarioProgram script sl Bool
 runAsync              :: ScenarioProgram script sl () -> ScenarioProgram script sl ()
+runAsyncAfter         :: NominalDiffTime -> ScenarioProgram script sl () -> ScenarioProgram script sl ()
 runArbitraryIO        :: IO a -> ScenarioProgram script sl a
 callService           :: IsInServiceLib sl req resp => req -> ScenarioProgram script sl resp
 
@@ -208,6 +210,32 @@ cleanupLater actId = do
         logInfo "Background cleanup started"
         evalScript $ dbScript simpleDb ReadWrite $ delete (CircusActId actId)
         logInfo "Background cleanup finished"
+```
+
+`runAsyncAfter delay` defers work with a one-shot timer and delegates the same way:
+
+- in production the action is registered via `scheduleTimedAction` in the `TimedActions` registry and served by `runTimerService`, which moves due programs into the shared queue drained by the async workers — the timer service thread must be running, otherwise deferred actions never fire
+- in tests it is captured together with its delay in the `scheduledTimers` buffer when `tcAsync = Mocked` (`readScheduledTimers` to inspect, `fireScheduledTimers` to execute), and spawned once the delay elapses when `tcAsync = Real` — the same `tcAsync` knob controls both `runAsync` and `runAsyncAfter`
+
+```haskell
+cleanupMuchLater :: Int32 -> ScenarioProgram Script serviceLib ()
+cleanupMuchLater actId =
+    runAsyncAfter 3600 $ do
+        logInfo "Delayed cleanup started"
+        evalScript $ dbScript simpleDb ReadWrite $ delete (CircusActId actId)
+```
+
+`runAsyncAfter` is one-shot with no cancel handle. Periodic behavior is the re-arm pattern
+at scenario level: a tick re-schedules itself while its condition holds, and cancellation
+simply means stopping to re-arm:
+
+```haskell
+tick :: ScenarioProgram Script serviceLib ()
+tick = do
+    done <- isFinished
+    unless done $ do
+        doWork
+        runAsyncAfter interval tick
 ```
 
 ### When To Use `runSafely`

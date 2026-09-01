@@ -497,6 +497,10 @@ instance (...) => ScenarioPerformer script serviceLib m where
     ...
 ```
 
+Note: the `ScenarioPerformer` class carries `runAsyncAfter'` (the dispatch method behind
+`runAsyncAfter`). It has **no default** implementation — it is mandatory to implement, which is
+a breaking change for custom performers: every existing custom instance must add the method.
+
 Update the default performer if the new effect needs a special environment projection.
 
 ### Step 4. Add The Public Facade And Optional Top-Level Smart Constructor
@@ -537,6 +541,7 @@ genuinely benefits from it.
 - runner via `iterM` exists
 - `Script` constructor added
 - `ScenarioPerformer script serviceLib` dispatch updated
+- `runAsyncAfter'` implemented in custom `ScenarioPerformer` instances (no default — mandatory to implement; a breaking change for custom performers)
 - stable `LazyCircus.Scene.MyEffect` facade added when the effect is public
 - optional top-level smart constructor added only when the effect should mirror `tgScript`, `mailScript`, `aiScript`, or `httpScript`
 - default and test runtimes updated as needed

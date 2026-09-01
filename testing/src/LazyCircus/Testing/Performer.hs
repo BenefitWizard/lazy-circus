@@ -71,6 +71,8 @@ module LazyCircus.Testing.Performer (
     readSentMails,
     readAiRequests,
     readScheduledScenarios,
+    readScheduledTimers,
+    fireScheduledTimers,
 )
 where
 
@@ -98,6 +100,7 @@ import LazyCircus.Scenario
     , ScenarioPerformer (..)
     , ScenarioProgram
     , run
+    , runAsyncAfter
     )
 
 import Control.Concurrent.STM (retry)
@@ -128,7 +131,7 @@ import RIO.ByteString qualified as BS
 import RIO.HashMap qualified as HM
 import RIO.Map qualified as M
 import RIO.Process (HasProcessContext (..))
-import RIO.Time (getCurrentTime)
+import RIO.Time (NominalDiffTime, getCurrentTime)
 import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
 import Telegram.Bot.API (ChatId, DocumentFile (..), Message, MessageId, Response, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
@@ -236,6 +239,11 @@ data Mocks serviceLib = Mocks
     -- ^ AI request capture and canned-response queue
     , scheduledScenarios :: SomeRef [ScenarioProgram Script serviceLib ()]
     -- ^ captured async control programs requested through 'runAsync' ('tcAsync = Mocked')
+    , scheduledTimers :: SomeRef [(NominalDiffTime, ScenarioProgram Script serviceLib ())]
+    -- ^ captured delayed async control programs requested through
+    -- 'runAsyncAfter' ('tcAsync = Mocked'), each paired with its requested
+    -- delay; read via 'readScheduledTimers', drained and executed via
+    -- 'fireScheduledTimers'
     , asyncInflight :: !(TVar Int)
     -- ^ count of 'tcAsync = Real' spawned async workers currently running; awaited at
     -- 'runWithConfigEngine' teardown so spawned work settles before the run returns
@@ -257,11 +265,13 @@ data TestConfig app = TestConfig
     , tcMailSend :: !Mode
     -- ^ Mail send mode: Mocked = capture in sentMails ref, Real = SMTP via Mail.sendMail
     , tcAsync :: !Mode
-    -- ^ 'LazyCircus.Scenario.runAsync' mode: Mocked = capture scenario in
-    -- 'scheduledScenarios' (assert via 'readScheduledScenarios'); Real = spawn
+    -- ^ 'LazyCircus.Scenario.runAsync' / 'LazyCircus.Scenario.runAsyncAfter'
+    -- mode: Mocked = capture in 'scheduledScenarios' (assert via
+    -- 'readScheduledScenarios') or in 'scheduledTimers' (read via
+    -- 'readScheduledTimers', execute via 'fireScheduledTimers'); Real = spawn
     -- the scenario on a background thread so its side effects genuinely run and
     -- land in the usual capture buffers / outgoing mailbox (no capture in
-    -- 'scheduledScenarios')
+    -- 'scheduledScenarios' or 'scheduledTimers')
     , tcJournal :: !(Maybe (ObservationLog app))
     -- ^ optional observation journal ('LazyCircus.Testing.Bdd.Journal.ObservationLog').
     -- When set, the performer records one 'Observation' per intercepted side
@@ -722,6 +732,7 @@ instance ScenarioPerformer Script serviceLib (TestPerformer (EnvWithMocks servic
     log' cs = sublangLog cs "Scenario"
     getExtraContext' = view App.extraContextL
     runAsync' = runAsyncTest
+    runAsyncAfter' = runAsyncAfterTest
     runArbitraryIO' = liftIO
     callService' = callViaServiceLib
     withLogContext' values action =
@@ -844,6 +855,7 @@ makeMocks = do
     mockMail <- createSimpleMailMock
     aiMockTest <- createSimpleAiMock
     asyncLog <- newSomeRef []
+    timerLog <- newSomeRef []
     asyncCounter <- newTVarIO 0
     pure
         Mocks
@@ -854,6 +866,7 @@ makeMocks = do
             , mailMock = mockMail
             , aiMock = aiMockTest
             , scheduledScenarios = asyncLog
+            , scheduledTimers = timerLog
             , asyncInflight = asyncCounter
             }
 
@@ -1024,6 +1037,48 @@ readAiRequests testMocks = reverse <$> readSomeRef (aiRequests $ aiMock testMock
 -- POST-CONTRACT: Result is ordered earliest-first (request order).
 readScheduledScenarios :: Mocks serviceLib -> IO [ScenarioProgram Script serviceLib ()]
 readScheduledScenarios testMocks = reverse <$> readSomeRef (scheduledScenarios testMocks)
+
+-- | Read captured delayed async control programs (requested via
+-- 'LazyCircus.Scenario.runAsyncAfter') together with their requested delays,
+-- in request order.
+-- POST-CONTRACT: Result is ordered earliest-first (request order); the buffer
+-- is NOT cleared — pending timers stay available to 'fireScheduledTimers'.
+readScheduledTimers :: Mocks serviceLib -> IO [(NominalDiffTime, ScenarioProgram Script serviceLib ())]
+readScheduledTimers testMocks = reverse <$> readSomeRef (scheduledTimers testMocks)
+
+-- | Drain the 'scheduledTimers' buffer and execute every captured control
+-- program synchronously and immediately (the requested delays are ignored),
+-- in capture order, through the same test interpreter — mirroring how a spec
+-- re-runs captured 'ScenarioProgram's via 'runScenarioProgram' under
+-- 'runWithConfig' / 'runWithDefaultConfig'.
+--
+-- Per-program exceptions are caught with 'tryAny' and logged via 'sublangLog'
+-- (mirroring 'spawnAsyncScenario'); one failing timer does not prevent the
+-- remaining timers from firing.
+-- PRE-CONTRACT: Call after the scenario under test has finished scheduling
+-- timers (e.g. after 'runWithConfig' / 'runWithDefaultConfig' returns, with
+-- the same 'Mocks' used for the run).
+-- POST-CONTRACT: The 'scheduledTimers' buffer is left empty — a second call
+-- is a no-op (idempotent).
+fireScheduledTimers :: HasCallStack => TestInterpreter serviceLib app ()
+fireScheduledTimers = do
+    testMocks <- asks mocks
+    timers <- liftIO $ drainScheduledTimers testMocks
+    mapM_ fireTimer timers
+  where
+    -- | Read and clear the scheduled-timer buffer, returning capture order.
+    drainScheduledTimers testMocks = do
+        timers <- readSomeRef (scheduledTimers testMocks)
+        writeSomeRef (scheduledTimers testMocks) []
+        pure (reverse timers)
+
+    -- | Run one captured timer program immediately, logging any failure.
+    fireTimer (_, timerAction) = do
+        result <- tryAny (run timerAction)
+        case result of
+            Left e ->
+                sublangLog callStack "Scenario" (ErrorLogMsg ("Scheduled timer action failed: " <> tshow e))
+            Right _ -> pure ()
 
 -- | Build a mail value using the SMTP credentials from the current test environment.
 buildMail :: Address -> Text -> Text -> TestInterpreter serviceLib app Mail
@@ -1199,6 +1254,14 @@ captureAsyncScenario action = do
     asyncLog <- asks (scheduledScenarios . mocks)
     modifySomeRef asyncLog (action :)
 
+-- | Record a delayed async control program request without executing it
+-- ('tcAsync = Mocked'). Touches ONLY the 'scheduledTimers' buffer — never
+-- 'scheduledScenarios' or 'asyncInflight'.
+captureScheduledTimer :: NominalDiffTime -> ScenarioProgram Script serviceLib () -> TestInterpreter serviceLib app ()
+captureScheduledTimer delay action = do
+    timerLog <- asks (scheduledTimers . mocks)
+    modifySomeRef timerLog ((delay, action) :)
+
 -- | Dispatch a 'LazyCircus.Scenario.runAsync' control program according to 'tcAsync'.
 -- 'Mocked' captures the scenario (no execution) and journals an
 -- 'ObsAsyncScheduled' entry; 'Real' spawns it on a background thread so its
@@ -1213,6 +1276,24 @@ runAsyncTest action = do
             captureAsyncScenario action
             liftIO $ journalObservation cfg ObsAsyncScheduled{obsScenarioDesc = "runAsync scenario"}
         Real -> spawnAsyncScenario action
+
+-- | Dispatch a 'LazyCircus.Scenario.runAsyncAfter' control program according to
+-- 'tcAsync'. 'Mocked' captures the scenario together with its delay (no
+-- execution) and journals an 'ObsTimerScheduled' entry; 'Real' spawns it on a
+-- background thread so the requested delay elapses there — the calling
+-- (interpreter) thread never blocks — and its side effects genuinely run and
+-- land in the usual capture buffers.
+runAsyncAfterTest ::
+    NominalDiffTime ->
+    ScenarioProgram Script serviceLib () ->
+    TestInterpreter serviceLib app ()
+runAsyncAfterTest delay action = do
+    cfg <- asks testConfig
+    case tcAsync cfg of
+        Mocked -> do
+            captureScheduledTimer delay action
+            liftIO $ journalObservation cfg ObsTimerScheduled{obsScenarioDesc = "runAsyncAfter scenario"}
+        Real -> spawnTimedScenario delay action
 
 -- | Spawn an async control program on a background thread ('tcAsync = Real').
 --
@@ -1243,6 +1324,39 @@ spawnAsyncScenario action = do
             case result of
                 Left e ->
                     sublangLog callStack "Scenario" (ErrorLogMsg ("Async worker action failed: " <> tshow e))
+                Right _ -> pure ()
+    void $ async $ finally runWorker dec
+
+-- | Spawn a delayed async control program on a background thread
+-- ('tcAsync = Real').
+--
+-- Mirrors 'spawnAsyncScenario': the worker runs the scenario through the same
+-- test interpreter (same mocks, mailbox, and DB connection), and the
+-- 'asyncInflight' counter is incremented synchronously (before the spawn
+-- returns) and decremented when the worker finishes, so 'runWithConfigEngine'
+-- can await the worker even while it is still sleeping. The requested delay is
+-- honoured ONLY inside the spawned worker ('threadDelay'); the calling
+-- (interpreter) thread never blocks.
+--
+-- Worker exceptions are caught and logged via 'sublangLog' (mirroring
+-- production 'runAsyncWorker'); they never crash the test harness.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: 'asyncInflight' is incremented synchronously (before this
+-- returns) and decremented once the worker finishes (or throws).
+spawnTimedScenario :: HasCallStack => NominalDiffTime -> ScenarioProgram Script serviceLib () -> TestInterpreter serviceLib app ()
+spawnTimedScenario delay action = do
+    counter <- asks (asyncInflight . mocks)
+    -- Increment BEFORE spawning so 'waitForAsyncInflight' cannot observe a false
+    -- zero between this function returning and the worker thread starting.
+    atomically $ modifyTVar' counter (+ 1)
+    let dec = atomically $ modifyTVar' counter (subtract 1)
+        μs = max 0 (floor (realToFrac delay * 1_000_000 :: Double))
+        runWorker = do
+            threadDelay μs
+            result <- tryAny (run action)
+            case result of
+                Left e ->
+                    sublangLog callStack "Scenario" (ErrorLogMsg ("Timed worker action failed: " <> tshow e))
                 Right _ -> pure ()
     void $ async $ finally runWorker dec
 

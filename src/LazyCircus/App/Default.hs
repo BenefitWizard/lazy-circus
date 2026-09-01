@@ -43,7 +43,7 @@ import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 import LazyCircus.AI (HasAIMethods (..))
 import LazyCircus.App.Log hiding (genLogFunc, logContext, logFunc, logQueue)
 import LazyCircus.App.Service
-import LazyCircus.AsyncWorker.Types (HasScheduledActions (..), ScheduledActions)
+import LazyCircus.AsyncWorker.Types (HasScheduledActions (..), HasTimedActions (..), ScheduledActions, TimedActions (..))
 import LazyCircus.Script (Script)
 import LazyCircus.Telegram (makeBotEnv)
 import LazyCircus.Telegram.Types (BotEnv)
@@ -165,6 +165,8 @@ data DefaultApp serviceLib = App
     -- ^ SMTP credentials for outgoing mail
     , asyncTasks :: ScheduledActions Script serviceLib
     -- ^ queue of deferred scenario programs
+    , timedTasks :: TimedActions Script serviceLib
+    -- ^ registry of time-ordered deferred scenario programs
     , aiMethods :: Methods
     -- ^ OpenAI client methods for AI completions
     , sqlLogAction :: String -> IO ()
@@ -232,6 +234,13 @@ newDefaultApp config = do
         let jwtSettingsVal = defaultJWTSettings jwk
         logQueueVal <- newTQueueIO
         asyncTasksVal <- newTQueueIO
+        timedEntriesVar <- newTVarIO []
+        timedNextSeqVar <- newTVarIO 0
+        let timedTasksVal =
+                TimedActions
+                    { timedActionsEntries = timedEntriesVar
+                    , timedActionsNextSeq = timedNextSeqVar
+                    }
         processCtx <- mkDefaultProcessContext
         let logFuncVal = mkLogFunc $ \_cs _src _lvl msg ->
                 hPutBuilder stdout (getUtf8Builder msg <> "\n")
@@ -251,6 +260,7 @@ newDefaultApp config = do
             , logContext = mempty
             , mailCreds = cfgMailCreds config
             , asyncTasks = asyncTasksVal
+            , timedTasks = timedTasksVal
             , aiMethods = aiMethodsVal
             , sqlLogAction = sqlLog
             , serviceLib = cfgServiceLib config
@@ -329,6 +339,10 @@ instance HasLoggingContext (DefaultApp serviceLib) where
 --     scheduledActionsL :: Lens' env (ScheduledActions script sl)
 instance HasScheduledActions Script serviceLib (DefaultApp serviceLib) where
     scheduledActionsL = lens asyncTasks (\x y -> x{asyncTasks = y})
+
+-- | Satisfies HasTimedActions for Script by delegating to the timedTasks field.
+instance HasTimedActions Script serviceLib (DefaultApp serviceLib) where
+    timedActionsL = lens timedTasks (\x y -> x{timedTasks = y})
 
 -- | Satisfies HasAIMethods by delegating to the aiMethods field.
 instance HasAIMethods (DefaultApp serviceLib) where

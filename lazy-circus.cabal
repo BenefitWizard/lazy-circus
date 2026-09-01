@@ -337,6 +337,7 @@ test-suite lazy-circus-test
       TgMockMailboxSpec
       TgTestRunnerSpec
       TgTestSpec
+      TimerServiceSpec
       ToolSchemaSpec
       UpdateFactorySpec
       LazyCircus.Testing.Bdd.Gherkin

@@ -297,6 +297,7 @@ dbScript myDb ReadWrite myDbScript :: Script b
 - `withLogContext`, `withLogEntry`, `with2LogEntries` — logging context
 - `getExtraContext`, `readFromExtraContext`, `getFeatureFlag` — configuration
 - `runAsync` — asynchronous execution
+- `runAsyncAfter` — deferred asynchronous execution: a one-shot timer that fires the action once, not before the given delay, on a worker of the async pool (`delay <= 0` = immediate)
 - `runArbitraryIO` — last-resort escape hatch that runs an arbitrary `IO`; runs for real in both production and tests (cannot be mocked), so prefer a scene language or service
 - `callService` — call a registered service via the service library
 
@@ -374,6 +375,10 @@ runRIO app $ runDefaultPerformer $ run @Script @serviceLib myScenario
 --  n = 0 is clamped to 1 and n > 1024 to 1024, each with a warning)
 asyncThread <- async $ runRIO app $
     runAsyncWorkerPool 4 (runDefaultPerformer . run @Script @serviceLib)
+
+-- Start the timer service that moves due runAsyncAfter actions into the
+-- shared queue. WARNING: forgot to start it → deferred actions never fire.
+timerThread <- async $ runRIO app runTimerService
 ```
 
 ### Requirements for `DefaultApp serviceLib` Environment
@@ -392,6 +397,8 @@ asyncThread <- async $ runRIO app $
 - `JWTSettings` — authorization
 - `ExtraContext` — arbitrary configuration (`HashMap Text Text`)
 - `ScheduledActions` — queue of async tasks, drained by `runAsyncWorker` / `runAsyncWorkerPool`
+- `TimedActions` — registry of deferred actions scheduled via `runAsyncAfter`, kept sorted by
+  deadline; served by `runTimerService`, which moves due programs into `ScheduledActions`
 - `serviceLib` — in-process service handlers (or `NoServiceLib`)
 - `appToolDescriptions` — tool descriptions available to AI interpreters
 - `toolCallExec` — closure that dispatches named tool calls with JSON arguments
@@ -470,7 +477,7 @@ What changes is the capability layer underneath that runner:
 - Mail uses real mail building but mocked send capture
 - AI returns mock answers (`Nothing` by default)
 - HTTP executes real servant-client requests via the configured manager and base URL
-- `runAsync` records deferred scenarios instead of executing them (default; with `tcAsync = Real` the worker is spawned through the same test interpreter)
+- `runAsync` records deferred scenarios instead of executing them, and `runAsyncAfter` captures `(delay, scenario)` pairs in the `scheduledTimers` buffer (default; a single `tcAsync` knob controls both primitives — with `tcAsync = Real` the worker is spawned through the same test interpreter)
 - logging is captured as structured messages with context and call-site metadata
 
 This shared-runner design lets tests validate orchestration behavior very close to production while
@@ -537,6 +544,7 @@ addTgDownloads tgMock [(FileId "doc-2", moreBytes)]
 | DB | Real execution against DB (requires test database) |
 | Logging | Capture in ref-lists (no production queue writes) |
 | `runAsync` | Capture ScenarioProgram without execution (default `tcAsync = Mocked`; `tcAsync = Real` spawns the worker so its side effects land in the capture buffers) |
+| `runAsyncAfter` | Capture `(delay, ScenarioProgram)` pairs without execution — same single `tcAsync` knob (default `Mocked` captures into the `scheduledTimers` buffer; `Real` spawns the worker once the delay elapses, so its side effects land in the capture buffers) |
 
 ### Common Assertions
 
@@ -544,6 +552,8 @@ addTgDownloads tgMock [(FileId "doc-2", moreBytes)]
 - use `readScheduledTgRequests` to inspect deferred Telegram sends
 - use `readOutgoingMailbox` + `OutgoingKind` (`OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` / `OutDeleteMessage`) to assert on side-effect kinds and ordering, including the incremental `MessageId` stamped on each send
 - use `readScheduledScenarios` to inspect `runAsync` capture
+- use `readScheduledTimers` to inspect `runAsyncAfter` captures (`(delay, program)` pairs in capture order; the buffer is not cleared)
+- use `fireScheduledTimers` to execute captured timer programs immediately in capture order (clears the buffer; a second call is a no-op)
 - use `readLogWithContext` when you need to assert `withLogContext`, `lang`, or call-site metadata
 - if needed, rerun a captured async scenario in the same test runtime to verify its downstream effects
 

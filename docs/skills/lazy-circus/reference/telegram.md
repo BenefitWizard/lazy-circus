@@ -10,6 +10,7 @@ Read this when:
 
 - Operations
 - File Downloads
+- Periodic Chat-Action Refresh
 - Review Checklist
 
 ## Operations
@@ -112,7 +113,28 @@ Wrap Telegram scripts with `tgScript`:
 evalScript $ tgScript "demo-bot" $ sendMessage req
 ```
 
+## Periodic Chat-Action Refresh
+
+Telegram typing status expires after ~5 seconds, so long-running work needs a refresh tick.
+Do **not** occupy an async worker with a `forever` + `threadDelay` loop — schedule a
+self-re-arming one-shot timer instead:
+
+```haskell
+runAsyncAfter 4 $ refreshTick chatId
+  where
+    refreshTick cid = unlessM answered $ do
+        evalScript $ tgScript bot $ sendChatAction cid Typing
+        runAsyncAfter 4 $ refreshTick cid
+```
+
+`runAsyncAfter` is one-shot with no cancel handle: the tick re-arms itself while the answer
+has not been sent, so cancelling the refresh simply means stopping to re-arm. In production
+the delay is served by the timer service (see [runtime.md](runtime.md)); in tests the ticks
+are captured into the `scheduledTimers` buffer — inspect with `readScheduledTimers`, execute
+with `fireScheduledTimers` (see [testing.md](testing.md)).
+
 ## Review Checklist
 
 - Is the download size limit explicit (`downloadCheckedFile` rather than raw `downloadFileById`)?
 - Are only size rejects handled as `Left` (`FileValidationError`)? Transport errors are exceptions — guarded with `runSafely`.
+- Is periodic chat-action refresh implemented with the re-arm pattern (`runAsyncAfter` tick that re-schedules itself) instead of a `forever`/`threadDelay` worker loop?

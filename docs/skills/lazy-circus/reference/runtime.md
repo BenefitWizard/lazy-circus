@@ -17,6 +17,7 @@ Modules: `LazyCircus.Performer.Default`, `LazyCircus.AsyncWorker` / `LazyCircus.
 - `changeEnv`
 - Dispatch Paths
 - Async Worker Pool
+- Timer Service
 - Review Checklist
 
 ## Main Production Runtime
@@ -134,7 +135,46 @@ checkouts then finish or are destroyed), then call `destroyAllResources` on both
 teardown. The demo app wires this in `withDemoApp`, with the pool size read from the
 `ASYNC_WORKERS` env var (default 1).
 
+## Timer Service
+
+`runAsyncAfter delay program` defers a program instead of running it now. Production
+registration goes through `scheduleTimedAction` into the `TimedActions` registry — a
+`TVar` list of entries kept sorted by `(deadline, seq)` plus a separate `TVar` sequence
+counter. `seq` is strictly increasing, so equal deadlines keep FIFO (registration) order.
+Deferred actions are one-shot and fire exactly once, never before their deadline
+(`delay <= 0` is picked up immediately); there is no cancel handle.
+
+`runTimerService` must run in a dedicated thread — it blocks forever. Its arm/wait/drain
+cycle:
+
+1. **Arm** — read the head of the sorted registry (STM `retry` while it is empty).
+2. **Wait** — compute the delay to that deadline and block on `registerDelay`. There are
+   no time reads inside STM — deadlines are absolute `UTCTime` stamps taken at registration.
+3. **Drain** — when the timer fires, one STM transaction pops the expired prefix (drain
+   criterion: `deadline <= armed deadline`) and enqueues its programs into the shared
+   `ScheduledActions` queue. Pop+enqueue is atomic, so actions are neither lost nor
+   duplicated.
+4. **Re-arm** — if the wait is interrupted early, the head is rechecked: an inserted entry
+   with an earlier deadline re-arms the timer (the comparison is by `seq`, so equal
+   deadlines never falsely re-arm); otherwise the loop retries until the armed deadline
+   elapses.
+
+Drained programs are executed by the ordinary async worker pool, not by the timer thread.
+On shutdown the service thread is simply cancelled — unfired actions are dropped silently.
+
+Both threads must be started:
+
+```haskell
+asyncThread <- async $ runRIO app $
+    runAsyncWorkerPool 4 (runDefaultPerformer . run @Script @serviceLib)
+timerThread <- async $ runRIO app runTimerService
+```
+
+The timer service only moves due programs into the queue — without the pool nothing
+executes; forgot to start the timer service → deferred actions never fire.
+
 ## Review Checklist
 
 - Are worker threads cancelled before `destroyAllResources` is called on the pools?
 - Does the worker-pool size go through `runAsyncWorkerPool` (so the 0 / >1024 clamps apply)?
+- Are the async worker pool AND the timer service both running (pool + timer service: without `runTimerService`, deferred `runAsyncAfter` actions never fire)?

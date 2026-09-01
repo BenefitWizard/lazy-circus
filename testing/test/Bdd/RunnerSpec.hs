@@ -34,6 +34,7 @@ import Data.Text qualified as T
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import LazyCircus.App.Default (DefaultApp (..), MailCreds (..))
 import LazyCircus.App.Service (NoServiceLib (..), ToolCallExec (..))
+import LazyCircus.AsyncWorker.Types (TimedActions (..))
 import LazyCircus.Testing.Bdd.Given (AppContext)
 import LazyCircus.Testing.Bdd.Journal
     ( Observation (..)
@@ -304,6 +305,9 @@ echoApp = do
             )
     logQueueVal <- newTQueueIO
     asyncTasksVal <- newTQueueIO
+    timedEntriesVar <- newTVarIO []
+    timedNextSeqVar <- newTVarIO 0
+    let timedTasksVal = TimedActions {timedActionsEntries = timedEntriesVar, timedActionsNextSeq = timedNextSeqVar}
     manager <- newTlsManager
     jwk <- genJWK (OctGenParam 256)
     processCtx <- mkDefaultProcessContext
@@ -329,6 +333,7 @@ echoApp = do
                 , mailUseTls = False
                 }
         , asyncTasks = asyncTasksVal
+        , timedTasks = timedTasksVal
         , aiMethods = makeMethods aiEnv "not-configured" Nothing Nothing
         , sqlLogAction = \_ -> pure ()
         , serviceLib = NoServiceLib

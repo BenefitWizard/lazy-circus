@@ -23,8 +23,8 @@ import LazyCircus.AI (askAIContinuing, solveWithAgentLoopContinuing)
 import LazyCircus.App.Default
 import LazyCircus.App.Log
 import LazyCircus.App.Service (HasToolDescriptions (..), callViaServiceLib)
-import LazyCircus.AsyncWorker (scheduleAsyncAction)
-import LazyCircus.AsyncWorker.Types (HasScheduledActions)
+import LazyCircus.AsyncWorker (scheduleAsyncAction, scheduleTimedAction)
+import LazyCircus.AsyncWorker.Types (HasScheduledActions, HasTimedActions)
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
 import LazyCircus.Scenario
@@ -125,6 +125,7 @@ instance HTTPPerformer (DefaultPerformer (AppWithClientEnv (DefaultApp serviceLi
 instance
     ( KnownHowToEval script (DefaultPerformer (DefaultApp serviceLib))
     , HasScheduledActions script serviceLib (DefaultApp serviceLib)
+    , HasTimedActions script serviceLib (DefaultApp serviceLib)
     ) =>
     ScenarioPerformer script serviceLib (DefaultPerformer (DefaultApp serviceLib))
     where
@@ -150,6 +151,7 @@ instance
     getDateTime' = liftIO getCurrentTime
 
     runAsync' = scheduleAsyncAction
+    runAsyncAfter' = scheduleTimedAction
     runArbitraryIO' = liftIO
     getExtraContext' = view extraContextL
 
