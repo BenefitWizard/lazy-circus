@@ -255,6 +255,23 @@ spec = do
                         expectationFailure "Expected extra to be Just, got Nothing"
                     Nothing -> expectationFailure "No request was captured"
 
+            it "sends thinking disabled extra when thinkingEnabled is False (regression: False must not mean absent)" $ \app -> do
+                requestRef <- newIORef (Nothing :: Maybe Chat.CreateChatCompletion)
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \req -> do
+                        writeIORef requestRef (Just req)
+                        pure $ mockCompletion "{\"ok\": true}" Nothing "stop"
+                    }
+                    req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
+                result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
+                result `shouldBe` Just (object ["ok" .= True])
+                sentReq <- readIORef requestRef
+                case sentReq of
+                    Just Chat.CreateChatCompletion{Chat.extra = Just extraObj} ->
+                        KM.lookup "thinking" extraObj `shouldBe` Just (object ["type" .= ("disabled" :: Text)])
+                    Just Chat.CreateChatCompletion{Chat.extra = Nothing} ->
+                        expectationFailure "Expected extra to be Just (thinking disabled), got Nothing"
+                    Nothing -> expectationFailure "No request was captured"
+
             it "sends request params when agentParams is set" $ \app -> do
                 requestRef <- newIORef (Nothing :: Maybe Chat.CreateChatCompletion)
                 let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \req -> do
