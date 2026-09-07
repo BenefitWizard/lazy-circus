@@ -1,0 +1,5 @@
+<poml>
+  <examples>
+    <example><input>q</input><output>a</output></example>
+  </examples>
+</poml>

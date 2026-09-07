@@ -22,14 +22,21 @@ import LazyCircus.AI.POML.Parser
 import LazyCircus.AI.POML.Types
     ( POML
     , cp_
+    , defaultExampleParams
+    , defaultExampleSetParams
+    , exampleCaption
     , exampleInput_
     , exampleOutput_
+    , exampleSetCaption
+    , exampleSetIntroducer
+    , examples
     , examples_
     , p_
     , role_
     , task_
     , var
     )
+import LazyCircus.AI.POML.Types qualified as POMLTypes (example)
 import Test.Hspec
 
 spec :: Spec
@@ -164,6 +171,47 @@ spec = do
         it "rejects direct text inside <examples> with Left" $
             parsePomlText "<poml><examples>direct text</examples></poml>"
                 `shouldSatisfy` isLeft
+
+        it "parses <examples> caption and introducer attributes into the params" $
+            parsePomlText
+                "<poml><examples caption=\"Refusals\" introducer=\"Each shows a refusal:\"><example><input>q</input></example></examples></poml>"
+                `shouldBe` Right
+                    [ examples
+                        defaultExampleSetParams
+                            { exampleSetCaption = "Refusals"
+                            , exampleSetIntroducer = Just "Each shows a refusal:"
+                            }
+                        [(defaultExampleParams, [exampleInput_ ["q" :: POML]])]
+                    ]
+
+        it "parses a per-example caption inside <examples>" $
+            parsePomlText
+                "<poml><examples><example caption=\"Edge case\"><input>q</input></example></examples></poml>"
+                `shouldBe` Right
+                    [ examples
+                        defaultExampleSetParams
+                        [(defaultExampleParams{exampleCaption = "Edge case"}, [exampleInput_ ["q" :: POML]])]
+                    ]
+
+        it "parses a standalone <example caption=\"...\">" $
+            parsePomlText "<poml><example caption=\"Edge case\">x</example></poml>"
+                `shouldBe` Right [POMLTypes.example defaultExampleParams{exampleCaption = "Edge case"} ["x" :: POML]]
+
+        it "rejects a templated <examples caption=\"{{v}}\"> with Left" $
+            parsePomlText "<poml><examples caption=\"{{v}}\"><example><input>q</input></example></examples></poml>"
+                `shouldSatisfy` isLeft
+
+        it "rejects a templated introducer with Left" $
+            parsePomlText "<poml><examples introducer=\"{{v}}\"><example><input>q</input></example></examples></poml>"
+                `shouldSatisfy` isLeft
+
+        it "rejects a templated per-example caption with Left" $
+            parsePomlText "<poml><examples><example caption=\"{{v}}\"><input>q</input></example></examples></poml>"
+                `shouldSatisfy` isLeft
+
+        it "ignores unknown attributes on <examples>" $
+            parsePomlText "<poml><examples chat=\"true\"><example><input>q</input></example></examples></poml>"
+                `shouldBe` Right [examples_ [[exampleInput_ ["q" :: POML]]]]
 
         it "lowers <cp caption=\"C\"> to a NodeElement with a TLit caption in the intermediate PomlDoc" $
             case parsePoml "<poml><cp caption=\"C\">x</cp></poml>" of

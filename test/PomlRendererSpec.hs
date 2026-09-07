@@ -12,11 +12,18 @@ import LazyCircus.AI.POML.Types
     ( POML (..)
     , b_
     , br
+    , captionedExample
     , code_
     , cp_
+    , defaultExampleParams
+    , defaultExampleSetParams
+    , exampleSetCaption
+    , exampleSetIntroducer
+    , exampleCaption
     , example_
     , exampleInput_
     , exampleOutput_
+    , examples
     , examples_
     , fragment
     , h_
@@ -89,10 +96,34 @@ spec = describe "renderPOMLtoPrompt" $ do
     it "renders <cp> with its caption attribute" $
         renderPOMLtoPrompt [cp_ "C" ["x"]] `shouldBe` "<cp caption=\"C\">x</cp>"
 
-    it "renders <examples> wrapping each example in <example>" $
+    it "renders <examples> wrapping each example in <example>, with the default set caption" $
         renderPOMLtoPrompt
             [examples_ [[exampleInput_ ["q"], exampleOutput_ ["a"]]]]
-            `shouldBe` "<examples><example><input>q</input><output>a</output></example></examples>"
+            `shouldBe` "<examples caption=\"Examples\"><example><input>q</input><output>a</output></example></examples>"
+
+    it "renders an explicit set caption and introducer as attributes" $
+        renderPOMLtoPrompt
+            [ examples
+                defaultExampleSetParams
+                    { exampleSetCaption = "Refusals"
+                    , exampleSetIntroducer = Just "Each case shows a polite refusal:"
+                    }
+                [captionedExample "Missing required field" [exampleInput_ ["q"], exampleOutput_ ["a"]]]
+            ]
+            `shouldBe` "<examples caption=\"Refusals\" introducer=\"Each case shows a polite refusal:\"><example caption=\"Missing required field\"><input>q</input><output>a</output></example></examples>"
+
+    it "omits the per-example caption when it equals the default (hidden by default)" $
+        renderPOMLtoPrompt [examples_ [[exampleInput_ ["q"]]]]
+            `shouldBe` "<examples caption=\"Examples\"><example><input>q</input></example></examples>"
+
+    it "renders a standalone example caption when it differs from the default" $
+        renderPOMLtoPrompt [Example defaultExampleParams{exampleCaption = "Edge case"} ["x"]]
+            `shouldBe` "<example caption=\"Edge case\">x</example>"
+
+    it "escapes XML special characters in attribute values" $
+        renderPOMLtoPrompt
+            [examples defaultExampleSetParams{exampleSetIntroducer = Just "Says \"hi\" & <bye>"} []]
+            `shouldBe` "<examples caption=\"Examples\" introducer=\"Says &quot;hi&quot; &amp; &lt;bye&gt;\"></examples>"
 
     it "renders nested inline content" $
         renderPOMLtoPrompt [p_ [b_ ["bold"], " and ", i_ ["italic"]]]

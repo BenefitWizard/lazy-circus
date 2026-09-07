@@ -20,6 +20,7 @@ extra-source-files:
     CHANGELOG.md
     app/example/prompts/caption.poml
     app/example/prompts/contact.poml
+    app/example/prompts/demoExamples.poml
     app/example/prompts/greeting.poml
     app/example/prompts/hello.poml
     app/example/prompts/inner.poml

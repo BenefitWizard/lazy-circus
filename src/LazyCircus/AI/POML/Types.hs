@@ -16,6 +16,7 @@ module LazyCircus.AI.POML.Types
     , exampleOutput
     , examples_
     , examples
+    , captionedExample
     , example_
     , example
     , role_
@@ -84,7 +85,10 @@ data POML
     | List ListParams [[POML]]
     | ExampleInput ExampleInputParams [POML]
     | ExampleOutput ExampleOutputParams [POML]
-    | ExampleSet ExampleSetParams [[POML]]
+    -- | Grouped example block (@<examples>@); each entry carries its own
+    -- example parameters so a single example can be captioned with what it
+    -- demonstrates.
+    | ExampleSet ExampleSetParams [(ExampleParams, [POML])]
     -- | Standalone example block (@<example>@ outside @<examples>@).
     | Example ExampleParams [POML]
     | Role RoleParams [POML]
@@ -225,12 +229,20 @@ exampleOutput :: ExampleOutputParams -> [POML] -> POML
 exampleOutput = ExampleOutput
 
 -- | Build an example-set block with default example-set parameters.
+-- Each entry is wrapped in 'defaultExampleParams' (no per-example caption).
 examples_ :: [[POML]] -> POML
-examples_ = ExampleSet defaultExampleSetParams
+examples_ = ExampleSet defaultExampleSetParams . map (defaultExampleParams,)
 
--- | Build an example-set block with explicit example-set parameters.
-examples :: ExampleSetParams -> [[POML]] -> POML
+-- | Build an example-set block with explicit example-set parameters; each
+-- entry carries its own 'ExampleParams' (e.g. a per-example caption).
+examples :: ExampleSetParams -> [(ExampleParams, [POML])] -> POML
 examples = ExampleSet
+
+-- | Build one entry of an example-set block with a caption describing what
+-- the example demonstrates; all other example parameters stay at defaults.
+captionedExample :: Text -> [POML] -> (ExampleParams, [POML])
+captionedExample caption children =
+    (defaultExampleParams{exampleCaption = caption}, children)
 
 -- | Build a standalone example block with default example parameters.
 example_ :: [POML] -> POML
@@ -471,19 +483,19 @@ defaultExampleOutputParams =
 
 -- | Serialization parameters for grouped example blocks.
 data ExampleSetParams = ExampleSetParams
-    { exampleSyntax :: ContentSyntax
-    , exampleCaption :: Text
-    , exampleCaptionSerialized :: Maybe Text
-    , exampleChat :: Maybe Bool
-    , exampleIntroducer :: Maybe Text
-    , exampleCaptionStyle :: Maybe CaptionStyle
-    , exampleCaptionTextTransform :: Maybe CaptionTextTransform
-    , exampleCaptionEnding :: Maybe CaptionEnding
-    , exampleBlankLine :: Maybe Bool
-    , exampleClassName :: Maybe Text
-    , exampleSpeaker :: Maybe Speaker
-    , exampleName :: Maybe Text
-    , exampleType :: Maybe Text
+    { exampleSetSyntax :: ContentSyntax -- ^ content syntax of the set
+    , exampleSetCaption :: Text -- ^ set-level caption; always rendered as a tag attribute
+    , exampleSetCaptionSerialized :: Maybe Text -- ^ caption for serializer syntaxes (unused by the tag renderer)
+    , exampleSetChat :: Maybe Bool -- ^ render examples in chat format (reserved; unimplemented)
+    , exampleSetIntroducer :: Maybe Text -- ^ optional introducer text shown before the examples
+    , exampleSetCaptionStyle :: Maybe CaptionStyle -- ^ caption style (reserved; unimplemented)
+    , exampleSetCaptionTextTransform :: Maybe CaptionTextTransform -- ^ caption text transform (reserved; unimplemented)
+    , exampleSetCaptionEnding :: Maybe CaptionEnding -- ^ caption ending (reserved; unimplemented)
+    , exampleSetBlankLine :: Maybe Bool -- ^ extra blank lines around the block (reserved; unimplemented)
+    , exampleSetClassName :: Maybe Text -- ^ stylesheet class hook (reserved; unimplemented)
+    , exampleSetSpeaker :: Maybe Speaker -- ^ speaker override (reserved; unimplemented)
+    , exampleSetName :: Maybe Text -- ^ content name for serialization (reserved; unimplemented)
+    , exampleSetType :: Maybe Text -- ^ content type for serialization (reserved; unimplemented)
     }
     deriving (Eq, Show)
 
@@ -491,19 +503,19 @@ data ExampleSetParams = ExampleSetParams
 defaultExampleSetParams :: ExampleSetParams
 defaultExampleSetParams =
     ExampleSetParams
-        { exampleSyntax = PlainText
-        , exampleCaption = "Examples"
-        , exampleCaptionSerialized = Nothing
-        , exampleChat = Nothing
-        , exampleIntroducer = Nothing
-        , exampleCaptionStyle = Just Header
-        , exampleCaptionTextTransform = Just NoTransform
-        , exampleCaptionEnding = Nothing
-        , exampleBlankLine = Nothing
-        , exampleClassName = Nothing
-        , exampleSpeaker = Nothing
-        , exampleName = Nothing
-        , exampleType = Nothing
+        { exampleSetSyntax = PlainText
+        , exampleSetCaption = "Examples"
+        , exampleSetCaptionSerialized = Nothing
+        , exampleSetChat = Nothing
+        , exampleSetIntroducer = Nothing
+        , exampleSetCaptionStyle = Just Header
+        , exampleSetCaptionTextTransform = Just NoTransform
+        , exampleSetCaptionEnding = Nothing
+        , exampleSetBlankLine = Nothing
+        , exampleSetClassName = Nothing
+        , exampleSetSpeaker = Nothing
+        , exampleSetName = Nothing
+        , exampleSetType = Nothing
         }
 
 -- | Serialization parameters for role blocks.
@@ -574,17 +586,17 @@ defaultTaskParams =
 
 -- | Serialization parameters for a standalone example block (@<example>@).
 data ExampleParams = ExampleParams
-    { exampleSyntax :: ContentSyntax
-    , exampleCaption :: Text
-    , exampleCaptionSerialized :: Maybe Text
-    , exampleCaptionStyle :: Maybe CaptionStyle
-    , exampleCaptionTextTransform :: Maybe CaptionTextTransform
-    , exampleCaptionEnding :: Maybe CaptionEnding
-    , exampleBlankLine :: Maybe Bool
-    , exampleClassName :: Maybe Text
-    , exampleSpeaker :: Maybe Speaker
-    , exampleName :: Maybe Text
-    , exampleType :: Maybe Text
+    { exampleSyntax :: ContentSyntax -- ^ content syntax of the example
+    , exampleCaption :: Text -- ^ what the example demonstrates; rendered as a tag attribute when it differs from the default ("Example", hidden by default per the spec)
+    , exampleCaptionSerialized :: Maybe Text -- ^ caption for serializer syntaxes (unused by the tag renderer)
+    , exampleCaptionStyle :: Maybe CaptionStyle -- ^ caption style (reserved; unimplemented)
+    , exampleCaptionTextTransform :: Maybe CaptionTextTransform -- ^ caption text transform (reserved; unimplemented)
+    , exampleCaptionEnding :: Maybe CaptionEnding -- ^ caption ending (reserved; unimplemented)
+    , exampleBlankLine :: Maybe Bool -- ^ extra blank lines around the block (reserved; unimplemented)
+    , exampleClassName :: Maybe Text -- ^ stylesheet class hook (reserved; unimplemented)
+    , exampleSpeaker :: Maybe Speaker -- ^ speaker override (reserved; unimplemented)
+    , exampleName :: Maybe Text -- ^ content name for serialization (reserved; unimplemented)
+    , exampleType :: Maybe Text -- ^ content type for serialization (reserved; unimplemented)
     }
     deriving (Eq, Show)
 

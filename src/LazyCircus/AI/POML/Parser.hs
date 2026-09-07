@@ -431,11 +431,13 @@ nodeToPOML (NodeElement nm attrs children) = case nm of
     "task" -> Task defaultTaskParams <$> traverse nodeToPOML children
     "input" -> ExampleInput defaultExampleInputParams <$> traverse nodeToPOML children
     "output" -> ExampleOutput defaultExampleOutputParams <$> traverse nodeToPOML children
-    "example" -> Example defaultExampleParams <$> traverse nodeToPOML children
+    "example" -> do
+        exampleParams <- exampleParamsFromAttrs attrs
+        Example exampleParams <$> traverse nodeToPOML children
     "cp" -> do
         caption <- cpCaptionStatic attrs
         CP (defaultCPParams caption) <$> traverse nodeToPOML children
-    "examples" -> examplesToPOML children
+    "examples" -> examplesToPOML attrs children
     "item" -> Left "<item> is only valid directly inside <list>"
     other -> Left ("Unknown element: <" <> T.unpack other <> ">")
 
@@ -451,16 +453,57 @@ listToPOML childNodes = List defaultListParams <$> traverse itemToPOMLs childNod
         Left "<list> may not contain direct text; wrap it in <item>"
 
 -- | Lower an @<examples>@ element: each child must be an @<example>@, whose
--- children become one @[POML]@ entry of the resulting 'ExampleSet'.
-examplesToPOML :: [PomlNode] -> Either String POML
-examplesToPOML childNodes =
-    ExampleSet defaultExampleSetParams <$> traverse exampleItem childNodes
+-- children become one @(params, [POML])@ entry of the resulting 'ExampleSet'.
+-- Supported attributes of the set: @caption@ and @introducer@ (optional static
+-- text; a template expression is rejected — use the @makePoml@ TH macro for
+-- those). Unknown attributes are ignored.
+-- POST-CONTRACT: Absent attributes leave the corresponding
+-- 'defaultExampleSetParams' \/ 'defaultExampleParams' fields untouched.
+examplesToPOML :: [(Text, Maybe TemplateExpr)] -> [PomlNode] -> Either String POML
+examplesToPOML attrs childNodes = do
+    mSetCaption <- optionalStaticTextAttr "examples" "caption" attrs
+    mIntroducer <- optionalStaticTextAttr "examples" "introducer" attrs
+    let setParams = case mSetCaption of
+            Nothing -> defaultExampleSetParams{exampleSetIntroducer = mIntroducer}
+            Just cap -> defaultExampleSetParams{exampleSetCaption = cap, exampleSetIntroducer = mIntroducer}
+    ExampleSet setParams <$> traverse exampleItem childNodes
   where
-    exampleItem (NodeElement "example" _ itemChildren) = traverse nodeToPOML itemChildren
+    -- | Lowers one @<example>@ child with its optional static caption.
+    exampleItem (NodeElement "example" itemAttrs itemChildren) = do
+        exampleParams <- exampleParamsFromAttrs itemAttrs
+        (exampleParams,) <$> traverse nodeToPOML itemChildren
     exampleItem (NodeElement other _ _) =
         Left ("<examples> may only contain <example> children, found <" <> T.unpack other <> ">")
     exampleItem (NodeText _) =
         Left "<examples> may not contain direct text; wrap it in <example>"
+
+-- | Build 'ExampleParams' from an @<example>@ element's attributes. The only
+-- supported attribute is the optional static @caption@ (what the example
+-- demonstrates); a template expression is rejected, and unknown attributes
+-- are ignored.
+exampleParamsFromAttrs :: [(Text, Maybe TemplateExpr)] -> Either String ExampleParams
+exampleParamsFromAttrs attrs = do
+    mCaption <- optionalStaticTextAttr "example" "caption" attrs
+    pure $ case mCaption of
+        Nothing -> defaultExampleParams
+        Just cap -> defaultExampleParams{exampleCaption = cap}
+
+-- | Extract an optional static text attribute value. An absent attribute
+-- yields 'Nothing'; an empty value or a template expression
+-- (variables\/concatenations) is rejected — use the @makePoml@ TH macro for
+-- templated attributes.
+optionalStaticTextAttr :: Text -> Text -> [(Text, Maybe TemplateExpr)] -> Either String (Maybe Text)
+optionalStaticTextAttr element attrName attrs =
+    case lookup attrName attrs of
+        Nothing -> Right Nothing
+        Just Nothing -> Left (T.unpack ("<" <> element <> "> '" <> attrName <> "' must not be empty"))
+        Just (Just (TLit t)) -> Right (Just t)
+        Just (Just (TVar _)) -> Left (T.unpack (templateErr element attrName))
+        Just (Just (TConcat _)) -> Left (T.unpack (templateErr element attrName))
+  where
+    -- | Shared rejection message for template-valued attributes.
+    templateErr el attr =
+        "<" <> el <> "> '" <> attr <> "' uses a template expression; use the makePoml TH macro"
 
 -- | Extract the mandatory static @caption@ attribute of a @<cp>@ element.
 -- Template expressions (variables/concatenations) are rejected here because

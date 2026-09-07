@@ -34,6 +34,11 @@ that calls 'makePoml' must keep them in scope:
     this) so that string literals produced by the splice coerce to
     'Data.Text.Text' at use sites.
 
+Example-set codegen additionally splices the record-update field names
+@'exampleSetCaption'@, @'exampleSetIntroducer'@ and @'exampleCaption'@ as
+names qualified to "LazyCircus.AI.POML.Types", so consumers need no extra
+imports for them.
+
 If two 'makePoml' calls in the same module produce record types that share a
 field name, enable @DuplicateRecordFields@ in the consumer module.
 -}
@@ -59,6 +64,8 @@ import LazyCircus.AI.POML.Parser
     )
 import LazyCircus.AI.POML.Types
     ( POML (..)
+    , ExampleParams (..)
+    , ExampleSetParams (..)
     , defaultCPParams
     , defaultExampleInputParams
     , defaultExampleOutputParams
@@ -375,18 +382,16 @@ genNode varEnv mArgName (NodeElement name attrs children) =
             appE
                 (appE (conE 'ExampleOutput) (varE 'defaultExampleOutputParams))
                 (genChildren varEnv mArgName children)
-        "example" ->
-            appE
-                (appE (conE 'Example) (varE 'defaultExampleParams))
-                (genChildren varEnv mArgName children)
+        "example" -> do
+            exampleParams <- genExampleParams varEnv mArgName attrs
+            appE (appE (conE 'Example) (pure exampleParams)) (genChildren varEnv mArgName children)
         "cp" ->
             appE
                 (appE (conE 'CP) (appE (varE 'defaultCPParams) (genCaptionExpr varEnv mArgName (join (lookup "caption" attrs)))))
                 (genChildren varEnv mArgName children)
-        "examples" ->
-            appE
-                (appE (conE 'ExampleSet) (varE 'defaultExampleSetParams))
-                (genExamples varEnv mArgName children)
+        "examples" -> do
+            setParams <- genExampleSetParams varEnv mArgName attrs
+            appE (appE (conE 'ExampleSet) (pure setParams)) (genExamples varEnv mArgName children)
         "item" ->
             fail "makePoml: <item> is only valid directly inside <list>"
         other ->
@@ -519,12 +524,55 @@ genCaptionExpr
     -> Q Exp
 genCaptionExpr _ _ Nothing =
     fail "makePoml: <cp> requires a 'caption' attribute"
-genCaptionExpr varEnv mArgName (Just expr) = do
+genCaptionExpr varEnv mArgName (Just expr) = genTextExpr varEnv mArgName expr
+
+-- | Lower a template expression into a @Text@-valued Haskell expression
+-- (literal, variable, or concatenation). A @poml@- or @untrusted@-typed
+-- variable inside the expression fails — see 'genCaptionExpr'.
+genTextExpr :: Map Text VarKind -> Maybe Name -> TemplateExpr -> Q Exp
+genTextExpr varEnv mArgName expr = do
     let atoms = flatten expr
     validateNoPomlInConcat varEnv atoms
     case atoms of
         [single] -> genConcatPart varEnv mArgName single
         many -> combineWith '(<>) (map (genConcatPart varEnv mArgName) many)
+
+-- | Codegen an optional @Text@-valued attribute expression. An absent
+-- attribute yields 'Nothing'; a present value is lowered by 'genTextExpr'.
+genOptionalTextAttr
+    :: Map Text VarKind
+    -> Maybe Name
+    -> Maybe TemplateExpr
+    -> Q (Maybe Exp)
+genOptionalTextAttr _ _ Nothing = pure Nothing
+genOptionalTextAttr varEnv mArgName (Just expr) =
+    Just <$> genTextExpr varEnv mArgName expr
+
+-- | Codegen the 'ExampleParams' of an @<example>@ element. The only supported
+-- attribute is the optional @caption@ (what the example demonstrates) — a
+-- literal, variable, or concatenation; unknown attributes are ignored.
+-- Absent attributes fall back to 'defaultExampleParams' via a record update.
+genExampleParams :: Map Text VarKind -> Maybe Name -> [(Text, Maybe TemplateExpr)] -> Q Exp
+genExampleParams varEnv mArgName attrs = do
+    mCaptionExp <- genOptionalTextAttr varEnv mArgName (join (lookup "caption" attrs))
+    case mCaptionExp of
+        Nothing -> varE 'defaultExampleParams
+        Just cap -> recUpdE (varE 'defaultExampleParams) [pure ('exampleCaption, cap)]
+
+-- | Codegen the 'ExampleSetParams' of an @<examples>@ element. Supported
+-- attributes: @caption@ and @introducer@ — each a literal, variable, or
+-- concatenation; unknown attributes are ignored. Absent attributes fall back
+-- to a bare 'defaultExampleSetParams' reference (an empty record update would
+-- not compile).
+genExampleSetParams :: Map Text VarKind -> Maybe Name -> [(Text, Maybe TemplateExpr)] -> Q Exp
+genExampleSetParams varEnv mArgName attrs = do
+    mCaptionExp <- genOptionalTextAttr varEnv mArgName (join (lookup "caption" attrs))
+    mIntroExp <- genOptionalTextAttr varEnv mArgName (join (lookup "introducer" attrs))
+    let capUpdates = maybe [] (\cap -> [pure ('exampleSetCaption, cap)]) mCaptionExp
+        introUpdates = maybe [] (\intro -> [pure ('exampleSetIntroducer, AppE (ConE 'Just) intro)]) mIntroExp
+    case capUpdates <> introUpdates of
+        [] -> varE 'defaultExampleSetParams
+        updates -> recUpdE (varE 'defaultExampleSetParams) updates
 
 -- | Codegen the @[[POML]]@ body of a @<list>@ element. Each child must be
 -- an @<item>@.
@@ -543,14 +591,16 @@ genItems varEnv mArgName children =
     genItem (NodeText _) =
         fail "makePoml: <list> may not contain direct text; wrap it in <item>"
 
--- | Codegen the @[[POML]]@ body of an @<examples>@ element. Each child must
--- be an @<example>@.
+-- | Codegen the @[(ExampleParams, [POML])]@ body of an @<examples>@ element.
+-- Each child must be an @<example>@; its attributes (e.g. an optional
+-- @caption@) build the entry's 'ExampleParams'.
 genExamples :: Map Text VarKind -> Maybe Name -> [PomlNode] -> Q Exp
 genExamples varEnv mArgName children =
     listE (map genExample children)
   where
-    genExample (NodeElement "example" _ itemChildren) =
-        genChildren varEnv mArgName itemChildren
+    genExample (NodeElement "example" itemAttrs itemChildren) = do
+        exampleParams <- genExampleParams varEnv mArgName itemAttrs
+        tupE [pure exampleParams, genChildren varEnv mArgName itemChildren]
     genExample (NodeElement other _ _) =
         fail
             ( "makePoml: <examples> may only contain <example> children, found <"
