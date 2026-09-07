@@ -2,7 +2,7 @@ module LazyCircus.Mail where
 
 import LazyCircus.App.Default
 import Network.Mail.Mime (Address (..), Mail, simpleMail')
-import Network.Mail.SMTP (sendMail', sendMailSTARTTLS')
+import Network.Mail.SMTP (sendMail', sendMailSTARTTLS', sendMailWithLogin', sendMailWithLoginSTARTTLS')
 import RIO hiding (to)
 import RIO.Text.Lazy (fromStrict)
 
@@ -23,15 +23,21 @@ makeMail' MailCreds{mailLogin, mailName} to subject body = simpleMail' to from s
             }
 
 -- | Deliver a prepared mail value through the SMTP account stored in the current environment.
+-- Uses SMTP authentication when 'mailPassword' is non-empty; an empty password selects
+-- unauthenticated delivery for local dev relays (e.g. MailHog).
 sendMail :: (HasMailCreds env, MonadReader env m, MonadIO m) => Mail -> m ()
 sendMail mail = do
     MailCreds
         { mailHost
         , mailPort
+        , mailLogin
+        , mailPassword
         , mailUseTls
         } <-
         view mailCredsL
     liftIO $
-        if mailUseTls
-            then sendMailSTARTTLS' mailHost (fromIntegral mailPort) mail
-            else sendMail' mailHost (fromIntegral mailPort) mail
+        case (mailUseTls, null mailPassword) of
+            (True, True) -> sendMailSTARTTLS' mailHost (fromIntegral mailPort) mail
+            (True, False) -> sendMailWithLoginSTARTTLS' mailHost (fromIntegral mailPort) mailLogin mailPassword mail
+            (False, True) -> sendMail' mailHost (fromIntegral mailPort) mail
+            (False, False) -> sendMailWithLogin' mailHost (fromIntegral mailPort) mailLogin mailPassword mail
