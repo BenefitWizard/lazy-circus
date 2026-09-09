@@ -124,6 +124,96 @@ spec = do
                     , "  Given x"
                     ]) `shouldBe` Left (GherkinStepOutsideScenario 2)
 
+        describe "wrapped steps" $ do
+            it "joins a plain continuation line to the most recent step, keeping its first line" $
+                parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario: wrapped"
+                    , "    Given a fresh session"
+                    , "    Then the bot shows a progress status and rewrites it in place as the"
+                    , "      work progresses"
+                    ]) `shouldBe`
+                    Right
+                        (GherkinFeature
+                            "W"
+                            []
+                            []
+                            [ GherkinScenario
+                                "wrapped"
+                                []
+                                [ GherkinStep GivenKeyword "a fresh session" 3
+                                , GherkinStep
+                                    ThenKeyword
+                                    "the bot shows a progress status and rewrites it in place as the work progresses"
+                                    4
+                                ]
+                                2
+                            ])
+
+            it "joins several continuation lines in document order" $
+                case parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario: multi"
+                    , "    When the user sends a message"
+                    , "      and waits"
+                    , "      patiently"
+                    ]) of
+                    Right GherkinFeature
+                        { gherkinFeatureScenarios =
+                            [GherkinScenario _ _ [GherkinStep WhenKeyword txt 3] _]
+                        } -> txt `shouldBe` "the user sends a message and waits patiently"
+                    other -> expectationFailure ("unexpected parse result: " <> show other)
+
+            it "skips blank lines and comments between a step and its continuation" $
+                case parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario: gaps"
+                    , "    Given a glass"
+                    , ""
+                    , "    # an interjected comment"
+                    , "      of water"
+                    ]) of
+                    Right GherkinFeature{gherkinFeatureScenarios = [s]} ->
+                        s `shouldBe` (GherkinScenario "gaps" [] [GherkinStep GivenKeyword "a glass of water" 3] 2)
+                    other -> expectationFailure ("unexpected parse result: " <> show other)
+
+            it "substitutes outline params into the joined step text" $
+                case parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario Outline: o <msg>"
+                    , "    Then the bot replies with <msg>"
+                    , "      twice"
+                    , "    Examples:"
+                    , "      | msg |"
+                    , "      | hi |"
+                    ]) of
+                    Right GherkinFeature{gherkinFeatureScenarios = [s]} ->
+                        s `shouldBe`
+                            (GherkinScenario
+                                "o hi"
+                                []
+                                [GherkinStep ThenKeyword "the bot replies with hi twice" 3]
+                                2)
+                    other -> expectationFailure ("unexpected parse result: " <> show other)
+
+            it "still rejects a plain line before the scenario's first step" $
+                parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario: empty"
+                    , "    nonsense before any step"
+                    ]) `shouldSatisfy` isGherkinUnexpectedAt 3
+
+            it "still rejects a plain line after an Examples block" $
+                errLine (parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario Outline: o"
+                    , "    Given x"
+                    , "    Examples:"
+                    , "      | a |"
+                    , "      | 1 |"
+                    , "    stray text"
+                    ])) `shouldBe` Just 7
+
         describe "comments and blank lines" $ do
             it "ignores comments and empty lines everywhere, including inside Examples" $
                 case parseFeature (T.unlines

@@ -21,6 +21,13 @@ Supported grammar:
   * steps starting with @Given@, @When@, @Then@, @And@, @But@. @And@ and
     @But@ inherit the previous resolved keyword, and the AST stores only
     resolved keywords ('GherkinKeyword');
+  * wrapped steps: a plain (non-keyword) line inside a scenario continues
+    the text of the scenario's most recent step — the two trimmed texts
+    join with a single space, and the step keeps the source line of its
+    first line. Blank lines and comments between the step and its
+    continuation are skipped (they are ignored everywhere). A plain line
+    before the scenario's first step, or after an @Examples:@ block, is
+    still an error;
   * full-line comments (first non-space character @#@) and empty lines are
     ignored everywhere, including inside @Examples:@ blocks.
 
@@ -219,11 +226,21 @@ parseFeature input = go emptyState (zip [1 ..] (T.lines input))
                         , stLastKeyword = Just kw
                         }
 
-    -- | Collects a description line before the first scenario, or rejects it.
+    -- | Collects a description line before the first scenario, continues the
+    -- most recent step of an open scenario (wrapped step), or rejects junk.
     handleText :: Int -> Text -> PState -> Either GherkinParseError PState
     handleText n txt st = case stScenario st of
         Just sa
             | Just _ <- saExamples sa -> Left (GherkinUnexpected n ("Expected a new Scenario, found: " <> txt))
+            | (recent : older) <- saSteps sa ->
+                Right
+                    st
+                        { stScenario =
+                            Just
+                                sa
+                                    { saSteps = appendContinuation txt recent : older
+                                    }
+                        }
             | otherwise -> Left (GherkinUnexpected n ("Expected a Step, found: " <> txt))
         Nothing -> case stFeature st of
             Nothing -> Left (GherkinUnexpected n ("Expected a 'Feature:' line, found: " <> txt))
@@ -292,6 +309,13 @@ parseFeature input = go emptyState (zip [1 ..] (T.lines input))
     -- placeholders without a matching parameter are left untouched.
     substituteParams :: [(Text, Text)] -> Text -> Text
     substituteParams params text = foldr (\(p, v) acc -> T.replace ("<" <> p <> ">") v acc) text params
+
+-- | Appends one wrapped continuation line to a step: the two trimmed texts
+-- join with a single space; the keyword and the source line of the step's
+-- first line stay untouched.
+appendContinuation :: Text -> GherkinStep -> GherkinStep
+appendContinuation txt step =
+    step{gherkinStepText = T.strip (gherkinStepText step) <> " " <> T.strip txt}
 
 --------------------------------------------------------------------------------
 -- Parser state
