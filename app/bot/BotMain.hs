@@ -15,6 +15,7 @@ import Telegram.Bot.Extra.Polling (runPollingBot)
 import BotHandler (BotHandlerConfig (..), updateAction)
 import ChatStateStore (newChatStateStore)
 import DemoEnv (DemoConfig (..), readDemoConfig, withDemoApp)
+import PollRegistry (newPollRegistry)
 
 -- | Retry delay (microseconds) used by 'runPollingBot' when a getUpdates request fails.
 retryDelay :: Int
@@ -31,12 +32,14 @@ main = do
             notificationEmail <-
                 fmap (fmap (\addr -> Address Nothing (fromString addr))) (lookupEnv "NOTIFICATION_EMAIL")
             store <- newChatStateStore
+            pollRegistry <- newPollRegistry
             withDemoApp config $ \app -> do
                 clientEnv <- defaultTelegramClientEnv (Token token)
                 let cfg =
                         BotHandlerConfig
                             { bhcBotName = "demo-bot"
                             , bhcNotificationEmail = notificationEmail
+                            , bhcPollRegistry = pollRegistry
                             }
                     onActionError e = hPutStrLn stderr ("Bot action error: " ++ show e)
                 putStrLn "🚀 Bot is running. Press Ctrl+C to stop."

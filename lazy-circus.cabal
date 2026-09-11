@@ -151,6 +151,7 @@ library common-circus
       ChatStateStore
       Common
       DemoEnv
+      PollRegistry
       SimpleService
       SimpleServiceLib
   other-modules:
@@ -322,6 +323,7 @@ test-suite lazy-circus-test
       BotHandlerSpec
       BotScenariosSpec
       ChatStateStoreSpec
+      ClassifyPollResponseSpec
       ConfigurablePerformerSpec
       DBLangSpec
       DbPoolSpec
@@ -332,6 +334,7 @@ test-suite lazy-circus-test
       PomlParserSpec
       PomlRendererSpec
       PomlTHSpec
+      SendPollSpec
       ServiceCallSpec
       TestDbSupport
       TestHelpers.Bot

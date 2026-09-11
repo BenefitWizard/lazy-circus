@@ -76,6 +76,12 @@ data Observation app
         -- ^ file id when the document was uploaded by id ('Nothing' for URL or
         -- raw-content uploads, which carry no id)
         }
+    | ObsTgPoll
+        { obsChatId :: Maybe ChatId
+        -- ^ target chat id ('Nothing' for username-targeted sends)
+        , obsQuestion :: Text
+        -- ^ poll question as sent
+        }
     | ObsTgReaction
         { obsTargetMsgId :: Maybe MessageId
         -- ^ message the reaction was set on ('Nothing' when the request does
@@ -115,6 +121,8 @@ instance Eq app => Eq (Observation app) where
                 && isJust markup1 == isJust markup2
         (ObsTgDocument{obsChatId = chat1, obsFileId = file1}, ObsTgDocument{obsChatId = chat2, obsFileId = file2}) ->
             chat1 == chat2 && file1 == file2
+        (ObsTgPoll{obsChatId = chat1, obsQuestion = question1}, ObsTgPoll{obsChatId = chat2, obsQuestion = question2}) ->
+            chat1 == chat2 && question1 == question2
         (ObsTgReaction reaction1, ObsTgReaction reaction2) -> reaction1 == reaction2
         (ObsTgEdit{obsTargetMsgId = target1, obsNewText = text1}, ObsTgEdit{obsTargetMsgId = target2, obsNewText = text2}) ->
             target1 == target2 && text1 == text2
@@ -137,6 +145,8 @@ instance Show app => Show (Observation app) where
                 <> "}"
         ObsTgDocument{obsChatId = chat, obsFileId = file} ->
             "ObsTgDocument{obsChatId = " <> show chat <> ", obsFileId = " <> show file <> "}"
+        ObsTgPoll{obsChatId = chat, obsQuestion = question} ->
+            "ObsTgPoll{obsChatId = " <> show chat <> ", obsQuestion = " <> show question <> "}"
         ObsTgReaction{obsTargetMsgId = target} ->
             "ObsTgReaction{obsTargetMsgId = " <> show target <> "}"
         ObsTgEdit{obsTargetMsgId = target, obsNewText = newText} ->

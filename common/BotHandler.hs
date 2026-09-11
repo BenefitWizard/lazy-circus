@@ -44,22 +44,31 @@ import System.IO (hPutStrLn)
 
 import Telegram.Bot.API (
     ChatId,
+    InputPollOption (..),
+    PollAnswer,
     SomeChatId (..),
     Update,
     defSendMessage,
+    defSendPoll,
     documentFileId,
     messageDocument,
     messageMessageId,
     messageText,
+    pollAnswerOptionIds,
+    pollAnswerPollId,
+    pollAnswerUser,
+    sendPollIsAnonymous,
     updateMessage,
+    userFirstName,
     )
-import Telegram.Bot.API.GettingUpdates (updateChatId)
+import Telegram.Bot.API.GettingUpdates (updateChatId, updatePollAnswer)
 
 import LazyCircus (tgScript)
+import LazyCircus.AI (emptyConversation)
 import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.Performer.Default (runDefaultPerformer)
-import LazyCircus.Scene.Telegram.Lang qualified as Tg (sendMessage)
-import LazyCircus.Scenario (ScenarioProgram, evalScript, logError, run, runSafely)
+import LazyCircus.Scene.Telegram.Lang qualified as Tg (sendPoll, sendMessage)
+import LazyCircus.Scenario (ScenarioProgram, evalScript, logError, logInfo, run, runArbitraryIO, runSafely)
 import LazyCircus.Script (Script)
 import SimpleServiceLib (AllServices)
 
@@ -75,6 +84,7 @@ import BotScenarios (
     )
 import ChatStateStore (ChatStateStore, withChatState)
 import Common (CircusAct, CircusActT (..))
+import PollRegistry (PollRegistry, lookupPollChat, registerPoll)
 
 -- | Bundle of per-bot parameters consumed by 'handleScenario' and 'updateAction'.
 data BotHandlerConfig = BotHandlerConfig
@@ -82,6 +92,8 @@ data BotHandlerConfig = BotHandlerConfig
       -- ^ logical bot name registered in the app's @botEnvs@ (the demo registers @"demo-bot"@)
     , bhcNotificationEmail :: Maybe Address
       -- ^ sender address used for act-creation notification emails; falls back to a default when 'Nothing'
+    , bhcPollRegistry :: PollRegistry
+      -- ^ registry of polls this bot sent (@PollId@ → originating chat), used to route @poll_answer@ updates back to the chat
     }
 
 {- | Migrated bot update handler that runs entirely inside 'ScenarioProgram'.
@@ -103,9 +115,11 @@ rather than maintaining an 'AgentBusy' non-reentrancy lock.
 
 PRE-CONTRACT: The caller wraps this with @runDefaultPerformer . run@ against a
 'DefaultApp' whose @botEnvs@ contains the bot named by 'bhcBotName'.
-POST-CONTRACT: Returns the updated 'Model' paired with @()@. Updates without a
-chat id or message are no-ops and return the input model unchanged; a document
-upload is handled by 'handleDocumentUpload' and leaves the 'Model' unchanged.
+POST-CONTRACT: Returns the updated 'Model' paired with @()@. A @poll_answer@
+update is answered via 'handlePollAnswer' BEFORE the chat-id guard and leaves
+the 'Model' unchanged; updates without a chat id or message are no-ops and
+return the input model unchanged; a document upload is handled by
+'handleDocumentUpload' and leaves the 'Model' unchanged.
 -}
 handleScenario ::
     BotHandlerConfig ->
@@ -113,25 +127,28 @@ handleScenario ::
     Update ->
     ScenarioProgram Script serviceLib (Model, ())
 handleScenario cfg model update =
-    case updateChatId update of
-        Nothing -> pure (model, ())
-        Just chatId ->
-            case updateMessage update of
+    case updatePollAnswer update of
+        Just pa -> handlePollAnswer cfg pa >> pure (model, ())
+        Nothing ->
+            case updateChatId update of
                 Nothing -> pure (model, ())
-                Just msg ->
-                    case messageDocument msg of
-                        Just doc -> do
-                            handleDocumentUpload
-                                (bhcBotName cfg)
-                                documentUploadMaxBytes
-                                chatId
-                                (messageMessageId msg)
-                                (documentFileId doc)
-                            pure (model, ())
-                        Nothing ->
-                            case messageText msg of
-                                Nothing -> pure (model, ())
-                                Just txt -> dispatch cfg model chatId txt
+                Just chatId ->
+                    case updateMessage update of
+                        Nothing -> pure (model, ())
+                        Just msg ->
+                            case messageDocument msg of
+                                Just doc -> do
+                                    handleDocumentUpload
+                                        (bhcBotName cfg)
+                                        documentUploadMaxBytes
+                                        chatId
+                                        (messageMessageId msg)
+                                        (documentFileId doc)
+                                    pure (model, ())
+                                Nothing ->
+                                    case messageText msg of
+                                        Nothing -> pure (model, ())
+                                        Just txt -> dispatch cfg model chatId txt
 
 {- | Route a recognised text message to the matching command or dialog branch.
 Mirrors the previous @BotApp.handleUpdate@ prefix-matching exactly.
@@ -149,6 +166,15 @@ dispatch cfg model chatId txt =
     case txt of
         "/start" -> do
             replyTxt cfg chatId welcomeText
+            pure (model, ())
+        "/poll" -> do
+            let req =
+                    (defSendPoll (SomeChatId chatId) pollQuestion pollOptions)
+                        { sendPollIsAnonymous = Just False
+                        }
+            (pollId, _) <- evalScript $ tgScript (bhcBotName cfg) $ Tg.sendPoll req
+            runArbitraryIO $ registerPoll (bhcPollRegistry cfg) pollId chatId
+            replyTxt cfg chatId "Опрос отправлен, голосуйте!"
             pure (model, ())
         "/newact" -> do
             replyTxt cfg chatId "🎭 Enter act name:"
@@ -239,6 +265,29 @@ handleTextMessage cfg model chatId txt =
                 Right act -> safeReplyTxt cfg chatId (formatAct act)
             pure (model{modelChatState = Idle}, ())
 
+{- | React to a @poll_answer@ update by notifying the chat the poll was sent to.
+
+The poll id is looked up in 'bhcPollRegistry' via 'runArbitraryIO' (the
+registry is plain shared state that must be really-mutated in both production
+and tests, and no scene language fits it). On a hit the originating chat gets a
+text reply with the voter's choice; on a miss the update is logged and dropped.
+
+PRE-CONTRACT: None.
+POST-CONTRACT: A @poll_answer@ for a poll this bot never sent produces only a
+log entry and no outgoing message; the 'Model' is never modified.
+-}
+handlePollAnswer :: BotHandlerConfig -> PollAnswer -> ScenarioProgram Script serviceLib ()
+handlePollAnswer cfg pa = do
+    mChatId <- runArbitraryIO $ lookupPollChat (bhcPollRegistry cfg) (pollAnswerPollId pa)
+    case mChatId of
+        Nothing -> logInfo "poll_answer for unknown poll"
+        Just chatId ->
+            replyTxt cfg chatId $
+                "🗳 " <> voterName <> " выбрал вариант(ы): " <> tshow (pollAnswerOptionIds pa)
+  where
+    -- | Display name of the voter, falling back when no user is attached.
+    voterName = fromMaybe "Пользователь" (userFirstName <$> pollAnswerUser pa)
+
 {- | Send a plain Telegram text reply to the given chat through the TelegramScript DSL.
 PRE-CONTRACT: The enclosing 'ScenarioProgram' is run against a 'DefaultApp'
 whose @botEnvs@ contains the bot named by 'bhcBotName'.
@@ -286,12 +335,31 @@ welcomeText =
 documentUploadMaxBytes :: Integer
 documentUploadMaxBytes = 5_000_000
 
+-- | Question text of the poll sent by the @/poll@ command.
+pollQuestion :: Text
+pollQuestion = "Какой номер вам понравился больше?"
+
+-- | Answer options of the poll sent by the @/poll@ command.
+-- Each option is built positionally: @text@, @parseMode@ ('Nothing' = plain),
+-- @entities@ ('Nothing').
+pollOptions :: [InputPollOption]
+pollOptions =
+    [ InputPollOption "Жонглёры" Nothing Nothing
+    , InputPollOption "Акробаты" Nothing Nothing
+    , InputPollOption "Дрессированные собачки" Nothing Nothing
+    ]
+
 {- | Performer-agnostic driver that turns one 'Update' into one bot turn.
 
-Resolves the chat id, loads the per-chat 'Model' from the 'ChatStateStore'
-(serialising updates for that chat under its 'MVar'), runs 'handleScenario' via
-the supplied @runScenario@ runner, and stores the resulting 'Model' back.
-Updates without a chat id are logged to stderr and dropped.
+A @poll_answer@ update carries no chat state: it is answered by
+'handlePollAnswer' via @runScenario@ directly, WITHOUT 'withChatState' and
+without touching any chat's 'Model'.
+
+Every other update resolves the chat id, loads the per-chat 'Model' from the
+'ChatStateStore' (serialising updates for that chat under its 'MVar'), runs
+'handleScenario' via the supplied @runScenario@ runner, and stores the
+resulting 'Model' back. Updates without a chat id are logged to stderr and
+dropped.
 
 Production and the @tgTest@ runner share this exact driver: they differ only in
 the @runScenario@ argument. Production passes the default performer; the test
@@ -303,7 +371,8 @@ PRE-CONTRACT: @runScenario@ runs a 'ScenarioProgram' to completion in 'IO' and
 returns its result; @store@ is shared across all dispatch threads for the
 lifetime of the bot.
 POST-CONTRACT: The chat's 'Model' is updated atomically; on exception the
-original 'Model' is restored (see 'withChatState').
+original 'Model' is restored (see 'withChatState'). A @poll_answer@ update
+never modifies any chat's 'Model'.
 -}
 runUpdate ::
     (ScenarioProgram Script AllServices (Model, ()) -> IO (Model, ())) ->
@@ -312,11 +381,17 @@ runUpdate ::
     Update ->
     IO ()
 runUpdate runScenario cfg store update =
-    case updateChatId update of
-        Nothing -> hPutStrLn stderr "Bot update without chat id"
-        Just chatId ->
-            withChatState store chatId $ \model ->
-                runScenario (handleScenario cfg model update)
+    case updatePollAnswer update of
+        -- The runner type is fixed to (Model, ()); the poll branch bypasses
+        -- withChatState, so the placeholder Model is never persisted.
+        Just pa -> void $
+            runScenario ((Model Idle emptyConversation, ()) <$ handlePollAnswer cfg pa)
+        Nothing ->
+            case updateChatId update of
+                Nothing -> hPutStrLn stderr "Bot update without chat id"
+                Just chatId ->
+                    withChatState store chatId $ \model ->
+                        runScenario (handleScenario cfg model update)
 
 {- | Production 'Update -> IO ()' seam: 'runUpdate' wired with the default
 performer stack. The polling\/webhook bot dispatches this fire-and-forget.

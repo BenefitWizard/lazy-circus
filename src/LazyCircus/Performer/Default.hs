@@ -88,6 +88,7 @@ instance (HasLoggingContext app) => HasLoggingContext (AppWithClientEnv app) whe
 instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv (DefaultApp serviceLib))) where
     sendMessage' req = timedAndLog "Telegram" "SendMessage" $ TG.sendMessage req
     sendDocument' req = timedAndLog "Telegram" "SendDocument" $ TG.sendDocument req
+    sendPoll' req = timedAndLog "Telegram" "SendPoll" $ DefaultPerformer (TG.sendPoll req)
     getFile' fid = timedAndLog "Telegram" "GetFile" $ TG.getFile fid
     downloadFile' f = timedAndLog "Telegram" "DownloadFile" $ TG.downloadFile f
     deleteMessage' cid mid = timedAndLog "Telegram" "DeleteMessage" $ TG.deleteMessage cid mid

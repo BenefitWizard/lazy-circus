@@ -134,8 +134,8 @@ import RIO.Process (HasProcessContext (..))
 import RIO.Time (NominalDiffTime, getCurrentTime)
 import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
-import Telegram.Bot.API (ChatId, DocumentFile (..), Message, MessageId, Response, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
-import Telegram.Bot.API.Types (File (..), FileId (..), InputFile (..), MessageId (..))
+import Telegram.Bot.API (ChatId, DocumentFile (..), Message, MessageId, Response, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollQuestion, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
+import Telegram.Bot.API.Types (File (..), FileId (..), InputFile (..), MessageId (..), PollId (..))
 
 -- | Response factory used by the Telegram mock to derive a reply from one outgoing request.
 type OnSendMessageRequest = WithImportance SendMessageRequest -> Response Message
@@ -146,6 +146,8 @@ data OutgoingKind
     -- ^ a @sendMessage@ reply
     | OutSendDocument
     -- ^ a @sendDocument@ reply
+    | OutSendPoll
+    -- ^ a @sendPoll@ reply
     | OutSetReaction
     -- ^ a @setMessageReaction@ request
     | OutEditMessage
@@ -159,7 +161,7 @@ data OutgoingKind
 -- The mock publishes one 'OutgoingMessage' to the 'outgoingMailbox' 'STM.TBQueue'
 -- for every Telegram operation that produces user-visible traffic, so the test
 -- DSL's @waitFor*@ operations can observe replies deterministically through STM.
--- The 'omMessageId' is the /assigned/ incremental id for @sendMessage@\/@sendDocument@
+-- The 'omMessageId' is the /assigned/ incremental id for @sendMessage@\/@sendDocument@\/@sendPoll@
 -- (see 'tgMockMessageIdCounter'), or the /target/ id for
 -- @setMessageReaction@\/@editMessageText@\/@deleteMessage@.
 data OutgoingMessage = OutgoingMessage
@@ -170,7 +172,7 @@ data OutgoingMessage = OutgoingMessage
     , omText :: Maybe Text
     -- ^ message text, when the operation carries one
     , omMessageId :: Maybe MessageId
-    -- ^ assigned incremental id (sendMessage/sendDocument) or target id (reaction/edit)
+    -- ^ assigned incremental id (sendMessage/sendDocument/sendPoll) or target id (reaction/edit)
     , omReplyMarkup :: Maybe SomeReplyMarkup
     -- ^ inline keyboard attached to a sent message, if any
     }
@@ -557,6 +559,39 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                 resp <- asks (defaultResponse . tgMock . mocks . app)
                 pure (stampMessageId assignedId resp)
             Real -> timedAndLog "Telegram" "SendDocument" $ TG.sendDocument req
+    sendPoll' req = do
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> do
+                tg <- askTgMock
+                cfg <- asks (testConfig . app)
+                mid <- liftIO $
+                    publishWithFreshId tg cfg
+                        -- outgoing mailbox capture
+                        ( \mid ->
+                            OutgoingMessage
+                                { omKind = OutSendPoll
+                                , omChatId = someChatIdToChatId (sendPollChatId req)
+                                , omText = Just (sendPollQuestion req)
+                                , omMessageId = Just mid
+                                , omReplyMarkup = Nothing
+                                }
+                        )
+                        -- journal observation, recorded in the SAME transaction
+                        ( \_mid ->
+                            ObsTgPoll
+                                { obsChatId = someChatIdToChatId (sendPollChatId req)
+                                , obsQuestion = sendPollQuestion req
+                                }
+                        )
+                let pid = PollId ("poll-" <> tshow mid)
+                    msg =
+                        TGDefault.defaultMessage
+                            { messagePoll = Just TGDefault.defaultPoll{pollId = pid}
+                            , messageMessageId = mid
+                            }
+                pure (pid, msg)
+            Real -> timedAndLog "Telegram" "SendPoll" $ TestPerformer (TG.sendPoll req)
 
 -- | Project the current 'TgMock' out of the bot-environment-wrapped test environment.
 askTgMock :: TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib app)) TgMock

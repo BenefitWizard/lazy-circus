@@ -14,7 +14,8 @@ import RIO
 import Telegram.Bot.API (ChatId, MessageId, Response, SendMessageRequest, SetMessageReactionRequest)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
 import Telegram.Bot.API.Methods.SendDocument (SendDocumentRequest)
-import Telegram.Bot.API.Types (File, FileId, Message)
+import Telegram.Bot.API.Methods.SendPoll (SendPollRequest)
+import Telegram.Bot.API.Types (File, FileId, Message, PollId)
 import Telegram.Bot.API.UpdatingMessages (EditMessageResponse, EditMessageTextRequest)
 
 -- | Capability class for interpreting operations in the Telegram free language.
@@ -24,6 +25,7 @@ class (Monad m) => TelegramScriptPerformer m where
   getBotName' :: m Text
   sendMessage' :: WithImportance SendMessageRequest -> m (Response Message)
   sendDocument' :: SendDocumentRequest -> m (Response Message)
+  sendPoll' :: SendPollRequest -> m (PollId, Message)
   scheduleMessages' :: [SendMessageRequest] -> m ()
   setBotCommands' :: HashMap LangCode [(Text, Text)] -> m ()
   setMessageReaction' :: SetMessageReactionRequest -> m ()
@@ -54,6 +56,9 @@ runTelegram = iterM go
   go (SendDocument req next) = do
     resp <- sendDocument' req
     next resp
+  go (SendPoll req next) = do
+    result <- sendPoll' req
+    next result
   go (ScheduleMessages requests next) = do
     scheduleMessages' requests
     next

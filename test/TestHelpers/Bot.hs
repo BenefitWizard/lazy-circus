@@ -29,15 +29,17 @@ import LazyCircus.Testing.TgTest
     , defaultTgTestConfig
     , tgTest
     )
+import PollRegistry (PollRegistry, newPollRegistry)
 import SimpleServiceLib (AllServices)
 import Telegram.Bot.API (Update)
 
 -- | Handler config pointing at the @demo-bot@ registered by 'botTestConfig'.
-demoHandlerConfig :: BotHandlerConfig
-demoHandlerConfig =
+demoHandlerConfig :: PollRegistry -> BotHandlerConfig
+demoHandlerConfig pollRegistry =
     BotHandlerConfig
         { bhcBotName = "demo-bot"
         , bhcNotificationEmail = Nothing
+        , bhcPollRegistry = pollRegistry
         }
 
 -- | Demo configuration that registers one Telegram bot (@demo-bot@) so that the
@@ -53,10 +55,12 @@ withBotTestApp action = withDemoApp botTestConfig $ \app -> action app
 -- The bot runs its ordinary script ('runUpdate' + 'handleScenario'); only the
 -- performer is the test performer (configured by the supplied 'TestConfig'), so
 -- every Telegram side effect is mocked and captured in the shared mailbox.
+-- Each call gets a FRESH 'PollRegistry' so tests never share poll state.
 buildDemoAction :: DefaultApp AllServices -> TestConfig app -> Mocks AllServices -> IO (Update -> IO ())
 buildDemoAction app cfg mocks = do
     store <- newChatStateStore
-    pure $ runUpdate (runWithConfig app cfg mocks . runScenarioProgram) demoHandlerConfig store
+    pollRegistry <- newPollRegistry
+    pure $ runUpdate (runWithConfig app cfg mocks . runScenarioProgram) (demoHandlerConfig pollRegistry) store
 
 -- | Run a DSL script via 'tgTest' against the demo app and return the snapshot + result.
 runDemoTgTest :: DefaultApp AllServices -> TelegramTestScript a -> IO (Mailboxes, Either TgTestError a)

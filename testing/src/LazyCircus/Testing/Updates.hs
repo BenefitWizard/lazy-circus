@@ -40,6 +40,7 @@ module LazyCircus.Testing.Updates (
     mkFileUpdate,
     mkDocumentUpdate,
     mkCallbackQueryUpdate,
+    mkPollAnswerUpdate,
     -- * Document helpers
     mkDocument,
     -- * Defaults
@@ -51,7 +52,7 @@ import Data.Aeson (Value (Object), fromJSON, object, (.=))
 import Data.Aeson.Types (Result (..))
 import RIO
 import Telegram.Bot.API (ChatId (..), Update, UserId (..))
-import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..))
+import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..), PollId (..))
 
 -- | Build a minimal 'Update' carrying a single text message in a private chat.
 -- Used to exercise command routing and dialog logic without a live Telegram connection.
@@ -190,6 +191,22 @@ mkCallbackQueryUpdate factory userId chatId (MessageId msgIdNum) cbData =
     buildUpdate factory $ \uid ->
         callbackQueryPayload uid userId chatId msgIdNum cbData
 
+-- | Build a @poll_answer@ 'Update' from a specific user who answered a poll,
+-- selecting the given option ids. Poll answers are chat-less updates — they
+-- carry no @message@ and no chat, so 'updateChatId' returns 'Nothing' on the
+-- result. This property is load-bearing: handlers must survive chat-less
+-- updates, and the demo's poll_answer handling is exercised through this
+-- builder precisely because no chat id can be extracted.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns a valid 'Update' whose @poll_answer.poll_id@ equals
+-- the supplied 'PollId' (encoded as a JSON string), whose @option_ids@ equal
+-- the supplied list, and whose @updateChatId@ is 'Nothing'; 'error' on parse
+-- failure (a bug in this helper).
+mkPollAnswerUpdate :: UpdateFactory -> UserId -> PollId -> [Int] -> IO Update
+mkPollAnswerUpdate factory userId (PollId pollIdText) optionIds =
+    buildUpdate factory $ \uid ->
+        pollAnswerPayload uid userId pollIdText optionIds
+
 -- | Internal: allocate the next update_id and parse the constructed payload.
 buildUpdate :: UpdateFactory -> (Int -> Value) -> IO Update
 buildUpdate factory mkPayload = do
@@ -263,6 +280,20 @@ callbackQueryPayload uid (UserId userNum) (ChatId chatNum) msgIdNum cbData =
                 , "text" .= ("" :: Text)
                 ]
             , "data" .= cbData
+            ]
+        ]
+
+-- | JSON for a @poll_answer@ wrapped in an 'Update'. Chat-less by nature:
+-- contains no @chat@ / @message@ field, only the poll id (a JSON string),
+-- the selected option ids, and the answering user.
+pollAnswerPayload :: Int -> UserId -> Text -> [Int] -> Value
+pollAnswerPayload uid (UserId userNum) pollIdText optionIds =
+    Object $ mconcat
+        [ "update_id" .= uid
+        , "poll_answer" .= object
+            [ "poll_id" .= pollIdText
+            , "option_ids" .= optionIds
+            , "user" .= userObject userNum
             ]
         ]
 

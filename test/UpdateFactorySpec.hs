@@ -24,20 +24,24 @@ import Telegram.Bot.API
     , messageDocument
     , messageMessageId
     , messageText
+    , pollAnswerOptionIds
+    , pollAnswerPollId
     , updateMessage
     )
 import Telegram.Bot.API.GettingUpdates
     ( UpdateId (..)
     , updateCallbackQuery
     , updateChatId
+    , updatePollAnswer
     , updateUpdateId
     )
-import Telegram.Bot.API.Types (FileId (..), MessageId (..))
+import Telegram.Bot.API.Types (FileId (..), MessageId (..), PollId (..))
 import LazyCircus.Testing.Updates
     ( mkCallbackQueryUpdate
     , mkDocument
     , mkDocumentUpdate
     , mkFileUpdate
+    , mkPollAnswerUpdate
     , mkTextUpdateByUser
     , newUpdateFactory
     , nextUpdateId
@@ -104,6 +108,24 @@ spec = do
             documentFileName d `shouldBe` Nothing
             documentMimeType d `shouldBe` Nothing
             documentFileSize d `shouldBe` Nothing
+
+        it "mkPollAnswerUpdate builds a chat-less update carrying the poll id and chosen options" $ do
+            factory <- newUpdateFactory
+            u <- mkPollAnswerUpdate factory (UserId 1001) (PollId "abc") [1, 3]
+            updateChatId u `shouldBe` Nothing
+            case updatePollAnswer u of
+                Nothing -> expectationFailure "expected updatePollAnswer to be Just, got Nothing"
+                Just pa -> do
+                    pollAnswerPollId pa `shouldBe` PollId "abc"
+                    pollAnswerOptionIds pa `shouldBe` [1, 3]
+
+        it "mkPollAnswerUpdate round-trips a numeric-looking poll id as a string, not a number" $ do
+            factory <- newUpdateFactory
+            u <- mkPollAnswerUpdate factory (UserId 1001) (PollId "123") [0]
+            updateChatId u `shouldBe` Nothing
+            case updatePollAnswer u of
+                Nothing -> expectationFailure "expected updatePollAnswer to be Just, got Nothing"
+                Just pa -> pollAnswerPollId pa `shouldBe` PollId "123"
 
 -- | Predicate: consecutive elements are in strictly ascending order.
 -- POST-CONTRACT: True for the empty and singleton lists.
