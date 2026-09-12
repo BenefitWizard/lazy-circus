@@ -66,7 +66,7 @@ Routing by intent:
 |---|---|
 | `ScenarioProgram`, `evalScript`, `runSafely`, `runAsync`, `runArbitraryIO`, architecture map, key modules | [reference/scenarios.md](reference/scenarios.md) |
 | `DBScript`, transactions, row locking (`findLocked`), RLS (`withTransactionRLS`), update patch semantics | [reference/db.md](reference/db.md) |
-| `TelegramScript`, file downloads, size gates (`downloadCheckedFile`) | [reference/telegram.md](reference/telegram.md) |
+| `TelegramScript`, file downloads, size gates (`downloadCheckedFile`), Telegram Stars (XTR) payment loop (`sendInvoice`, `LazyCircus.Telegram.Stars`) | [reference/telegram.md](reference/telegram.md) |
 | `AIScript`, `AIRequest` / `AgentRequest`, `AIParams`, `Conversation`, tool-aware scripts | [reference/ai.md](reference/ai.md) |
 | Prompt templates: `POML` AST, `.poml` files, `makePoml`, `parsePomlText` | [reference/poml.md](reference/poml.md) |
 | `MailScript`, `HTTPScript` | [reference/mail-http.md](reference/mail-http.md) |

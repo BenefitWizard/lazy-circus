@@ -39,6 +39,7 @@ module BotHandler (
 import RIO hiding (log, logError, logInfo, logWarn)
 import RIO.Text qualified as Text
 
+import Data.Foldable qualified as Foldable
 import Network.Mail.Mime (Address (..))
 import System.IO (hPutStrLn)
 
@@ -47,12 +48,16 @@ import Telegram.Bot.API (
     InputPollOption (..),
     PollAnswer,
     SomeChatId (..),
+    SuccessfulPayment,
     Update,
+    User,
     defSendMessage,
     defSendPoll,
     documentFileId,
     messageDocument,
+    messageFrom,
     messageMessageId,
+    messageSuccessfulPayment,
     messageText,
     pollAnswerOptionIds,
     pollAnswerPollId,
@@ -60,8 +65,9 @@ import Telegram.Bot.API (
     sendPollIsAnonymous,
     updateMessage,
     userFirstName,
+    userId,
     )
-import Telegram.Bot.API.GettingUpdates (updateChatId, updatePollAnswer)
+import Telegram.Bot.API.GettingUpdates (updateChatId, updatePollAnswer, updatePreCheckoutQuery)
 
 import LazyCircus (tgScript)
 import LazyCircus.AI (emptyConversation)
@@ -70,6 +76,7 @@ import LazyCircus.Performer.Default (runDefaultPerformer)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg (sendPoll, sendMessage)
 import LazyCircus.Scenario (ScenarioProgram, evalScript, logError, logInfo, run, runArbitraryIO, runSafely)
 import LazyCircus.Script (Script)
+import LazyCircus.Telegram.Stars (StarsPackage (..))
 import SimpleServiceLib (AllServices)
 
 import BotApp (ChatState (..), Model (..))
@@ -85,6 +92,7 @@ import BotScenarios (
 import ChatStateStore (ChatStateStore, withChatState)
 import Common (CircusAct, CircusActT (..))
 import PollRegistry (PollRegistry, lookupPollChat, registerPoll)
+import StarsScenarios (creditStarsPayment, handlePreCheckout, topUpInvoice)
 
 -- | Bundle of per-bot parameters consumed by 'handleScenario' and 'updateAction'.
 data BotHandlerConfig = BotHandlerConfig
@@ -94,6 +102,8 @@ data BotHandlerConfig = BotHandlerConfig
       -- ^ sender address used for act-creation notification emails; falls back to a default when 'Nothing'
     , bhcPollRegistry :: PollRegistry
       -- ^ registry of polls this bot sent (@PollId@ → originating chat), used to route @poll_answer@ updates back to the chat
+    , bhcStarsPackages :: [StarsPackage]
+      -- ^ Stars top-up packages this bot sells; matched by invoice payload in the @/topup@ command and payment crediting
     }
 
 {- | Migrated bot update handler that runs entirely inside 'ScenarioProgram'.
@@ -109,6 +119,10 @@ Updates carrying a document ('messageDocument') are routed to the demo
 message deletion) BEFORE any text dispatch — a bare file upload carries no
 @message_text@ and was previously a silent no-op.
 
+A @successful_payment@ message is routed to 'handleSuccessfulPayment' BEFORE
+document\/text parsing: the Stars credit never touches the 'ChatState' FSM,
+so a top-up completes from any chat state.
+
 See the module Haddock for the /AgentBusy note/: the handler processes each
 update synchronously and relies on 'ChatStateStore' for per-chat serialisation
 rather than maintaining an 'AgentBusy' non-reentrancy lock.
@@ -119,7 +133,9 @@ POST-CONTRACT: Returns the updated 'Model' paired with @()@. A @poll_answer@
 update is answered via 'handlePollAnswer' BEFORE the chat-id guard and leaves
 the 'Model' unchanged; updates without a chat id or message are no-ops and
 return the input model unchanged; a document upload is handled by
-'handleDocumentUpload' and leaves the 'Model' unchanged.
+'handleDocumentUpload' and leaves the 'Model' unchanged; a
+@successful_payment@ is credited by 'handleSuccessfulPayment' and always
+leaves the 'Model' unchanged (a DB failure is logged, not thrown).
 -}
 handleScenario ::
     BotHandlerConfig ->
@@ -136,19 +152,25 @@ handleScenario cfg model update =
                     case updateMessage update of
                         Nothing -> pure (model, ())
                         Just msg ->
-                            case messageDocument msg of
-                                Just doc -> do
-                                    handleDocumentUpload
-                                        (bhcBotName cfg)
-                                        documentUploadMaxBytes
-                                        chatId
-                                        (messageMessageId msg)
-                                        (documentFileId doc)
-                                    pure (model, ())
-                                Nothing ->
-                                    case messageText msg of
+                            case messageSuccessfulPayment msg of
+                                Just payment ->
+                                    case messageFrom msg of
                                         Nothing -> pure (model, ())
-                                        Just txt -> dispatch cfg model chatId txt
+                                        Just sender -> handleSuccessfulPayment cfg model chatId sender payment
+                                Nothing ->
+                                    case messageDocument msg of
+                                        Just doc -> do
+                                            handleDocumentUpload
+                                                (bhcBotName cfg)
+                                                documentUploadMaxBytes
+                                                chatId
+                                                (messageMessageId msg)
+                                                (documentFileId doc)
+                                            pure (model, ())
+                                        Nothing ->
+                                            case messageText msg of
+                                                Nothing -> pure (model, ())
+                                                Just txt -> dispatch cfg model chatId txt
 
 {- | Route a recognised text message to the matching command or dialog branch.
 Mirrors the previous @BotApp.handleUpdate@ prefix-matching exactly.
@@ -189,6 +211,9 @@ dispatch cfg model chatId txt =
                 Right acts ->
                     replyTxt cfg chatId $ "🎭 Circus Acts:\n" <> Text.unlines (map formatActShort acts)
             pure (model, ())
+        "/topup" -> do
+            replyTxt cfg chatId (topupListText (bhcStarsPackages cfg))
+            pure (model, ())
         t
             | "/act " `Text.isPrefixOf` t ->
                 case parseCommandArg "/act" t of
@@ -226,6 +251,17 @@ dispatch cfg model chatId txt =
                                 replyTxt cfg chatId "❌ An internal error occurred. Please try again later."
                             Right () -> replyTxt cfg chatId "🗑️ Act deleted."
                         pure (model, ())
+            | "/topup " `Text.isPrefixOf` t ->
+                case parseCommandText "/topup" t of
+                    Nothing -> pure (model, ())
+                    Just payload ->
+                        case Foldable.find ((== payload) . starsPackagePayload) (bhcStarsPackages cfg) of
+                            Nothing -> do
+                                replyTxt cfg chatId (topupHintText (bhcStarsPackages cfg))
+                                pure (model, ())
+                            Just pkg -> do
+                                topUpInvoice (bhcBotName cfg) chatId pkg
+                                pure (model, ())
             | otherwise -> handleTextMessage cfg model chatId txt
 
 {- | Handle a free-form text message, routing on the current dialog 'ChatState'.
@@ -288,6 +324,39 @@ handlePollAnswer cfg pa = do
     -- | Display name of the voter, falling back when no user is attached.
     voterName = fromMaybe "Пользователь" (userFirstName <$> pollAnswerUser pa)
 
+{- | Credit a completed Telegram Stars payment for the sending user.
+
+The credit runs inside 'runSafely': a database failure (e.g. the
+@stars_payments@ insert) is logged and swallowed so it can never crash the
+scenario and roll back the chat 'Model' through
+'ChatStateStore.withChatState''s restore-on-exception. The user-facing
+confirmation is sent by 'creditStarsPayment' itself on first credit only.
+
+PRE-CONTRACT: None.
+POST-CONTRACT: Never throws; the 'Model' is returned unchanged regardless of
+the credit outcome.
+-}
+handleSuccessfulPayment ::
+    BotHandlerConfig ->
+    Model ->
+    ChatId ->
+    User ->
+    SuccessfulPayment ->
+    ScenarioProgram Script serviceLib (Model, ())
+handleSuccessfulPayment cfg model chatId sender payment = do
+    result <-
+        runSafely @SomeException $
+            creditStarsPayment
+                (bhcBotName cfg)
+                (bhcStarsPackages cfg)
+                chatId
+                (userId sender)
+                payment
+    case result of
+        Left e -> logError ("creditStarsPayment failed: " <> tshow e)
+        Right _ -> pure ()
+    pure (model, ())
+
 {- | Send a plain Telegram text reply to the given chat through the TelegramScript DSL.
 PRE-CONTRACT: The enclosing 'ScenarioProgram' is run against a 'DefaultApp'
 whose @botEnvs@ contains the bot named by 'bhcBotName'.
@@ -327,7 +396,34 @@ welcomeText =
     \/list — list all acts\n\
     \/act <id> — view act details\n\
     \/react <id> — regenerate reaction\n\
-    \/delete <id> — delete an act"
+    \/delete <id> — delete an act\n\
+    \/topup — list Stars top-up packages"
+
+{- | Format the Stars top-up catalogue for the @/topup@ command.
+POST-CONTRACT: One line per package listing its @/topup@ payload command,
+price in Stars, and the XTR currency code; ends with a usage hint.
+-}
+topupListText :: [StarsPackage] -> Text
+topupListText pkgs =
+    "⭐️ Top-up packages:\n"
+        <> Text.unlines (map formatPackage pkgs)
+        <> "Send /topup <payload> to get an invoice."
+  where
+    -- | One catalogue line: @/topup <payload> — N ⭐️ (XTR)@.
+    formatPackage :: StarsPackage -> Text
+    formatPackage p =
+        "• /topup "
+            <> starsPackagePayload p
+            <> " — "
+            <> tshow (starsPackageStars p)
+            <> " ⭐️ (XTR)"
+
+{- | Hint shown when @/topup@ is called with an unknown payload.
+POST-CONTRACT: Starts with an unknown-package notice followed by the full
+catalogue ('topupListText').
+-}
+topupHintText :: [StarsPackage] -> Text
+topupHintText pkgs = "❓ Unknown top-up package. " <> topupListText pkgs
 
 -- | Demo size limit for document uploads: 5 MB, passed as the @maxBytes@
 -- parameter of 'handleDocumentUpload' (kept a handler-level policy so tests
@@ -353,7 +449,10 @@ pollOptions =
 
 A @poll_answer@ update carries no chat state: it is answered by
 'handlePollAnswer' via @runScenario@ directly, WITHOUT 'withChatState' and
-without touching any chat's 'Model'.
+without touching any chat's 'Model'. A @pre_checkout_query@ is routed the
+same way ('handlePreCheckout'): the 10-second Bot API answer deadline forbids
+queueing behind a chat's 'withChatState' lock, so the branch bypasses
+per-chat serialisation entirely.
 
 Every other update resolves the chat id, loads the per-chat 'Model' from the
 'ChatStateStore' (serialising updates for that chat under its 'MVar'), runs
@@ -371,8 +470,10 @@ PRE-CONTRACT: @runScenario@ runs a 'ScenarioProgram' to completion in 'IO' and
 returns its result; @store@ is shared across all dispatch threads for the
 lifetime of the bot.
 POST-CONTRACT: The chat's 'Model' is updated atomically; on exception the
-original 'Model' is restored (see 'withChatState'). A @poll_answer@ update
-never modifies any chat's 'Model'.
+original 'Model' is restored (see 'withChatState'). @poll_answer@ and
+@pre_checkout_query@ updates never modify any chat's 'Model'; the
+pre-checkout approval is dispatched straight to Telegram without per-chat
+serialisation.
 -}
 runUpdate ::
     (ScenarioProgram Script AllServices (Model, ()) -> IO (Model, ())) ->
@@ -387,11 +488,18 @@ runUpdate runScenario cfg store update =
         Just pa -> void $
             runScenario ((Model Idle emptyConversation, ()) <$ handlePollAnswer cfg pa)
         Nothing ->
-            case updateChatId update of
-                Nothing -> hPutStrLn stderr "Bot update without chat id"
-                Just chatId ->
-                    withChatState store chatId $ \model ->
-                        runScenario (handleScenario cfg model update)
+            case updatePreCheckoutQuery update of
+                -- Same placeholder-Model trick as the poll branch: the 10-second
+                -- Bot API deadline forbids queueing behind a chat's withChatState
+                -- lock, so the pre-checkout bypasses per-chat serialisation.
+                Just q -> void $
+                    runScenario ((Model Idle emptyConversation, ()) <$ handlePreCheckout (bhcBotName cfg) q)
+                Nothing ->
+                    case updateChatId update of
+                        Nothing -> hPutStrLn stderr "Bot update without chat id"
+                        Just chatId ->
+                            withChatState store chatId $ \model ->
+                                runScenario (handleScenario cfg model update)
 
 {- | Production 'Update -> IO ()' seam: 'runUpdate' wired with the default
 performer stack. The polling\/webhook bot dispatches this fire-and-forget.
@@ -434,3 +542,13 @@ parseCommandArg :: Text -> Text -> Maybe Int32
 parseCommandArg prefix txt = do
     let rest = Text.drop (Text.length prefix + 1) txt
     readMaybe (Text.unpack rest)
+
+{- | Extract the textual argument from a command like "/topup <payload>".
+PRE-CONTRACT: The prefix must be present in the text (not checked here).
+POST-CONTRACT: Returns 'Just' the trimmed, non-empty remainder, or 'Nothing'
+when nothing follows the prefix.
+-}
+parseCommandText :: Text -> Text -> Maybe Text
+parseCommandText prefix txt =
+    let rest = Text.strip (Text.drop (Text.length prefix + 1) txt)
+    in if Text.null rest then Nothing else Just rest

@@ -67,7 +67,7 @@ capabilities at the edges.
 | `Mocks serviceLib` | collected mock state (Tg requests, mails, logs, async tasks) |
 | `TgMock` | Telegram mock with configurable response queue, staged canned downloads, and an STM `outgoingMailbox` |
 | `OutgoingMessage` | one captured outgoing Telegram side effect (kind, chat id, text, message id, reply markup) |
-| `OutgoingKind` | tag on `OutgoingMessage`: `OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` / `OutDeleteMessage` |
+| `OutgoingKind` | tag on `OutgoingMessage`: `OutSendMessage` / `OutSendDocument` / `OutSendPoll` / `OutSendInvoice` / `OutSetReaction` / `OutAnswerPreCheckoutQuery` / `OutEditMessage` / `OutDeleteMessage` |
 | `MailMock` | Mail mock for capturing sent mails |
 | `Mode` | runtime mode for a sub-language: `Mocked` or `Real` |
 | `TestConfig app` | per-sub-language mode selection (`tcTelegram`, `tcAI`, `tcMailSend`, `tcAsync`) plus optional observation journaling (`tcJournal`, `tcMailHook`, `tcAiHook`) |
@@ -273,6 +273,9 @@ captures side effects; `Real` delegates to production implementations without ca
 |---|---|---|---|
 | Telegram `sendMessage` | `tcTelegram` | captures `WithImportance SendMessageRequest` in the `SomeRef` log (`readTgRequests`) AND publishes an `OutSendMessage` to the STM `outgoingMailbox` carrying a fresh incremental `MessageId`; returns the canned/default response stamped with that id | delegates to `TG.sendMessage` via `timedAndLog`; mailbox/request log stay empty |
 | Telegram `sendDocument` | `tcTelegram` | publishes an `OutSendDocument` to the `outgoingMailbox` (with a fresh incremental `MessageId`) and returns the mock `defaultResponse` stamped with that id; not added to the `readTgRequests` log | delegates to `TG.sendDocument` via `timedAndLog` |
+| Telegram `sendPoll` | `tcTelegram` | publishes an `OutSendPoll` to the `outgoingMailbox` (`omText = Just` poll question, fresh incremental `MessageId`) and returns `(PollId, Message)` with poll id `poll-<assigned id>` and the message stamped with that id | delegates to `TG.sendPoll` via `timedAndLog` |
+| Telegram `sendInvoice` | `tcTelegram` | publishes an `OutSendInvoice` to the `outgoingMailbox` (`omChatId = Just` target chat, `omText = Just` invoice title, `omMessageId` = fresh incremental id; the invoice **payload is NOT captured**) and returns the mock `defaultResponse` stamped with that id; not added to the `readTgRequests` log | delegates to `TG.sendInvoice` via `timedAndLog` |
+| Telegram `answerPreCheckoutQuery` | `tcTelegram` | publishes an `OutAnswerPreCheckoutQuery` to the `outgoingMailbox` (`omText = Just` the answered query id, no chat id, no message id) and returns `()`; the approval flag is visible only in the journal observation (`ObsTgPreCheckoutAnswer`) | delegates to `TG.answerPreCheckoutQuery` via `timedAndLog` |
 | Telegram `setMessageReaction` | `tcTelegram` | publishes an `OutSetReaction` to the `outgoingMailbox` carrying the target `MessageId` | delegates to `TG.setMessageReaction` via `timedAndLog` |
 | Telegram `editMessageText` | `tcTelegram` | publishes an `OutEditMessage` to the `outgoingMailbox`; still always returns `Nothing` | delegates to `TG.editMessageText` via `timedAndLog` (returns real response) |
 | Telegram `deleteMessage` | `tcTelegram` | publishes an `OutDeleteMessage` to the `outgoingMailbox` carrying the target `MessageId` | delegates to `TG.deleteMessage` via `timedAndLog` |
@@ -432,6 +435,16 @@ set — the app projections of sent mail and AI replies (in both Mocked and Real
 `Nothing` disables journaling. The journal, its cursor waits (`awaitObservation`), and the
 BDD layer built on top are covered in [bdd.md](bdd.md).
 
+The Telegram observation vocabulary covers every mocked operation, including the Stars
+loop (module `LazyCircus.Testing.Bdd.Journal`):
+
+```haskell
+ObsTgInvoice{obsChatId :: Maybe ChatId, obsTitle :: Text}
+    -- ^ a sent invoice; the invoice payload is not journaled
+ObsTgPreCheckoutAnswer{obsQueryId :: Text, obsOk :: Bool}
+    -- ^ a pre-checkout answer; obsOk carries the approval flag (True for mkPreCheckoutApproval)
+```
+
 **Mode semantics:**
 
 | Sub-language | `Mocked` (default) | `Real` |
@@ -506,6 +519,8 @@ without a live Telegram connection.
 |---|---|
 | `mkTextUpdate txt` | a private-chat text message |
 | `mkNonTextMessageUpdate` | a message with no `text` field (sticker/location branch) |
+| `mkPreCheckoutQueryUpdate queryId payload amount` | a chat-less `pre_checkout_query` from the default test user — no `chat`/`message`, so `updateChatId` is `Nothing`; currency fixed to `XTR` |
+| `mkSuccessfulPaymentUpdate chargeId payload amount` | a private-chat `successful_payment` service message from the default test user/chat; currency fixed to `XTR` |
 
 **Stateful `UpdateFactory`** (monotonically increasing `update_id`, for `tgTest`
 or any loop that needs distinct ids):
@@ -520,6 +535,9 @@ or any loop that needs distinct ids):
 | `mkDocumentUpdate f userId chatId doc` | a document upload carrying the full `Document` (client-declared name / MIME / size) |
 | `mkDocument fileId` | a minimal `Document` value; attach metadata via record update |
 | `mkCallbackQueryUpdate f userId chatId msgId cbData` | a `callback_query` on `msgId` |
+| `mkPollAnswerUpdate f userId pollId optionIds` | a chat-less `poll_answer` (`updateChatId` is `Nothing` on the result) |
+| `mkPreCheckoutQueryUpdateByUser f userId queryId payload amount` | a chat-less `pre_checkout_query` from a specific user (fresh `update_id`); currency fixed to `XTR` |
+| `mkSuccessfulPaymentUpdateByUser f userId chatId chargeId payload amount` | a `successful_payment` service message in a specific chat (fresh `update_id`); currency fixed to `XTR` |
 
 Defaults: `defaultTestUserId = UserId 1001`, `defaultTestChatId = ChatId 1`.
 

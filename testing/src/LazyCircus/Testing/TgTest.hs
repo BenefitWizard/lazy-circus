@@ -71,6 +71,8 @@ module LazyCircus.Testing.TgTest (
     sendDocumentAs,
     sendKeypress,
     sendKeypressByUser,
+    sendPreCheckoutQueryByUser,
+    sendSuccessfulPaymentByUser,
     -- ** Waiting for bot replies
     waitForReplies,
     waitForReply,
@@ -123,6 +125,8 @@ import LazyCircus.Testing.Updates
     , mkDocument
     , mkDocumentUpdate
     , mkFileUpdate
+    , mkPreCheckoutQueryUpdateByUser
+    , mkSuccessfulPaymentUpdateByUser
     , mkTextUpdateByUser
     , newUpdateFactory
     )
@@ -471,6 +475,29 @@ sendKeypressByUser userId chatId targetMsgId cbData = do
     rt <- ttsAsk
     upd <- liftIO $ mkCallbackQueryUpdate (ttrFactory rt) userId chatId targetMsgId cbData
     feedAndReturnId rt upd
+
+-- | Send a @pre_checkout_query@ from a specific user: the chat-less
+-- confirmation step Telegram delivers before a payment completes (the handler
+-- is expected to answer it via @answerPreCheckoutQuery@).
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns the update's 'UpdateId'. The update carries no
+-- @message@ (like 'sendKeypress'), so no 'MessageId' is available.
+sendPreCheckoutQueryByUser :: UserId -> Text -> Text -> Integer -> TelegramTestScript UpdateId
+sendPreCheckoutQueryByUser userId queryId payload amount = do
+    rt <- ttsAsk
+    upd <- liftIO $ mkPreCheckoutQueryUpdateByUser (ttrFactory rt) userId queryId payload amount
+    feedAndReturnId rt upd
+
+-- | Send a @successful_payment@ service message from a specific user in a
+-- specific chat: the notification Telegram delivers after a payment completes.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns the update's 'UpdateId' and the 'MessageId' of the
+-- carrier payment message.
+sendSuccessfulPaymentByUser :: UserId -> ChatId -> Text -> Text -> Integer -> TelegramTestScript (UpdateId, MessageId)
+sendSuccessfulPaymentByUser userId chatId chargeId payload amount = do
+    rt <- ttsAsk
+    upd <- liftIO $ mkSuccessfulPaymentUpdateByUser (ttrFactory rt) userId chatId chargeId payload amount
+    feedAndReturn rt upd
 
 -- | Feed a constructed update into the headless queue and return its 'UpdateId'.
 feedAndReturnId :: TgTestRuntime -> Update -> TelegramTestScript UpdateId

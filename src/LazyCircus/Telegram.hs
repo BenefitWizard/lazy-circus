@@ -32,6 +32,7 @@ import Telegram.Bot.API.Methods (SendMessageRequest)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
 import Telegram.Bot.API.Methods.SendDocument (SendDocumentRequest)
 import Telegram.Bot.API.Methods.SendPoll (SendPollRequest)
+import Telegram.Bot.API.Payments (AnswerPreCheckoutQueryRequest, SendInvoiceRequest)
 import Telegram.Bot.API.UpdatingMessages (EditMessageResponse, EditMessageTextRequest)
 
 -- https://api.telegram.org/file/bot<token>/<file_path>
@@ -231,6 +232,24 @@ answerCallbackQuery req = do
         Left err -> throwIO (TGTypes.TelegramClientError err)
         Right _v -> pure ()
 
+-- | Answer a Telegram pre-checkout query via the Telegram Bot API.
+-- Fire-and-forget: mirrors 'answerCallbackQuery' (unit result, transport errors throw).
+-- PRE-CONTRACT: The request must reference a pre-checkout query received from Telegram;
+--   the answer must reach Telegram within 10 seconds or the payment times out.
+-- POST-CONTRACT: Returns unit; a transport failure throws 'TGTypes.TelegramClientError'.
+answerPreCheckoutQuery ::
+    ( HasTgClientEnv env
+    , MonadIO m
+    , MonadReader env m
+    ) =>
+    AnswerPreCheckoutQueryRequest -> m ()
+answerPreCheckoutQuery req = do
+    clientEnv <- view tgClientEnvL
+    mv <- liftIO $ runClientM (TGAPI.answerPreCheckoutQuery req) clientEnv
+    case mv of
+        Left err -> throwIO (TGTypes.TelegramClientError err)
+        Right _v -> pure ()
+
 editMessageText ::
     ( HasTgClientEnv env
     , MonadIO m
@@ -256,6 +275,23 @@ sendDocument ::
 sendDocument req = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.sendDocument req) clientEnv
+    case mv of
+        Left err -> handleClientError err
+        Right v -> pure v
+
+-- | Send an invoice via the Telegram Bot API, including Telegram Stars (XTR) invoices.
+-- PRE-CONTRACT: The request must contain a valid chat identifier; for Stars payments
+--   its provider token must be empty and its currency @XTR@ (see "LazyCircus.Telegram.Stars").
+-- POST-CONTRACT: Returns the Telegram API response carrying the invoice message.
+sendInvoice ::
+    ( HasTgClientEnv env
+    , MonadIO m
+    , MonadReader env m
+    ) =>
+    SendInvoiceRequest -> m (TGAPI.Response TGAPI.Message)
+sendInvoice req = do
+    clientEnv <- view tgClientEnvL
+    mv <- liftIO $ runClientM (TGAPI.sendInvoice req) clientEnv
     case mv of
         Left err -> handleClientError err
         Right v -> pure v

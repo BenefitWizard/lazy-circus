@@ -82,6 +82,12 @@ data Observation app
         , obsQuestion :: Text
         -- ^ poll question as sent
         }
+    | ObsTgInvoice
+        { obsChatId :: Maybe ChatId
+        -- ^ target chat id ('Nothing' for username-targeted sends)
+        , obsTitle :: Text
+        -- ^ invoice title as sent
+        }
     | ObsTgReaction
         { obsTargetMsgId :: Maybe MessageId
         -- ^ message the reaction was set on ('Nothing' when the request does
@@ -97,6 +103,12 @@ data Observation app
     | ObsTgDelete
         { obsTargetMsgId :: Maybe MessageId
         -- ^ message being deleted
+        }
+    | ObsTgPreCheckoutAnswer
+        { obsQueryId :: Text
+        -- ^ id of the pre-checkout query being answered
+        , obsOk :: Bool
+        -- ^ whether the checkout was approved ('answerPreCheckoutQueryOk')
         }
     | ObsAsyncScheduled
         { obsScenarioDesc :: Text
@@ -123,10 +135,14 @@ instance Eq app => Eq (Observation app) where
             chat1 == chat2 && file1 == file2
         (ObsTgPoll{obsChatId = chat1, obsQuestion = question1}, ObsTgPoll{obsChatId = chat2, obsQuestion = question2}) ->
             chat1 == chat2 && question1 == question2
+        (ObsTgInvoice{obsChatId = chat1, obsTitle = title1}, ObsTgInvoice{obsChatId = chat2, obsTitle = title2}) ->
+            chat1 == chat2 && title1 == title2
         (ObsTgReaction reaction1, ObsTgReaction reaction2) -> reaction1 == reaction2
         (ObsTgEdit{obsTargetMsgId = target1, obsNewText = text1}, ObsTgEdit{obsTargetMsgId = target2, obsNewText = text2}) ->
             target1 == target2 && text1 == text2
         (ObsTgDelete delete1, ObsTgDelete delete2) -> delete1 == delete2
+        (ObsTgPreCheckoutAnswer{obsQueryId = qid1, obsOk = ok1}, ObsTgPreCheckoutAnswer{obsQueryId = qid2, obsOk = ok2}) ->
+            qid1 == qid2 && ok1 == ok2
         (ObsAsyncScheduled desc1, ObsAsyncScheduled desc2) -> desc1 == desc2
         (ObsTimerScheduled desc1, ObsTimerScheduled desc2) -> desc1 == desc2
         (ObsApp x, ObsApp y) -> x == y
@@ -147,12 +163,16 @@ instance Show app => Show (Observation app) where
             "ObsTgDocument{obsChatId = " <> show chat <> ", obsFileId = " <> show file <> "}"
         ObsTgPoll{obsChatId = chat, obsQuestion = question} ->
             "ObsTgPoll{obsChatId = " <> show chat <> ", obsQuestion = " <> show question <> "}"
+        ObsTgInvoice{obsChatId = chat, obsTitle = title} ->
+            "ObsTgInvoice{obsChatId = " <> show chat <> ", obsTitle = " <> show title <> "}"
         ObsTgReaction{obsTargetMsgId = target} ->
             "ObsTgReaction{obsTargetMsgId = " <> show target <> "}"
         ObsTgEdit{obsTargetMsgId = target, obsNewText = newText} ->
             "ObsTgEdit{obsTargetMsgId = " <> show target <> ", obsNewText = " <> show newText <> "}"
         ObsTgDelete{obsTargetMsgId = target} ->
             "ObsTgDelete{obsTargetMsgId = " <> show target <> "}"
+        ObsTgPreCheckoutAnswer{obsQueryId = qid, obsOk = ok} ->
+            "ObsTgPreCheckoutAnswer{obsQueryId = " <> show qid <> ", obsOk = " <> show ok <> "}"
         ObsAsyncScheduled{obsScenarioDesc = desc} ->
             "ObsAsyncScheduled{obsScenarioDesc = " <> show desc <> "}"
         ObsTimerScheduled{obsScenarioDesc = desc} ->

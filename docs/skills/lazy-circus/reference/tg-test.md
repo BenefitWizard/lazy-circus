@@ -35,11 +35,12 @@ The design is "one more source for the same handler": production runs
 every `waitFor*` blocks through STM (never by reading once and hoping) so it is
 woken the moment the performer publishes a reply.
 
-Every Telegram `sendMessage` / `sendDocument` / `setMessageReaction` /
-`editMessageText` / `deleteMessage` publishes an `OutgoingMessage` (tagged with
-`OutgoingKind`) to the STM mailbox; `sendMessage`/`sendDocument` responses are
-stamped with a fresh incremental `MessageId` (see the mock behavior table in
-[testing.md](testing.md)).
+Every Telegram `sendMessage` / `sendDocument` / `sendPoll` / `sendInvoice` /
+`setMessageReaction` / `answerPreCheckoutQuery` / `editMessageText` /
+`deleteMessage` publishes an `OutgoingMessage` (tagged with
+`OutgoingKind`) to the STM mailbox; `sendMessage`/`sendDocument`/`sendPoll`/
+`sendInvoice` responses are stamped with a fresh incremental `MessageId` (see
+the mock behavior table in [testing.md](testing.md)).
 
 ## Why this is different from `runScenarioProgram`
 
@@ -128,7 +129,10 @@ failing `guard` or `waitFor*` short-circuits to `Left`.
 **Sending fake user input.** The message-sending ops (`sendMessage`, `sendMessageIn`,
 `sendMessageByUser`, `sendFile`, `sendFileByUser`) return `(UpdateId, MessageId)` — the
 `MessageId` is the sent user message's id, suitable for passing to `waitForReaction` or
-`sendKeypress`. The `sendKeypress*` ops return just `UpdateId`.
+`sendKeypress`. The `sendKeypress*` ops return just `UpdateId`. The Stars payment ops
+split the same way: `sendSuccessfulPaymentByUser` (a chat message) returns
+`(UpdateId, MessageId)`, while `sendPreCheckoutQueryByUser` is chat-less (like
+`sendKeypress*`) and returns just `UpdateId`.
 
 | Operation | Input produced |
 |---|---|
@@ -138,6 +142,8 @@ failing `guard` or `waitFor*` short-circuits to `Left`.
 | `sendFile fileId` / `sendFileByUser ...` | a document upload (metadata-free) |
 | `sendDocumentByUser userId chatId doc` / `sendDocumentAs fileId name mime size` | a document upload carrying the client-declared `file_name` / `mime_type` / `file_size` (for metadata pre-check tests) |
 | `sendKeypress msgId cbData` / `sendKeypressByUser ...` | a `callback_query` on an inline keyboard |
+| `sendPreCheckoutQueryByUser userId queryId payload amount` | a chat-less `pre_checkout_query` (currency fixed to `XTR`) — the Telegram Stars confirmation step |
+| `sendSuccessfulPaymentByUser userId chatId chargeId payload amount` | a `successful_payment` service message in a specific chat (currency fixed to `XTR`) — the after-payment notification |
 
 Note: the client-declared document metadata (`file_name` / `mime_type` / `file_size` from
 the update) is the sender's **claim** — spoofable, and by design it may disagree with the
@@ -182,6 +188,11 @@ sendDocumentAs     :: FileId -> Maybe Text -> Maybe Text -> Maybe Integer
                    -> TelegramTestScript (UpdateId, MessageId)          -- fileId, name, mime, size
 sendKeypress       :: MessageId -> Text -> TelegramTestScript UpdateId
 sendKeypressByUser :: UserId -> ChatId -> MessageId -> Text -> TelegramTestScript UpdateId
+sendPreCheckoutQueryByUser  :: UserId -> Text -> Text -> Integer -> TelegramTestScript UpdateId
+                            -- userId, queryId, payload, amount (Stars; chat-less)
+sendSuccessfulPaymentByUser :: UserId -> ChatId -> Text -> Text -> Integer
+                            -> TelegramTestScript (UpdateId, MessageId)
+                            -- userId, chatId, chargeId, payload, amount (Stars)
 
 -- waiting for bot replies
 waitForReply             :: TelegramTestScript Text
@@ -306,10 +317,24 @@ it "publishes two sends with distinct incremental message ids" $ \app -> do
     [ mid | Just mid <- map omMessageId msgs ] `shouldBe` [MessageId 0, MessageId 1]
 ```
 
-`OutgoingKind` discriminates the five captured operations: `OutSendMessage`,
-`OutSendDocument`, `OutSetReaction`, `OutEditMessage`, `OutDeleteMessage`.
-`omMessageId` is the assigned incremental id for `sendMessage`/`sendDocument`,
-or the target id for `setMessageReaction`/`editMessageText`/`deleteMessage`.
+`OutgoingKind` discriminates the eight captured operations: `OutSendMessage`,
+`OutSendDocument`, `OutSendPoll`, `OutSendInvoice`, `OutSetReaction`,
+`OutAnswerPreCheckoutQuery`, `OutEditMessage`, `OutDeleteMessage`.
+`omMessageId` is the assigned incremental id for
+`sendMessage`/`sendDocument`/`sendPoll`/`sendInvoice`, or the target id for
+`setMessageReaction`/`editMessageText`/`deleteMessage` (absent for
+`answerPreCheckoutQuery`, whose `omText` carries the answered query id).
+
+The Stars kinds have no dedicated `waitFor*` sugar — wait for them with
+`waitForMatching` on `omKind`:
+
+```haskell
+-- Stars (XTR) flow: invoice → pre-checkout answer, observed via the mailbox
+_ <- sendMessage "/topup coin-pack"
+_ <- waitForMatching (\om -> omKind om == OutSendInvoice) "the Stars invoice"
+_ <- sendPreCheckoutQueryByUser userId "q-1" "coin-pack" 100
+_ <- waitForMatching (\om -> omKind om == OutAnswerPreCheckoutQuery) "the pre-checkout answer"
+```
 
 ## Teardown And Quiescence
 

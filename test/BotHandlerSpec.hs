@@ -51,6 +51,7 @@ testConfig pollRegistry = BotHandlerConfig
     { bhcBotName = "demo-bot"
     , bhcNotificationEmail = Nothing
     , bhcPollRegistry = pollRegistry
+    , bhcStarsPackages = []
     }
 
 -- | Demo configuration that registers one Telegram bot (@demo-bot@) so that

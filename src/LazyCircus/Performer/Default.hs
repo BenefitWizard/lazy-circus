@@ -89,6 +89,7 @@ instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv (DefaultApp se
     sendMessage' req = timedAndLog "Telegram" "SendMessage" $ TG.sendMessage req
     sendDocument' req = timedAndLog "Telegram" "SendDocument" $ TG.sendDocument req
     sendPoll' req = timedAndLog "Telegram" "SendPoll" $ DefaultPerformer (TG.sendPoll req)
+    sendInvoice' req = timedAndLog "Telegram" "SendInvoice" $ TG.sendInvoice req
     getFile' fid = timedAndLog "Telegram" "GetFile" $ TG.getFile fid
     downloadFile' f = timedAndLog "Telegram" "DownloadFile" $ TG.downloadFile f
     deleteMessage' cid mid = timedAndLog "Telegram" "DeleteMessage" $ TG.deleteMessage cid mid
@@ -97,6 +98,7 @@ instance TelegramScriptPerformer (DefaultPerformer (AppWithBotEnv (DefaultApp se
     setBotCommands' cmds = timedAndLog "Telegram" "SetBotCommands" $ TG.setBotCommands cmds
     setMessageReaction' req = timedAndLog "Telegram" "SetMessageReaction" $ TG.setMessageReaction req
     answerCallbackQuery' req = timedAndLog "Telegram" "AnswerCallbackQuery" $ TG.answerCallbackQuery req
+    answerPreCheckoutQuery' req = timedAndLog "Telegram" "AnswerPreCheckoutQuery" $ TG.answerPreCheckoutQuery req
     editMessageText' req = timedAndLog "Telegram" "EditMessageText" $ TG.editMessageText req
 
 -- | Delegates mail operations to the concrete SMTP-backed mail service.

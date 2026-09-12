@@ -88,6 +88,7 @@ library
       LazyCircus.Telegram
       LazyCircus.Telegram.Default
       LazyCircus.Telegram.FileCheck
+      LazyCircus.Telegram.Stars
       LazyCircus.Telegram.Types
   other-modules:
       Paths_lazy_circus
@@ -154,6 +155,7 @@ library common-circus
       PollRegistry
       SimpleService
       SimpleServiceLib
+      StarsScenarios
   other-modules:
       Paths_lazy_circus
   autogen-modules:
@@ -336,10 +338,13 @@ test-suite lazy-circus-test
       PomlTHSpec
       SendPollSpec
       ServiceCallSpec
+      StarsFlowSpec
+      StarsTgTestSpec
       TestDbSupport
       TestHelpers.Bot
       TgFileOpsSpec
       TgMockMailboxSpec
+      TgStarsOpsSpec
       TgTestRunnerSpec
       TgTestSpec
       TimerServiceSpec

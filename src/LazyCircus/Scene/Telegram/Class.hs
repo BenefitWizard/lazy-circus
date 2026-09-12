@@ -15,6 +15,7 @@ import Telegram.Bot.API (ChatId, MessageId, Response, SendMessageRequest, SetMes
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
 import Telegram.Bot.API.Methods.SendDocument (SendDocumentRequest)
 import Telegram.Bot.API.Methods.SendPoll (SendPollRequest)
+import Telegram.Bot.API.Payments (AnswerPreCheckoutQueryRequest, SendInvoiceRequest)
 import Telegram.Bot.API.Types (File, FileId, Message, PollId)
 import Telegram.Bot.API.UpdatingMessages (EditMessageResponse, EditMessageTextRequest)
 
@@ -26,10 +27,12 @@ class (Monad m) => TelegramScriptPerformer m where
   sendMessage' :: WithImportance SendMessageRequest -> m (Response Message)
   sendDocument' :: SendDocumentRequest -> m (Response Message)
   sendPoll' :: SendPollRequest -> m (PollId, Message)
+  sendInvoice' :: SendInvoiceRequest -> m (Response Message)
   scheduleMessages' :: [SendMessageRequest] -> m ()
   setBotCommands' :: HashMap LangCode [(Text, Text)] -> m ()
   setMessageReaction' :: SetMessageReactionRequest -> m ()
   answerCallbackQuery' :: AnswerCallbackQueryRequest -> m ()
+  answerPreCheckoutQuery' :: AnswerPreCheckoutQueryRequest -> m ()
   editMessageText' :: EditMessageTextRequest -> m (Maybe EditMessageResponse)
   deleteMessage' :: ChatId -> MessageId -> m ()
 
@@ -59,6 +62,9 @@ runTelegram = iterM go
   go (SendPoll req next) = do
     result <- sendPoll' req
     next result
+  go (SendInvoice req next) = do
+    resp <- sendInvoice' req
+    next resp
   go (ScheduleMessages requests next) = do
     scheduleMessages' requests
     next
@@ -70,6 +76,9 @@ runTelegram = iterM go
     next
   go (AnswerCallbackQuery req next) = do
     answerCallbackQuery' req
+    next
+  go (AnswerPreCheckoutQuery req next) = do
+    answerPreCheckoutQuery' req
     next
   go (EditMessageText req next) = do
     result <- editMessageText' req

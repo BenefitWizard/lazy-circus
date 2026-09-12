@@ -55,6 +55,54 @@ and this project adheres to the
   into the generated code as a `Text` literal), so a document whose only `<let>`
   is a `src` yields a nullary function. Specifying both `type` and `src` (or
   neither) is a parse error.
+- Telegram Stars (XTR) payments in the `TelegramScript` effect: two new
+  operations, `sendInvoice :: SendInvoiceRequest -> TelegramScript (Response Message)`
+  and `answerPreCheckoutQuery :: AnswerPreCheckoutQueryRequest -> TelegramScript ()`,
+  with the matching `TelegramScriptPerformer` methods (`sendInvoice'`,
+  `answerPreCheckoutQuery'`). **(Breaking)** for external
+  `TelegramScriptPerformer` instances, which must now define the two new
+  methods.
+- `LazyCircus.Telegram.Stars`: pure builders for the Stars (XTR) invoice loop —
+  the `StarsPackage` record (title / description / payload / price in Stars /
+  reference fiat amount for dual pricing),
+  `mkStarsInvoiceRequest :: ChatId -> StarsPackage -> SendInvoiceRequest`
+  (empty `provider_token`, `XTR` currency, a single `LabeledPrice` price line),
+  and `mkPreCheckoutApproval :: Text -> AnswerPreCheckoutQueryRequest`
+  (`ok = True`, no error message).
+- Testing support (`lazy-circus-testing`): the Telegram mock captures the new
+  operations — mailbox kinds `OutSendInvoice` / `OutAnswerPreCheckoutQuery`
+  (plus `OutSendPoll`) and the journal observations `ObsTgInvoice` /
+  `ObsTgPreCheckoutAnswer`; fake-update builders `mkPreCheckoutQueryUpdate` /
+  `mkSuccessfulPaymentUpdate` (pure) and `mkPreCheckoutQueryUpdateByUser` /
+  `mkSuccessfulPaymentUpdateByUser` (`UpdateFactory`-based, currency fixed to
+  `XTR`); `tgTest` DSL senders `sendPreCheckoutQueryByUser` (chat-less, returns
+  `UpdateId`) and `sendSuccessfulPaymentByUser` (returns
+  `(UpdateId, MessageId)`).
+- Demo bot: a `stars_payments` ledger (`telegram_payment_charge_id` UNIQUE),
+  the `/topup` command listing Stars packages and sending the invoice, an
+  automatic pre-checkout approval routed BEFORE the chat-id gate (outside
+  per-chat serialisation — the Bot API answer deadline is 10 seconds), and
+  idempotent payment crediting via `ON CONFLICT (telegram_payment_charge_id)
+  DO NOTHING` + `RETURNING` with a confirmation message on first credit only.
+
+#### Manual verification checklist — real Stars purchase
+
+Operational post-merge step, NOT part of CI (CI covers the same flow against
+mocks; see `StarsFlowSpec` / `StarsTgTestSpec`):
+
+1. Enable Telegram Stars for the bot in BotFather, run the demo bot, send
+   `/topup` — the package list is shown and `/topup <payload>` opens an invoice
+   with the Pay button.
+2. Pay: the pre-checkout is approved automatically by the bot — the payment
+   proceeds without a "bot did not respond to pre-checkout query" error.
+3. After the payment completes, the confirmation message is delivered to the
+   user.
+4. `SELECT * FROM stars_payments;` shows exactly one row with the correct
+   `telegram_payment_charge_id`, `stars`, and `currency_amount`.
+5. Redelivery of the payment update cannot be triggered manually — duplicate-
+   charge idempotency (second delivery credits nothing and sends no second
+   confirmation) is covered by the automated specs `StarsFlowSpec` and
+   `StarsTgTestSpec`.
 
 ### Changed
 - **(Breaking)** POML public API now returns `[POML]` instead of a single

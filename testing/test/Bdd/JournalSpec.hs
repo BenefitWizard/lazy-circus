@@ -180,8 +180,24 @@ isTextReply txt obs = case obs of
 tinyBudgetUs :: Int
 tinyBudgetUs = 20_000
 
+-- | A fixed Stars-invoice observation used as the Eq\/Show baseline.
+starsInvoice :: Observation ()
+starsInvoice =
+    ObsTgInvoice
+        { obsChatId = Just (ChatId 1)
+        , obsTitle = "Circus Ticket"
+        }
+
+-- | A fixed pre-checkout approval observation used as the Eq\/Show baseline.
+preCheckoutAnswer :: Observation ()
+preCheckoutAnswer =
+    ObsTgPreCheckoutAnswer
+        { obsQueryId = "pcq-1"
+        , obsOk = True
+        }
+
 spec :: Spec
-spec = aroundAll withJournalApp $
+spec = aroundAll withJournalApp $ do
     describe "Observation journal (tcJournal)" $ do
         it "journals two ObsTgMessage entries in commit order with ids matching the mailbox" $ \app -> do
             journal <- newObservationLog :: IO (ObservationLog ())
@@ -402,3 +418,36 @@ spec = aroundAll withJournalApp $
                                 obs3 `shouldBe` tgMsg "three" (MessageId 2)
                                 ssConsumed st2 `shouldBe` Set.fromList [1, 2]
                                 ssLastConsumed st2 `shouldBe` Just 2
+
+    describe "Observation Eq and Show for the Stars constructors" $ do
+        it "Eq matches equal ObsTgInvoice observations" $ \_app -> do
+            starsInvoice
+                `shouldBe` ObsTgInvoice{obsChatId = Just (ChatId 1), obsTitle = "Circus Ticket"}
+
+        it "Eq distinguishes ObsTgInvoice by chat id and title" $ \_app -> do
+            starsInvoice `shouldNotBe` ObsTgInvoice{obsChatId = Just (ChatId 2), obsTitle = "Circus Ticket"}
+            starsInvoice `shouldNotBe` ObsTgInvoice{obsChatId = Just (ChatId 1), obsTitle = "Other Ticket"}
+
+        it "Eq distinguishes ObsTgInvoice from other Observation constructors" $ \_app -> do
+            starsInvoice `shouldNotBe` tgMsg "Circus Ticket" (MessageId 0)
+            starsInvoice `shouldNotBe` ObsTgPoll{obsChatId = Just (ChatId 1), obsQuestion = "Circus Ticket"}
+            starsInvoice `shouldNotBe` preCheckoutAnswer
+
+        it "Eq matches equal ObsTgPreCheckoutAnswer observations" $ \_app -> do
+            preCheckoutAnswer `shouldBe` ObsTgPreCheckoutAnswer{obsQueryId = "pcq-1", obsOk = True}
+
+        it "Eq distinguishes ObsTgPreCheckoutAnswer by query id and ok flag" $ \_app -> do
+            preCheckoutAnswer `shouldNotBe` ObsTgPreCheckoutAnswer{obsQueryId = "pcq-2", obsOk = True}
+            preCheckoutAnswer `shouldNotBe` ObsTgPreCheckoutAnswer{obsQueryId = "pcq-1", obsOk = False}
+
+        it "Eq distinguishes ObsTgPreCheckoutAnswer from other Observation constructors" $ \_app -> do
+            preCheckoutAnswer `shouldNotBe` ObsTgInvoice{obsChatId = Nothing, obsTitle = "pcq-1"}
+            preCheckoutAnswer `shouldNotBe` ObsAsyncScheduled{obsScenarioDesc = "pcq-1"}
+
+        it "Show renders ObsTgInvoice field-wise" $ \_app -> do
+            show starsInvoice
+                `shouldBe` "ObsTgInvoice{obsChatId = Just (ChatId 1), obsTitle = \"Circus Ticket\"}"
+
+        it "Show renders ObsTgPreCheckoutAnswer field-wise" $ \_app -> do
+            show preCheckoutAnswer
+                `shouldBe` "ObsTgPreCheckoutAnswer{obsQueryId = \"pcq-1\", obsOk = True}"

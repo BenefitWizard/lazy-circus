@@ -134,7 +134,7 @@ import RIO.Process (HasProcessContext (..))
 import RIO.Time (NominalDiffTime, getCurrentTime)
 import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
-import Telegram.Bot.API (ChatId, DocumentFile (..), Message, MessageId, Response, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollQuestion, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
+import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollQuestion, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
 import Telegram.Bot.API.Types (File (..), FileId (..), InputFile (..), MessageId (..), PollId (..))
 
 -- | Response factory used by the Telegram mock to derive a reply from one outgoing request.
@@ -148,8 +148,12 @@ data OutgoingKind
     -- ^ a @sendDocument@ reply
     | OutSendPoll
     -- ^ a @sendPoll@ reply
+    | OutSendInvoice
+    -- ^ a @sendInvoice@ reply
     | OutSetReaction
     -- ^ a @setMessageReaction@ request
+    | OutAnswerPreCheckoutQuery
+    -- ^ an @answerPreCheckoutQuery@ request
     | OutEditMessage
     -- ^ an @editMessageText@ request
     | OutDeleteMessage
@@ -161,7 +165,7 @@ data OutgoingKind
 -- The mock publishes one 'OutgoingMessage' to the 'outgoingMailbox' 'STM.TBQueue'
 -- for every Telegram operation that produces user-visible traffic, so the test
 -- DSL's @waitFor*@ operations can observe replies deterministically through STM.
--- The 'omMessageId' is the /assigned/ incremental id for @sendMessage@\/@sendDocument@\/@sendPoll@
+-- The 'omMessageId' is the /assigned/ incremental id for @sendMessage@\/@sendDocument@\/@sendPoll@\/@sendInvoice@
 -- (see 'tgMockMessageIdCounter'), or the /target/ id for
 -- @setMessageReaction@\/@editMessageText@\/@deleteMessage@.
 data OutgoingMessage = OutgoingMessage
@@ -172,7 +176,7 @@ data OutgoingMessage = OutgoingMessage
     , omText :: Maybe Text
     -- ^ message text, when the operation carries one
     , omMessageId :: Maybe MessageId
-    -- ^ assigned incremental id (sendMessage/sendDocument/sendPoll) or target id (reaction/edit)
+    -- ^ assigned incremental id (sendMessage/sendDocument/sendPoll/sendInvoice) or target id (reaction/edit)
     , omReplyMarkup :: Maybe SomeReplyMarkup
     -- ^ inline keyboard attached to a sent message, if any
     }
@@ -496,6 +500,26 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
         case mode of
             Mocked -> pure ()
             Real -> timedAndLog "Telegram" "AnswerCallbackQuery" $ TG.answerCallbackQuery req
+    answerPreCheckoutQuery' req = do
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> do
+                tg <- askTgMock
+                cfg <- asks (testConfig . app)
+                liftIO $
+                    publishOutgoing tg cfg
+                        OutgoingMessage
+                            { omKind = OutAnswerPreCheckoutQuery
+                            , omChatId = Nothing
+                            , omText = Just (answerPreCheckoutQueryPreCheckoutQueryId req)
+                            , omMessageId = Nothing
+                            , omReplyMarkup = Nothing
+                            }
+                        ObsTgPreCheckoutAnswer
+                            { obsQueryId = answerPreCheckoutQueryPreCheckoutQueryId req
+                            , obsOk = answerPreCheckoutQueryOk req
+                            }
+            Real -> timedAndLog "Telegram" "AnswerPreCheckoutQuery" $ TG.answerPreCheckoutQuery req
     editMessageText' req = do
         mode <- asks (tcTelegram . testConfig . app)
         case mode of
@@ -592,6 +616,34 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                             }
                 pure (pid, msg)
             Real -> timedAndLog "Telegram" "SendPoll" $ TestPerformer (TG.sendPoll req)
+    sendInvoice' req = do
+        mode <- asks (tcTelegram . testConfig . app)
+        case mode of
+            Mocked -> do
+                tg <- askTgMock
+                cfg <- asks (testConfig . app)
+                fresh <- liftIO $
+                    publishWithFreshId tg cfg
+                        -- outgoing mailbox capture
+                        ( \mid ->
+                            OutgoingMessage
+                                { omKind = OutSendInvoice
+                                , omChatId = Just (sendInvoiceChatId req)
+                                , omText = Just (sendInvoiceTitle req)
+                                , omMessageId = Just mid
+                                , omReplyMarkup = Nothing
+                                }
+                        )
+                        -- journal observation, recorded in the SAME transaction
+                        ( \_mid ->
+                            ObsTgInvoice
+                                { obsChatId = Just (sendInvoiceChatId req)
+                                , obsTitle = sendInvoiceTitle req
+                                }
+                        )
+                resp <- asks (defaultResponse . tgMock . mocks . app)
+                pure (stampMessageId fresh resp)
+            Real -> timedAndLog "Telegram" "SendInvoice" $ TG.sendInvoice req
 
 -- | Project the current 'TgMock' out of the bot-environment-wrapped test environment.
 askTgMock :: TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib app)) TgMock
