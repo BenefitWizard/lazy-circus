@@ -11,8 +11,8 @@ the journal is caller-owned: it travels in the 'LazyCircus.Testing.Performer.Tes
 via @tcJournal@, and every Telegram observation is appended in the /same/ STM
 transaction that publishes the corresponding outgoing-mailbox message, so the
 journal snapshot and the mailbox can never disagree.
---
--- On top of the raw journal, 'ScenarioState' carries a caller-owned consumed
+
+On top of the raw journal, 'ScenarioState' carries a caller-owned consumed
 -- set that BDD steps grow via 'awaitObservation': waits are selective,
 -- unconsumed entries stay available to later waits regardless of what earlier
 -- waits skipped, and the timeout is the only source of non-determinism.
@@ -244,8 +244,7 @@ defaultAwaitBudgetUs :: Int
 defaultAwaitBudgetUs = 2_000_000
 
 -- | Minimal derived view of the Telegram dialog so far, folded from the
--- observations consumed by 'awaitObservation'. Kept deliberately small —
--- T9 extends this record.
+-- observations consumed by 'awaitObservation'. Kept deliberately small.
 data DialogState = DialogState
     { dsLastReply :: !(Maybe Text)
     -- ^ text of the last consumed 'ObsTgMessage' ('Nothing' before the first)

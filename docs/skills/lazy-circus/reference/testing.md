@@ -124,7 +124,7 @@ readSentMails             :: Mocks sl -> IO [Mail]
 readAiRequests            :: Mocks sl -> IO [Chat.CreateChatCompletion]
 readScheduledScenarios    :: Mocks sl -> IO [ScenarioProgram Script sl ()]
 readScheduledTimers       :: Mocks sl -> IO [(NominalDiffTime, ScenarioProgram Script sl ())]
-fireScheduledTimers       :: TestInterpreter sl app ()
+fireScheduledTimers       :: HasCallStack => TestInterpreter sl app ()
 ```
 
 The `app` parameter is the observation-journal slot (see `TestConfig`'s `tcJournal` /

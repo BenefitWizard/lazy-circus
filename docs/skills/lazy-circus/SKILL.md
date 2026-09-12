@@ -30,7 +30,9 @@ instead of opening source files:
 ```bash
 # works in any stack project that depends on lazy-circus (library repo or consumer
 # with lazy-circus as a git/path/hackage dep) — answers come from compiled interfaces,
-# no source checkout needed. <package> = your local package name (in this repo: lazy-circus).
+# no source checkout needed. <package> = the package OWNING the module:
+# LazyCircus.* → lazy-circus, LazyCircus.Testing.* → lazy-circus-testing
+# (so the example below runs in this repo as `stack ghci lazy-circus-testing:lib`).
 printf ':m +LazyCircus.Testing.Performer\n:t runWithAiMocks\n:i Mocks\n:q\n' \
   | stack ghci <package>:lib --ghci-options "-v0"
 ```

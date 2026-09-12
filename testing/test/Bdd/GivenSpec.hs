@@ -7,7 +7,8 @@
 -- Uses ONLY the mock staging APIs — NO live DB, NO bot, NO tgTest: download
 -- staging and AI queueing are asserted against freshly allocated 'Mocks'
 -- capture buffers, seed accumulation against the pure context slot. Includes
--- the R4 regression: the DEFAULT context is EMPTY — wiring mocks alone stages
+-- the empty-default-context regression: the DEFAULT context is EMPTY — wiring
+-- mocks alone stages
 -- and seeds nothing, and staging into the unwired default context fails
 -- loudly instead of silently no-op'ing.
 module Bdd.GivenSpec (spec) where
@@ -93,7 +94,7 @@ spec = do
                 Right outcome -> ctxSeeds (stepOutcomeContext outcome) `shouldBe` ["alice", "bob"]
                 Left err -> expectationFailure ("unexpected error: " <> show err)
 
-    describe "empty default context (R4)" $ do
+    describe "empty default context" $ do
         it "the default context is empty: no staging targets, no seeds" $ do
             isNothing (ctxTgMock (emptyAppContext :: AppContext Text)) `shouldBe` True
             isNothing (ctxAiMock (emptyAppContext :: AppContext Text)) `shouldBe` True

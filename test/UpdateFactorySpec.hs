@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | T8 completion spec: the 'LazyCircus.Testing.Updates' generators build valid
+{- | The 'LazyCircus.Testing.Updates' generators build valid
 'Telegram.Bot.API.Update' values with monotonically increasing @update_id@,
 carrying the requested chat, user, message id, and callback data.
 

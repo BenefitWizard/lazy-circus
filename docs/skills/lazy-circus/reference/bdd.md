@@ -9,8 +9,8 @@ Read this when:
 
 Everything here lives in the `lazy-circus-testing` subpackage (`testing/`), NOT in the
 core library — consumers add it as a second package pinned from the same git commit
-(see "Pin both packages" in the repository README). hspec is a library dependency of
-this subpackage only; the core stays hspec-free.
+(see "Using the `lazy-circus-testing` subpackage" in the repository README). hspec is a
+library dependency of this subpackage only; the core stays hspec-free.
 
 ## Contents
 
@@ -59,10 +59,13 @@ this subpackage only; the core stays hspec-free.
 
 ## Feature File Subset
 
-Supported: `Feature:` with description lines, tags (`@blocked`, `@focus`) above features
-and scenarios, `Scenario:`, `Scenario Outline:` + `Examples:` (placeholders `<param>`
-substitute into steps AND the scenario name; each row becomes its own scenario),
-`And`/`But` (stored in the AST with the RESOLVED keyword), `#` comments, empty lines.
+Supported: `Feature:` with description lines, tags above features and scenarios (carried
+in the AST; the runner acts on `@blocked`), `Scenario:`, `Scenario Outline:` + `Examples:`
+(placeholders `<param>` substitute into steps AND the scenario name; each row becomes its
+own scenario), `And`/`But` (stored in the AST with the RESOLVED keyword), wrapped steps (a
+plain non-keyword line inside a scenario continues the previous step's text — the two
+trimmed texts join with a single space, and the step keeps the line of its first line),
+`#` comments, empty lines.
 Errors carry 1-based line numbers (step outside a scenario, `Examples` without a header
 row, `And`/`But` before any `Given`/`When`/`Then`).
 
@@ -88,13 +91,14 @@ data StepDef m c s a
 - Registries are `Semigroup`/`Monoid`; `mkRegistry` builds one; the FIRST registered
   matching definition wins. Register narrower patterns before catch-alls.
 - The interpreter is generic over `m` (needs `MonadIO` only); the canonical instantiation
-  is `StepM app = TelegramTestScript`, `c = AppContext app`, `s = ScenarioState app`.
+  is `m = TelegramTestScript`, `c = AppContext app`, `s = ScenarioState app` — that is,
+  `ScenarioRegistry serviceLib app m = StepRegistry m (AppContext app) (ScenarioState app) ()`.
 
 ```haskell
 registry :: ScenarioRegistry NoServiceLib () TelegramTestScript
 registry = mkRegistry
     [ givenDef "the echo bot is awake" (pure . id)
-    , whenDef "пользователь отправляет \"$msg\"" $ \st -> do
+    , whenDef "the user sends \"$msg\"" $ \st -> do
         _ <- sendMessage msg                -- plain TelegramTestScript effect
         pure (st, Nothing)
     , botReplyContains frag                 -- BEFORE the catch-all exact-match step
@@ -109,10 +113,14 @@ data Observation app
     = ObsTgMessage  { obsChatId :: Maybe ChatId, obsText :: Text
                     , obsMsgId :: MessageId, obsMarkup :: Maybe SomeReplyMarkup }
     | ObsTgDocument { obsChatId :: Maybe ChatId, obsFileId :: Maybe FileId }
+    | ObsTgPoll     { obsChatId :: Maybe ChatId, obsQuestion :: Text }
+    | ObsTgInvoice  { obsChatId :: Maybe ChatId, obsTitle :: Text }
     | ObsTgReaction { obsTargetMsgId :: Maybe MessageId }
     | ObsTgEdit     { obsTargetMsgId :: Maybe MessageId, obsNewText :: Text }
     | ObsTgDelete   { obsTargetMsgId :: Maybe MessageId }
-    | ObsAsyncScheduled { obsScenarioDesc :: Text }
+    | ObsTgPreCheckoutAnswer { obsQueryId :: Text, obsOk :: Bool }
+    | ObsAsyncScheduled { obsScenarioDesc :: Text }   -- runAsync capture
+    | ObsTimerScheduled { obsScenarioDesc :: Text }   -- timer-service capture
     | ObsApp app                    -- your facts, via tcMailHook / tcAiHook / direct append
 
 newObservationLog  :: IO (ObservationLog app)
@@ -137,6 +145,8 @@ Conventions (all enforced by Haddock contracts and tests):
   so mailbox order and journal order always agree
 - non-Telegram effects reach the journal as `ObsApp` through the hooks (`tcMailHook`,
   `tcAiHook`) — or via direct `appendObservation` from any layer that holds the log
+- scheduled async scenarios and timers are journaled by the test performer as
+  `ObsAsyncScheduled` / `ObsTimerScheduled`, described by `obsScenarioDesc`
 - the blessing rule: a new library `Observation` constructor is added only after an
   observation shape has survived at least two scenarios through app hooks
 
@@ -146,7 +156,7 @@ Conventions (all enforced by Haddock contracts and tests):
 gherkinSpec :: MonadIO m
     => FeatureSource                                          -- FeatureFile path | FeatureInline
     -> (GherkinScenario -> IO (ScenarioRegistry serviceLib app m))  -- registry per scenario
-    -> ScenarioBootstrap serviceLib app m                     -- app bootstrap (owns journal + mocks freshness)
+    -> ScenarioBootstrap serviceLib app m                     -- builds the executor from the runner-allocated fresh journal + mocks
     -> ScenarioVerifier app                                   -- post-scenario: outcome + journal snapshot
     -> Spec
 ```
@@ -169,9 +179,18 @@ data AppContext app = AppContext               -- wiring for mock targets + the 
 emptyAppContext :: AppContext app              -- the DEFAULT: nothing wired
 appContextFor   :: Mocks serviceLib -> AppContext app   -- wire mock targets
 
-stagedTgDownloads :: ... -> GivenDef ...   -- stage canned downloads (addTgDownloads)
-queuedAiAnswers   :: ... -> GivenDef ...   -- FIFO AI mock answers
-withAppSeed       :: ... -> GivenDef ...   -- accumulate an app-specific seed
+-- Given-action producers: each returns `AppContext app -> IO (AppContext app)` —
+-- exactly the action slot of `GivenDef`, so an app registry bakes its fixture
+-- values in via `givenDef`:
+stagedTgDownloads :: [(FileId, ByteString)]
+                  -> AppContext app -> IO (AppContext app)  -- stage canned downloads (addTgDownloads)
+queuedAiAnswers   :: [Chat.ChatCompletionObject]
+                  -> AppContext app -> IO (AppContext app)  -- FIFO AI mock answers
+withAppSeed       :: app
+                  -> AppContext app -> IO (AppContext app)  -- accumulate an app-specific seed
+
+-- > givenDef "file \"doc-1\" is downloadable"
+-- >     (stagedTgDownloads [(FileId "doc-1", pdfBytes)])
 ```
 
 The default context is empty by design: a spec cannot silently rely on fixtures it never
@@ -180,9 +199,10 @@ declared — staging into an unwired context fails loudly.
 ## Worked Example (Echo Bot)
 
 `testing/test/Bdd/EchoSmokeSpec.hs` runs an inline feature through `gherkinSpec` against a
-database-free echo app: When «пользователь отправляет "$msg"» drives `sendMessage`, Then
-«бот отвечает сообщением "$msg"» consumes the journaled reply, And «...содержит "$frag"»
-re-inspects the last consumed message without waiting. The suite passes with PostgreSQL
+database-free echo app: When `the user sends "$msg"` drives `sendMessage`, Then
+`the bot replies with "$msg"` consumes the journaled reply, And
+`the bot replies with a message containing "$frag"` re-inspects the last consumed message
+without waiting. The suite passes with PostgreSQL
 stopped — DB and HTTP are the only always-real sub-languages and the echo never touches them.
 
 ## Review Checklist

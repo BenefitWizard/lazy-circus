@@ -58,6 +58,7 @@ data StepDef m c s a
       -- ^ accumulates the context; the action runs in 'IO' (lifted into @m@ by the interpreter) and has no access to the state
     | DialogDef GherkinKeyword Pattern (s -> m (s, Maybe a))
       -- ^ runs in @m@, threads the dialog state, and may emit a value ('Nothing' emits nothing); registered with 'WhenKeyword' or 'ThenKeyword' — 'GivenKeyword' is allowed but discouraged, it then behaves as a stateful Given
+
 -- | Effective keyword a document step must carry to select this definition:
 -- 'GivenKeyword' for 'GivenDef', the stored keyword for 'DialogDef'.
 stepDefKeyword :: StepDef m c s a -> GherkinKeyword

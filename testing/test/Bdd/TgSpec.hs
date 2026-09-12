@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Unit tests for the library Telegram @Then@-constructors
-('LazyCircus.Testing.Bdd.Tg') over journal mocks (plan task T9).
+('LazyCircus.Testing.Bdd.Tg') over journal mocks.
 
 Each test builds an observation journal via 'newScenarioState', appends a
 synthetic @ObsTg*@ sequence (reply texts, a keyboard reply, a reaction, a

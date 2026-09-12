@@ -1,8 +1,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 
 {- | Library @Then@-phase step constructors for the Telegram dialog subset of
-the BDD runner — the shared step vocabulary every app registry can reuse (plan
-task T9).
+the BDD runner — the shared step vocabulary every app registry can reuse.
 
 The constructors are registry-ready 'StepDef's over the canonical stack: the
 dialog monad is 'TelegramTestScript' (the @tgTest@ DSL — a parameter-free

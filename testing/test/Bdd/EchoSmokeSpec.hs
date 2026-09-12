@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Echo-smoke vertical acceptance for the BDD stack (plan task T12): a full
+{- | Echo-smoke vertical acceptance for the BDD stack: a full
 @.feature@ → 'gherkinSpec' → echo-bot round trip that NEVER contacts
 PostgreSQL.
 
@@ -111,13 +111,13 @@ import Test.Hspec.Runner (Summary (..), defaultConfig, hspecWithResult)
 -- The spec tree
 --------------------------------------------------------------------------------
 
--- | The T12 vertical acceptance: the echo feature runs embedded in this tree
+-- | The vertical acceptance: the echo feature runs embedded in this tree
 -- (so the runner's meta-test and ambiguity probe are part of it), and the
 -- undefined-step failure is asserted as a captured child run.
 spec :: Spec
 spec = do
     app <- runIO (mkDbFreeApp "echo-bot")
-    describe "Echo smoke (T12: feature -> gherkinSpec -> echo-bot, no PostgreSQL)" $ do
+    describe "Echo smoke (feature -> gherkinSpec -> echo-bot, no PostgreSQL)" $ do
         gherkinSpec
             (FeatureInline "echo feature" echoFeature)
             (pure . echoRegistryFor)

@@ -1,7 +1,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 
-{- | Library @Given@-phase context materializers for the BDD runner (plan task
-T10) — the generic half of the first phase: staging canned Telegram downloads,
+{- | Library @Given@-phase context materializers for the BDD runner — the
+generic half of the first phase: staging canned Telegram downloads,
 queueing canned AI mock answers, and an application-seed accumulator, all over
 the canonical stack of "LazyCircus.Testing.Bdd.Step" (@c@ = 'AppContext',
 threaded by 'GivenDef' actions).
@@ -33,7 +33,7 @@ The DEFAULT context is EMPTY ('emptyAppContext'): no mock targets are wired,
 nothing is staged or queued, no seeds accumulate — wiring mocks alone
 ('appContextFor') stages and seeds nothing, and a staging step run against the
 unwired default context fails loudly instead of silently no-op'ing, so a spec
-cannot lie by declaring fixtures it never wired (plan requirement R4).
+cannot lie by declaring fixtures it never wired.
 -}
 module LazyCircus.Testing.Bdd.Given
     ( -- * Context
@@ -70,7 +70,7 @@ data AppContext app = AppContext
       -- seeds (e.g. DB rows) is the app's business
     }
 
--- | The default, EMPTY context (plan requirement R4): no mock targets wired,
+-- | The default, EMPTY context: no mock targets wired,
 -- no staged downloads, no queued AI answers, no seeds.
 --
 -- PRE-CONTRACT: None.
@@ -145,7 +145,7 @@ withAppSeed seed ctx = pure ctx{ctxSeeds = ctxSeeds ctx <> [seed]}
 --------------------------------------------------------------------------------
 
 -- | Extracts the wired Telegram mock; fails loudly on the empty default so a
--- staging step cannot silently no-op (R4: no implicit staging).
+-- staging step cannot silently no-op (no implicit staging).
 requireTgMock :: AppContext app -> IO TgMock
 requireTgMock ctx = case ctxTgMock ctx of
     Just tg -> pure tg
@@ -155,7 +155,7 @@ requireTgMock ctx = case ctxTgMock ctx of
             \stage downloads only after the runner wires one (appContextFor)"
 
 -- | Extracts the wired AI mock; fails loudly on the empty default so a
--- queueing step cannot silently no-op (R4: no implicit staging).
+-- queueing step cannot silently no-op (no implicit staging).
 requireAiMock :: AppContext app -> IO AiMock
 requireAiMock ctx = case ctxAiMock ctx of
     Just aiM -> pure aiM

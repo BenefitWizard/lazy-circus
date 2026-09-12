@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Synthetic integration tests for the hspec BDD runner
-('LazyCircus.Testing.Bdd.Runner.gherkinSpec') — plan task T11.
+('LazyCircus.Testing.Bdd.Runner.gherkinSpec').
 
 Everything here runs WITHOUT PostgreSQL:
 
@@ -147,7 +147,7 @@ ambiguousGherkinSpec source =
         echoVerifier
 
 -- | Echo-style registry: every recognized step passes the dialog through
--- untouched; the captured parameter is never inspected (the T12 stack).
+-- untouched; the captured parameter is never inspected.
 ioRegistry :: ScenarioRegistry NoServiceLib () IO
 ioRegistry = mkRegistry
     [ givenDef "the echo bot is awake" (\ctx -> pure ctx)

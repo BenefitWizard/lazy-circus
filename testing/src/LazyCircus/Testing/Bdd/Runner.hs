@@ -1,6 +1,6 @@
 {- |
 hspec runner for Gherkin-subset feature documents over the BDD step
-interpreter (plan task T11). 'gherkinSpec' turns a 'FeatureSource' — a
+interpreter. 'gherkinSpec' turns a 'FeatureSource' — a
 @.feature@ file or an inline Gherkin document with a label — into a
 self-contained hspec tree:
 

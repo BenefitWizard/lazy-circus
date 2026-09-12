@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | End-to-end spec for the Telegram file operations (T12): size-gated
+{- | End-to-end spec for the Telegram file operations: size-gated
 download ('downloadCheckedFile') and message deletion ('deleteMessage') driven
 through the @tgTest@ mock infrastructure via the demo 'handleDocumentUpload'
 scenario, plus a direct e2e of the raw 'downloadFileById' composite (which

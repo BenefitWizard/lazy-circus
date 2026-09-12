@@ -10,7 +10,7 @@ text via the @{{name}}@ syntax, and multiple operands may be concatenated with
 @+@, e.g. @{{a + " " + b}}@.
 
 @<let name=\"...\" type=\"...\"\/>@ children of @<poml>@ are /metadata/: they declare
-template variables consumed by the Template-Haskell code generator (T5) and are
+template variables consumed by the Template-Haskell code generator and are
 ignored by 'toPOML'.
 
 Because the document is XML, any literal @<@ or @&@ that appears inside template
@@ -122,7 +122,7 @@ data PomlDoc = PomlDoc
     deriving (Eq, Show)
 
 -- | Whitelisted element tag names allowed in the @.poml@ body.
---   Shared between this parser and the Template-Haskell code generator (T5).
+--   Shared between this parser and the Template-Haskell code generator.
 allowedElementNames :: Set Text
 allowedElementNames =
     Set.fromList

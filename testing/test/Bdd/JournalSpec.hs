@@ -82,14 +82,6 @@ import Telegram.Bot.API
     )
 import Telegram.Bot.API.Types (MessageId (..))
 
--- | PostgreSQL connection string for the journal app fixture.
---
--- UNUSED since the fixture switched to the database-free app builder
--- ('TestSupport.DbFreeApp.mkDbFreeApp'): the journal scenarios below never
--- touch the database, and 'newDefaultApp' probes its pool (and therefore the
--- database) EAGERLY at construction, which would make this suite require a
--- live PostgreSQL.
-
 {- | Run an action with a minimal database-free 'DefaultApp' that has one
 Telegram bot (@demo-bot@) registered, so @tgScript "demo-bot"@ effects are
 captured by the test performer.
