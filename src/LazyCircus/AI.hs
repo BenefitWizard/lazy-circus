@@ -6,17 +6,22 @@
 -- | AI integration layer — builds OpenAI chat-completion requests, sends them via
 -- a lens-provided V1.Methods handle, and decodes structured JSON responses.
 --
--- SCOPE: Covers request construction, execution against the OpenAI API, and
--- response decoding / error logging. Does NOT define prompt-template types
--- (see "LazyCircus.AI.POML") or the concrete runtime wiring (see
--- "LazyCircus.App.Default").
+-- SCOPE: Covers request construction, tool-argument enrichment, execution
+-- against the OpenAI API, and response decoding / error logging. Does NOT
+-- define prompt-template types (see "LazyCircus.AI.POML") or the concrete
+-- runtime wiring (see "LazyCircus.App.Default").
 module LazyCircus.AI
     ( AIRequest(..)
     , AgentRequest(..)
+    , IsTool(..)
+    , ToolEnrichment(..)
+    , enrichTool
+    , applyToolEnrichment
     , AIParams(..)
     , Chat.ReasoningEffort(..)
     , mkAIRequest
     , mkAgentRequest
+    , withToolEnrichment
     , withModel
     , withTemperature
     , withTopP
@@ -38,7 +43,7 @@ module LazyCircus.AI
     , unConversation
     ) where
 
-import Data.Aeson (FromJSON, Object, Value (Object, String), eitherDecodeStrictText, object, (.=))
+import Data.Aeson (FromJSON, Object, ToJSON, Value (Object, String), eitherDecodeStrictText, object, toJSON, (.=))
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Text (encodeToLazyText)
 import qualified Data.Text.Lazy as TL (toStrict)
@@ -53,6 +58,7 @@ import OpenAI.V1.Models qualified as Models (Model (..))
 import OpenAI.V1.Tool qualified as Tool
 import OpenAI.V1.ToolCall qualified as TC
 import RIO
+import RIO.Map qualified as Map
 import RIO.Vector ((!?))
 import qualified RIO.Vector as V
 
@@ -274,17 +280,23 @@ toDurableMessage = \case
         Chat.Tool (V.singleton (Chat.Text content)) tool_call_id extra
 
 -- | Request payload for an agent-loop AI completion with tool use.
+--
+-- Tool arguments returned by the model are enriched with the programmatic
+-- fields of 'agentToolEnrichment' before execution; programmatic fields
+-- override model-supplied ones (see 'applyToolEnrichment').
 data AgentRequest a = AgentRequest
     { agentPrompt        :: [POML]    -- ^ user-facing prompt fragments
     , agentSystemPrompt  :: [POML]    -- ^ system-level instruction fragments
     , agentMaxIterations :: Natural   -- ^ maximum ReAct iterations before giving up (must be >= 0, guaranteed by 'Natural')
     , thinkingEnabled :: Bool  -- ^ enable DeepSeek thinking mode
     , agentParams :: AIParams -- ^ OpenAI parameters overlay; 'mempty' keeps defaults
+    , agentToolEnrichment :: ToolEnrichment -- ^ programmatic fields injected into tool arguments; 'mempty' leaves model arguments untouched
     }
 
 -- | Smart constructor for 'AgentRequest' with default behaviour.
--- POST-CONTRACT: @thinkingEnabled = False@ and @agentParams = mempty@;
---   override either via record update.
+-- POST-CONTRACT: @thinkingEnabled = False@, @agentParams = mempty@ and
+--   @agentToolEnrichment = mempty@; override via record update or
+--   'withToolEnrichment'.
 mkAgentRequest :: [POML] -> [POML] -> Natural -> AgentRequest a
 mkAgentRequest agentPrompt agentSystemPrompt agentMaxIterations =
     AgentRequest
@@ -293,7 +305,76 @@ mkAgentRequest agentPrompt agentSystemPrompt agentMaxIterations =
         , agentMaxIterations
         , thinkingEnabled = False
         , agentParams = mempty
+        , agentToolEnrichment = mempty
         }
+
+-- | Add tool-argument enrichment to an 'AgentRequest'.
+-- POST-CONTRACT: The given enrichment is merged with any enrichment already
+--   present via @<>@ (the new fragment is the right operand, so it wins
+--   per-tool layerwise); existing enrichment is never discarded.
+withToolEnrichment :: ToolEnrichment -> AgentRequest b -> AgentRequest b
+withToolEnrichment enrichment req = req{agentToolEnrichment = agentToolEnrichment req <> enrichment}
+
+-- | Things that know the AI tool name they are registered under.
+--
+-- TH codegen derives instances for generated tool enums; hand-written tool
+-- types (such as 'ToolDescription') declare their own instance.
+class IsTool t where
+    -- | Machine-readable tool identifier matching the registered 'ToolDescription'.
+    toolName :: t -> Text
+
+-- | A 'ToolDescription' is identified by its registered name.
+instance IsTool ToolDescription where
+    toolName = toolDescName
+
+-- | Programmatic fields injected into AI tool arguments, keyed by tool name.
+--
+-- Values are merged into the model-supplied arguments of the matching tool
+-- call (see 'applyToolEnrichment'). Build fragments with 'enrichTool' and
+-- combine them with @<>@ / 'mappend'.
+newtype ToolEnrichment = ToolEnrichment (Map Text Value)
+    deriving (Eq, Show)
+
+-- | Right-biased per-tool merge of enrichment fragments.
+-- LAW: identity: @e <> mempty = mempty <> e = e@.
+-- LAW: right bias: for the same tool name, when BOTH values are JSON objects
+--   the merge is layered per-field with the right operand's fields winning;
+--   a non-object value of the right operand replaces the left value entirely.
+instance Semigroup ToolEnrichment where
+    ToolEnrichment l <> ToolEnrichment r = ToolEnrichment (Map.unionWith mergeValues l r)
+      where
+        -- | Layers two enrichment payloads, right operand's fields winning.
+        mergeValues :: Value -> Value -> Value
+        mergeValues (Object lm) (Object rm) = Object (KM.union rm lm)
+        mergeValues _ rightValue = rightValue
+
+-- | No enrichment — tool arguments pass through untouched.
+-- LAW: identity: holds by construction via the 'Semigroup' instance.
+instance Monoid ToolEnrichment where
+    mempty = ToolEnrichment Map.empty
+
+-- | Inject a programmatic payload into one AI tool's arguments.
+-- POST-CONTRACT: The fields of the payload's JSON object override
+--   model-supplied fields at merge time (see 'applyToolEnrichment'). Ad-hoc
+--   payloads work via the 'ToJSON' 'Value' instance, e.g.
+--   @'enrichTool' t ('object' [...])@.
+enrichTool :: (IsTool t, ToJSON a) => t -> a -> ToolEnrichment
+enrichTool tool payload = ToolEnrichment (Map.singleton (toolName tool) (toJSON payload))
+
+-- | Merge programmatically injected fields into model-supplied tool arguments.
+-- POST-CONTRACT: For a tool present in the enrichment whose value is a JSON
+--   object, its fields override the model-supplied fields of the same name.
+--   A tool absent from the enrichment leaves the arguments unchanged; model
+--   arguments that are not a JSON object are left unchanged; an enrichment
+--   value that is not a JSON object replaces the arguments entirely.
+applyToolEnrichment :: ToolEnrichment -> Text -> Value -> Value
+applyToolEnrichment (ToolEnrichment extras) name modelArgs =
+    case Map.lookup name extras of
+        Nothing -> modelArgs
+        Just extra -> case (extra, modelArgs) of
+            (Object extraObj, Object modelObj) -> Object (KM.union extraObj modelObj)
+            (Object _, _) -> modelArgs
+            (_, _) -> extra
 
 -- | Environment capability that exposes the OpenAI client methods used by this module.
 class HasAIMethods env where
@@ -421,7 +502,7 @@ solveWithAgentLoop req = fst <$> solveWithAgentLoopContinuing req emptyConversat
 
 {- | Run a multi-turn agent loop with tool use, threading and returning a 'Conversation'.
 PRE-CONTRACT: The input 'Conversation' does NOT begin with a 'Chat.System' message. The single leading System message injected on entry is stripped from the returned 'Conversation' via 'V.drop 1'.
-POST-CONTRACT: Returns the decoded final response and a 'Conversation' containing all durable turns (replayed + new). When the loop is exhausted or the API returns no choice, the returned 'Conversation' still reflects the turns exchanged so far (minus the leading System).
+POST-CONTRACT: Returns the decoded final response and a 'Conversation' containing all durable turns (replayed + new). When the loop is exhausted or the API returns no choice, the returned 'Conversation' still reflects the turns exchanged so far (minus the leading System). Tool arguments returned by the model are enriched with the request's 'agentToolEnrichment' before execution — programmatic fields override model-supplied ones — and the tool-call log records the enriched arguments.
 -}
 solveWithAgentLoopContinuing ::
     ( HasAIMethods env
@@ -434,7 +515,7 @@ solveWithAgentLoopContinuing ::
     , MonadUnliftIO m
     , FromJSON b
     ) => AgentRequest b -> Conversation -> m (Maybe b, Conversation)
-solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations, thinkingEnabled, agentParams} conv = do
+solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations, thinkingEnabled, agentParams, agentToolEnrichment} conv = do
     (result, finalHistory) <- go agentMaxIterations initialMessages
     pure (result, conversationFromTurns (V.drop 1 finalHistory))
   where
@@ -483,13 +564,14 @@ solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentM
                                         let argsValue = case eitherDecodeStrictText argsText of
                                                 Right v -> v
                                                 Left _ -> object ["raw_arguments" .= argsText]
+                                            enrichedArgs = applyToolEnrichment agentToolEnrichment toolName argsValue
                                         logCtx <- view logContextL
                                         glog $ AppLogMsgWithContext
-                                            { logMsg = SensitiveLogMsg $ "Agent tool call: " <> toolName <> " " <> argsText
+                                            { logMsg = SensitiveLogMsg $ "Agent tool call: " <> toolName <> " " <> encodeValueToText enrichedArgs
                                             , logContext = logCtx
                                             , logCallSite = Nothing
                                             }
-                                        result <- tryAny $ liftIO $ exec toolName argsValue
+                                        result <- tryAny $ liftIO $ exec toolName enrichedArgs
                                         let encodedResult = case result of
                                                 Right v  -> encodeValueToText v
                                                 Left err -> encodeValueToText $ object

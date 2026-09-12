@@ -19,9 +19,12 @@ import RIO.Map qualified as M
 import SimpleService
     ( AddExpressionRequest (..),
       AddExpressionResponse (..),
+      SecureRequest (..),
+      SecureResponse (..),
       SimpleRequest (..),
       SimpleResponse (..),
       handleAddExpressionRequest,
+      handleSecureRequest,
       handleSimpleRequest
     )
 import SimpleServiceLib
@@ -43,6 +46,7 @@ withServiceTestApp action = do
             let config = AllServicesConfig
                     { simpleRequest = handleSimpleRequest
                     , addExpressionRequest = handleAddExpressionRequest
+                    , secureRequest = handleSecureRequest
                     }
             (allServices, workers) <- mkAllServices config
             _ <- runAllWorkers workers
@@ -84,6 +88,11 @@ spec = aroundAll withServiceTestApp $ do
             (_, result) <- runWithDefaultMocks app $ do
                 runScenarioProgram $ callService (AddExpressionRequest "hello")
             result `shouldBe` AddExpressionResult "hello!"
+
+        it "callService (SecureRequest u1 SELECT 1) returns SecureResponse" $ \app -> do
+            (_, result) <- runWithDefaultMocks app $ do
+                runScenarioProgram $ callService (SecureRequest "u1" "SELECT 1")
+            result `shouldBe` SecureResponse "u1: SELECT 1"
 
         it "callService works inside runSafely" $ \app -> do
             (_, result) <- runWithDefaultMocks app $ do

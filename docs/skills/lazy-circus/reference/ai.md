@@ -6,6 +6,7 @@ Read this when:
 - building `AIRequest` / `AgentRequest` or overriding sampling via `AIParams`
 - threading multi-turn `Conversation`
 - exposing services to the model as tools
+- injecting programmatic fields into agent tool arguments (`ToolEnrichment`)
 
 For prompt templates (`POML`, `.poml` files, `makePoml`), see [poml.md](poml.md).
 
@@ -16,6 +17,7 @@ For prompt templates (`POML`, `.poml` files, `makePoml`), see [poml.md](poml.md)
 - Request Parameters (`AIParams`)
 - Conversation Threading
 - Tool-Aware AI Scripts
+- Tool Enrichment
 - Review Checklist
 
 ## Operations
@@ -88,12 +90,14 @@ data AgentRequest a = AgentRequest
     , agentMaxIterations :: Natural -- maximum ReAct iterations
     , thinkingEnabled :: Bool       -- enable DeepSeek thinking mode
     , agentParams :: AIParams       -- OpenAI parameters overlay; mempty keeps defaults
+    , agentToolEnrichment :: ToolEnrichment -- programmatic fields merged into tool arguments; mempty leaves model arguments untouched
     }
 ```
 
 with its smart constructor
 `mkAgentRequest :: [POML] -> [POML] -> Natural -> AgentRequest a` (prompt,
-system prompt, iteration budget).
+system prompt, iteration budget). `agentToolEnrichment` defaults to `mempty`;
+add enrichment with `withToolEnrichment` (see [Tool Enrichment](#tool-enrichment)).
 
 ## Request Parameters (`AIParams`)
 
@@ -177,6 +181,8 @@ Production AI behavior:
 - `solveWithAgent` runs a ReAct loop: it sends the transcript, executes any tool calls via the
   registered `ToolCallExec`, appends results, and repeats until the model returns a final answer
   or `agentMaxIterations` is exhausted
+- merges the request's `agentToolEnrichment` into model-supplied tool arguments before executing
+  tool calls; programmatic fields override model-supplied ones (see [Tool Enrichment](#tool-enrichment))
 - logs decode failures and agent tool calls/results as sensitive log messages with the current
   logging context
 - returns `Nothing` when decoding fails, content is absent, or the iteration budget is exhausted
@@ -200,8 +206,71 @@ registered via `makeServiceLib` with tool specs (see [extension.md](extension.md
 
 This lets the AI runtime know which tools (services) it can call.
 
+## Tool Enrichment
+
+`AgentRequest` carries a `ToolEnrichment` in its `agentToolEnrichment` field
+(all types below are from `LazyCircus.AI`, re-exported via `LazyCircus.Scene.AI`).
+Before the agent loop executes a tool call, it merges this enrichment into the
+model-supplied arguments — **programmatic fields override model-supplied ones**,
+so the model cannot spoof them. The sensitive `Agent tool call` log shows the
+enriched arguments.
+
+```haskell
+class IsTool t where
+    toolName :: t -> Text -- machine-readable tool identifier matching the registered ToolDescription
+
+instance IsTool ToolDescription where toolName = toolDescName
+-- TH also generates instance IsTool {Lib}Tool for makeServiceLib tool enums (see extension.md)
+
+newtype ToolEnrichment = ToolEnrichment (Map Text Value)
+-- right-biased Semigroup/Monoid; mempty = no enrichment
+
+enrichTool          :: (IsTool t, ToJSON a) => t -> a -> ToolEnrichment
+applyToolEnrichment :: ToolEnrichment -> Text -> Value -> Value
+
+withToolEnrichment :: ToolEnrichment -> AgentRequest b -> AgentRequest b
+-- adds via <>, never overwrites: existing enrichment is merged, not discarded
+```
+
+Merge semantics of `applyToolEnrichment` for one tool call:
+
+| Enrichment value | Model arguments | Result |
+|---|---|---|
+| tool absent from the enrichment | anything | unchanged |
+| JSON Object | JSON Object | layered per field: enrichment fields override same-named model fields |
+| JSON Object | non-Object | model arguments unchanged |
+| non-Object | anything | enrichment value replaces the arguments entirely |
+
+`enrichTool` accepts any `ToJSON` payload (ad-hoc fragments via
+`enrichTool t (object [...])`); combining two fragments for the same tool with
+`<>` follows the same right-biased rule.
+
+Worked example — inject the authenticated user id into a tool's arguments so
+the handler can trust it instead of the model:
+
+```haskell
+data AnalyticsCtx = AnalyticsCtx
+    { analyticsRequestUserId :: Text -- generic ToJSON key matches the request's selector
+    }
+    deriving (Generic, ToJSON)
+
+analyticsReport :: Text -> AIScript (Maybe Report)
+analyticsReport uid =
+    solveWithAgent $
+        withToolEnrichment
+            (enrichTool AnalyticsRequestTool (AnalyticsCtx uid))
+            (mkAgentRequest [cp_ "User" ["Summarise my usage"]] sysPrompt 10)
+```
+
+`AnalyticsRequestTool` is the TH-generated tool enum value from `makeServiceLib`
+([extension.md](extension.md)); its `IsTool` instance supplies the tool name.
+`uid` comes from the scenario closure (e.g. the authenticated session), travels
+inside `AgentRequest`, and is merged into every matching tool call before
+execution — safe under concurrency because nothing ambient is read at call time.
+
 ## Review Checklist
 
 - Are requests built via `mkAIRequest` / `mkAgentRequest` (or explicit `requestParams` / `agentParams`)?
 - Do `AIParams` merges rely on right bias rather than concatenation?
 - Is the `Conversation` built only via `emptyConversation` / `conversationFromTurns` (no leading `Chat.System` message, no pattern-matching on the unexported constructor)?
+- Is tool-argument enrichment attached via `withToolEnrichment` / `enrichTool` (programmatic fields intentionally override model-supplied ones)?

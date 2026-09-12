@@ -348,6 +348,7 @@ test-suite lazy-circus-test
       TgTestRunnerSpec
       TgTestSpec
       TimerServiceSpec
+      ToolEnrichmentSpec
       ToolSchemaSpec
       UpdateFactorySpec
       LazyCircus.Testing.Bdd.Gherkin

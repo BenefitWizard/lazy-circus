@@ -1,5 +1,5 @@
 --   PURPOSE: Re-export the public AI scripting language so backend scripts can depend on a stable facade instead of the underlying algebra module.
---   SCOPE: Public re-exports for the AI language functor, AI request smart constructor, and script alias used by backend scripts.
+--   SCOPE: Public re-exports for the AI language functor, AI request smart constructor, tool-argument enrichment primitives, and script alias used by backend scripts.
 --   DEPENDS: M-LIB-LANG-AI-LANG
 
 -- | Stable facade for the AI scripting language used across backend scripts.
@@ -12,6 +12,8 @@ module LazyCircus.Scene.AI (
     AIScript,
     AgentRequest(..),
     AIParams(..),
+    IsTool(..),
+    ToolEnrichment(..),
     ReasoningEffort(..),
     mkAgentRequest,
     mkAIRequest,
@@ -27,6 +29,9 @@ module LazyCircus.Scene.AI (
     withReasoningEffort,
     Conversation,
     emptyConversation,
+    enrichTool,
+    applyToolEnrichment,
+    withToolEnrichment,
     -- Logging re-exports
     slogInfo,
     slogWarn,
@@ -36,7 +41,7 @@ module LazyCircus.Scene.AI (
 )
 where
 
-import LazyCircus.AI (AgentRequest (..), AIParams (..), Conversation, ReasoningEffort (..), emptyConversation, mkAgentRequest, mkAIRequest, withFrequencyPenalty, withMaxCompletionTokens, withModel, withPresencePenalty, withReasoningEffort, withSeed, withStop, withTemperature, withTopP, withUser)
+import LazyCircus.AI (AgentRequest (..), AIParams (..), Conversation, IsTool (..), ReasoningEffort (..), ToolEnrichment (..), applyToolEnrichment, emptyConversation, enrichTool, mkAgentRequest, mkAIRequest, withFrequencyPenalty, withMaxCompletionTokens, withModel, withPresencePenalty, withReasoningEffort, withSeed, withStop, withTemperature, withToolEnrichment, withTopP, withUser)
 import LazyCircus.Scene.AI.Lang (AILangF (..))
 
 

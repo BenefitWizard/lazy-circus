@@ -60,11 +60,14 @@ When installed, the skill provides your AI assistant (e.g., GitHub Copilot) with
 To install the Lazy Circus skill for your AI workspace:
 
 ```bash
-# Install into ~/.opencode/skills/lazy-circus (default)
+# Install into ~/.agents/skills/lazy-circus (default)
 ./install_skill.sh
 
+# Or install into the opencode skills directory
+./install_skill.sh --opencode
+
 # Or install into a custom parent skills directory
-./install_skill.sh path/to/skills
+./install_skill.sh --path path/to/skills
 ```
 
 The script mirrors `docs/skills/lazy-circus` into the destination, removing stale files. To install manually instead, copy the `docs/skills/lazy-circus` folder into your project's AI skills directory (for example, `.claude/skills/lazy-circus` or a custom AI prompts folder).

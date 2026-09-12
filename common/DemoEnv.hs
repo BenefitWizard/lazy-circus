@@ -35,7 +35,7 @@ import LazyCircus.Script (Script)
 
 import Common (migration)
 import LazyCircus.App.Service
-import SimpleService (handleSimpleRequest, handleAddExpressionRequest)
+import SimpleService (handleSimpleRequest, handleAddExpressionRequest, handleSecureRequest)
 import SimpleServiceLib (AllServices, AllServicesConfig (..), allToolDescriptions, mkAllServices, mkToolCallExec)
 import System.Environment (lookupEnv)
 import System.IO (putStrLn)
@@ -177,6 +177,7 @@ withDemoApp cfg action = do
     let svcConfig = AllServicesConfig
             { simpleRequest = handleSimpleRequest
             , addExpressionRequest = handleAddExpressionRequest
+            , secureRequest = handleSecureRequest
             }
     (allServices, workers) <- mkAllServices svcConfig
     let appConfig = demoConfigToAppConfig allServices cfg

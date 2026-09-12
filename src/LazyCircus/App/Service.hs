@@ -27,14 +27,19 @@ module LazyCircus.App.Service (
     -- IsResponseFor (..),
     -- * Tool descriptions
     ToolDescription (..),
+    hideSchemaParams,
+    hideToolParams,
     HasToolDescriptions (..),
     ToolCallExec (..),
     HasToolCallExec (..),
 )
 where
 
-import Data.Aeson (Value)
+import Data.Aeson (Value (Array, Object, String))
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KM
 import RIO
+import qualified RIO.Vector as V
 
 -- | Request channel used to deliver one service input to the worker.
 type Request a = MVar a
@@ -153,6 +158,40 @@ data ToolDescription = ToolDescription
     , toolDescParameters  :: Maybe Value -- ^ JSON Schema describing the tool's input parameters
     }
     deriving (Show, Eq)
+
+-- | Removes the given parameter keys from a tool's JSON Schema.
+-- PRE-CONTRACT: Names are JSON keys as they appear after any fieldLabelModifier.
+-- POST-CONTRACT: Absent keys are a no-op; a non-Object schema is returned
+--   unchanged; a @required@ field that is missing or not a real JSON array is
+--   left untouched (sum-type schemas use @oneOf@ instead of @required@).
+hideSchemaParams :: [Text] -> Value -> Value
+hideSchemaParams names schema = case schema of
+    Object km -> Object $ hideRequired $ hidePropertiesEntry km
+    _ -> schema
+  where
+    keys = map Key.fromText names
+
+    -- | Drops hidden keys from the @properties@ sub-object; leaves a
+    --   missing or non-Object @properties@ untouched.
+    hidePropertiesEntry km = case KM.lookup "properties" km of
+        Just (Object pm) -> KM.insert "properties" (Object $ KM.filterWithKey (\k _ -> k `notElem` keys) pm) km
+        _ -> km
+
+    -- | Drops hidden keys from @required@ only when it is a real JSON array.
+    hideRequired km = case KM.lookup "required" km of
+        Just (Array reqs) -> KM.insert "required" (Array $ V.filter keepParam reqs) km
+        _ -> km
+
+    -- | Keeps required entries whose text is not one of the hidden names
+    keepParam (String t) = Key.fromText t `notElem` keys
+    keepParam _ = True
+
+-- | Applies 'hideSchemaParams' to a tool description's parameter schema.
+-- POST-CONTRACT: A tool without parameters ('toolDescParameters' = 'Nothing') stays 'Nothing'.
+hideToolParams :: [Text] -> ToolDescription -> ToolDescription
+hideToolParams names tool = tool
+    { toolDescParameters = hideSchemaParams names <$> toolDescParameters tool
+    }
 
 -- | Environment capability that exposes the list of available tool descriptions
 -- to the AI interpreter.

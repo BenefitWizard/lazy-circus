@@ -9,13 +9,14 @@
 -- agent loop (solveWithAgentLoop) directly by mocking the OpenAI API client.
 module AIAgentSpec (spec) where
 
-import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson.KeyMap qualified as KM
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
-import LazyCircus.AI (AIParams (..), AIRequest, AgentRequest (agentParams, thinkingEnabled), HasAIMethods (..), askAIContinuing, conversationFromTurns, emptyConversation, mkAgentRequest, mkAIRequest, solveWithAgentLoop, solveWithAgentLoopContinuing, unConversation, withMaxCompletionTokens, withModel, withReasoningEffort, withStop, withTemperature)
+import LazyCircus.AI (AIParams (..), AIRequest, AgentRequest (agentParams, thinkingEnabled), HasAIMethods (..), askAIContinuing, conversationFromTurns, emptyConversation, enrichTool, mkAgentRequest, mkAIRequest, solveWithAgentLoop, solveWithAgentLoopContinuing, unConversation, withMaxCompletionTokens, withModel, withReasoningEffort, withStop, withTemperature, withToolEnrichment)
 import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.App.Service (HasToolCallExec(..), ToolCallExec(..), ToolDescription(..))
-import SimpleServiceLib (AllServices)
+import SimpleService (SecureCtx (..))
+import SimpleServiceLib (AllServices, AllServicesTool (..))
 import LazyCircus.Scenario (evalScript)
 import LazyCircus.Scene.AI (solveWithAgent)
 import qualified LazyCircus.Scene.AI as Scene (ask)
@@ -383,6 +384,130 @@ spec = do
                     [_, _, assistantMsg, _] ->
                         Chat.messageExtra assistantMsg `shouldBe` Just extraObj
                     _ -> expectationFailure $ "Expected 4 messages in second request, got " ++ show (V.length (Chat.messages secondReq))
+
+        describe "solveWithAgentLoop (tool enrichment)" $ do
+            it "merges programmatic fields into tool args before exec" $ \app -> do
+                argsRef <- newIORef (Nothing :: Maybe Value)
+                let toolCall1 = TC.ToolCall_Function
+                        { TC.id = "call_1"
+                        , TC.function = TC.Function
+                            { TC.name = "secure_query"
+                            , TC.arguments = "{\"secureRequestSql\": \"SELECT 1\"}"
+                            }
+                        }
+                    firstResponse = mockCompletion "Running query." (Just (V.fromList [toolCall1])) "tool_calls"
+                    secondResponse = mockCompletion "{\"status\": \"ok\"}" Nothing "stop"
+                responsesRef <- newIORef [firstResponse, secondResponse]
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
+                        atomicModifyIORef' responsesRef $ \case
+                            [] -> error "No more mock responses"
+                            (r:rest) -> (rest, r)
+                    }
+                    mockExec = ToolCallExec $ \_ argsValue -> do
+                        writeIORef argsRef (Just argsValue)
+                        pure $ object ["result" .= ("done" :: Text)]
+                    req :: AgentRequest Value =
+                        withToolEnrichment
+                            (enrichTool SecureRequestTool (SecureCtx "u42"))
+                            (mkAgentRequest ["test"] ["test"] 5)
+                result <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoop req)
+                result `shouldBe` Just (object ["status" .= ("ok" :: Text)])
+                capturedArgs <- readIORef argsRef
+                case capturedArgs of
+                    Just (Object km) -> do
+                        KM.size km `shouldBe` 2
+                        KM.lookup "secureRequestSql" km `shouldBe` Just (toJSON ("SELECT 1" :: Text))
+                        KM.lookup "secureRequestUserId" km `shouldBe` Just (toJSON ("u42" :: Text))
+                    other -> expectationFailure $ "Expected captured args object, got " ++ show other
+
+            it "defeats spoofing: enrichment overrides a model-supplied secureRequestUserId" $ \app -> do
+                argsRef <- newIORef (Nothing :: Maybe Value)
+                let toolCall1 = TC.ToolCall_Function
+                        { TC.id = "call_1"
+                        , TC.function = TC.Function
+                            { TC.name = "secure_query"
+                            , TC.arguments = "{\"secureRequestSql\": \"SELECT 1\", \"secureRequestUserId\": \"evil\"}"
+                            }
+                        }
+                    firstResponse = mockCompletion "Running query." (Just (V.fromList [toolCall1])) "tool_calls"
+                    secondResponse = mockCompletion "{\"status\": \"ok\"}" Nothing "stop"
+                responsesRef <- newIORef [firstResponse, secondResponse]
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
+                        atomicModifyIORef' responsesRef $ \case
+                            [] -> error "No more mock responses"
+                            (r:rest) -> (rest, r)
+                    }
+                    mockExec = ToolCallExec $ \_ argsValue -> do
+                        writeIORef argsRef (Just argsValue)
+                        pure $ object ["result" .= ("done" :: Text)]
+                    req :: AgentRequest Value =
+                        withToolEnrichment
+                            (enrichTool SecureRequestTool (SecureCtx "u42"))
+                            (mkAgentRequest ["test"] ["test"] 5)
+                result <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoop req)
+                result `shouldBe` Just (object ["status" .= ("ok" :: Text)])
+                capturedArgs <- readIORef argsRef
+                case capturedArgs of
+                    Just (Object km) -> do
+                        KM.size km `shouldBe` 2
+                        KM.lookup "secureRequestSql" km `shouldBe` Just (toJSON ("SELECT 1" :: Text))
+                        KM.lookup "secureRequestUserId" km `shouldBe` Just (toJSON ("u42" :: Text))
+                    other -> expectationFailure $ "Expected captured args object, got " ++ show other
+
+            it "passes args through untouched for a tool absent from the enrichment map" $ \app -> do
+                argsRef <- newIORef (Nothing :: Maybe Value)
+                let toolCall1 = TC.ToolCall_Function
+                        { TC.id = "call_1"
+                        , TC.function = TC.Function
+                            { TC.name = "get_status"
+                            , TC.arguments = "{\"q\": \"status\"}"
+                            }
+                        }
+                    firstResponse = mockCompletion "Checking." (Just (V.fromList [toolCall1])) "tool_calls"
+                    secondResponse = mockCompletion "{\"status\": \"ok\"}" Nothing "stop"
+                responsesRef <- newIORef [firstResponse, secondResponse]
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
+                        atomicModifyIORef' responsesRef $ \case
+                            [] -> error "No more mock responses"
+                            (r:rest) -> (rest, r)
+                    }
+                    mockExec = ToolCallExec $ \_ argsValue -> do
+                        writeIORef argsRef (Just argsValue)
+                        pure $ object ["result" .= ("done" :: Text)]
+                    req :: AgentRequest Value =
+                        withToolEnrichment
+                            (enrichTool SecureRequestTool (SecureCtx "u42"))
+                            (mkAgentRequest ["test"] ["test"] 5)
+                result <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoop req)
+                result `shouldBe` Just (object ["status" .= ("ok" :: Text)])
+                capturedArgs <- readIORef argsRef
+                capturedArgs `shouldBe` Just (object ["q" .= ("status" :: Text)])
+
+            it "keeps model args unchanged when the request carries no enrichment (back-compat)" $ \app -> do
+                argsRef <- newIORef (Nothing :: Maybe Value)
+                let toolCall1 = TC.ToolCall_Function
+                        { TC.id = "call_1"
+                        , TC.function = TC.Function
+                            { TC.name = "secure_query"
+                            , TC.arguments = "{\"secureRequestSql\": \"SELECT 1\"}"
+                            }
+                        }
+                    firstResponse = mockCompletion "Running query." (Just (V.fromList [toolCall1])) "tool_calls"
+                    secondResponse = mockCompletion "{\"status\": \"ok\"}" Nothing "stop"
+                responsesRef <- newIORef [firstResponse, secondResponse]
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
+                        atomicModifyIORef' responsesRef $ \case
+                            [] -> error "No more mock responses"
+                            (r:rest) -> (rest, r)
+                    }
+                    mockExec = ToolCallExec $ \_ argsValue -> do
+                        writeIORef argsRef (Just argsValue)
+                        pure $ object ["result" .= ("done" :: Text)]
+                    req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 5
+                result <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoop req)
+                result `shouldBe` Just (object ["status" .= ("ok" :: Text)])
+                capturedArgs <- readIORef argsRef
+                capturedArgs `shouldBe` Just (object ["secureRequestSql" .= ("SELECT 1" :: Text)])
 
         describe "solveWithAgentLoopContinuing (conversation continuity)" $ do
             it "replays prior turns in the second agent request" $ \app -> do

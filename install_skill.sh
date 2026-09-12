@@ -1,11 +1,35 @@
 #!/usr/bin/env sh
-# Install the lazy-circus AI skill into the user's opencode skills directory.
+# Install the lazy-circus AI skill into the user's skills directory.
 # Performs a clean mirror: stale files in the destination are removed.
-# Usage: ./install_skill.sh [destination_dir]
-#   destination_dir  parent directory where the skill folder is placed
-#                    (default: ~/.opencode/skills)
+# Usage: ./install_skill.sh [--agents|--opencode|--path <dir>]
+#   --agents      install into ~/.agents/skills (default)
+#   --opencode    install into ~/.opencode/skills
+#   --path <dir>  install into the given directory
 
 set -eu
+
+DEST_BASE="${HOME}/.agents/skills"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --agents)   DEST_BASE="${HOME}/.agents/skills" ;;
+        --opencode) DEST_BASE="${HOME}/.opencode/skills" ;;
+        --path)
+            if [ $# -lt 2 ]; then
+                printf 'Error: --path requires a directory argument\n' >&2
+                printf 'Usage: %s [--agents|--opencode|--path <dir>]\n' "$0" >&2
+                exit 1
+            fi
+            DEST_BASE="$2"
+            shift
+            ;;
+        *)
+            printf 'Error: unknown option %s\n' "$1" >&2
+            printf 'Usage: %s [--agents|--opencode|--path <dir>]\n' "$0" >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)
 SKILL_NAME="lazy-circus"
@@ -16,7 +40,6 @@ if [ ! -f "$SRC/SKILL.md" ]; then
     exit 1
 fi
 
-DEST_BASE="${1:-${HOME}/.opencode/skills}"
 DEST="$DEST_BASE/$SKILL_NAME"
 
 printf 'Installing %s skill...\n' "$SKILL_NAME"

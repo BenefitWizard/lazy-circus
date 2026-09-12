@@ -275,7 +275,7 @@ result <- callViaServiceLib (Add 3 4)
 The manual steps above (4–6) can be replaced by a single Template Haskell macro call.
 `makeServiceLib` generates the service library data type, a config record, `IsInServiceLib`
 instances, a builder function, and optional tool-call plumbing for AI integration — all from
-a list of request/response/tool-spec triples.
+a list of request/response pairs, each carrying a list of 4-element tool specs.
 
 ### When To Use TH vs Manual
 
@@ -301,27 +301,44 @@ import LazyCircus.App.Service.TH (makeServiceLib)
 -- Must appear AFTER type definitions, HasFailbackValue, FromJSON, and ToJSON instances
 makeServiceLib "AllServices"
     [ (''SimpleRequest, ''SimpleResponse,
-        [('Add, "add_numbers", "Adds two numbers together")
-        ,('Subtract, "subtract_numbers", "Subtracts two numbers")
+        [('Add, "add_numbers", "Adds two numbers together", [])
+        ,('Subtract, "subtract_numbers", "Subtracts two numbers", [])
         ])
     , (''AddExpressionRequest, ''AddExpressionResponse,
-        [('AddExpressionRequest, "add_expression", "Add an expression")
+        [('AddExpressionRequest, "add_expression", "Add an expression", [])
         ])
+    , (''SecureRequest, ''SecureResponse,
+        [('SecureRequest, "secure_query", "Run SQL as the current user", ["secureRequestUserId"])])
     ]
 ```
 
 Each entry is a triple `(''RequestType, ''ResponseType, toolSpecs)` where `toolSpecs` is a
-list of `(ConstructorName, "tool_name_string", "human-readable description")`. Pass `[]` for
-services that do not need tool-call plumbing.
+list of 4-tuples
+`(ConstructorName, "tool_name_string", "human-readable description", hiddenJsonFields)`.
+Pass `[]` for services that do not need tool-call plumbing. The fourth element lists JSON
+field names removed from the tool's parameter schema before it is advertised to the model
+(the generated schema is wrapped with `hideSchemaParams`) — use it for fields that are
+injected programmatically via tool enrichment instead of supplied by the model (see
+[ai.md](ai.md#tool-enrichment)). The canonical call site is `SimpleServiceLib.hs` in the
+`common/` directory.
 
-This generates up to fourteen things:
+Hidden names are validated at compile time:
+
+- a non-empty hidden list on a constructor that is **not a record constructor** fails
+  compilation with a clear error (sum-type constructors have no per-field schema);
+- a hidden name that matches none of the record's selectors triggers only a compile-time
+  **warning**, not an error: a custom `fieldLabelModifier` in `ToSchema` derivation can make
+  the JSON keys differ from the selector names, and the hidden names are JSON keys as they
+  appear in the schema. Verify the generated schema when using custom field-label modifiers.
+
+This generates up to fifteen things:
 
 1. **Service library type** — `data AllServices = AllServices { simpleRequestService :: ServiceHandler SimpleRequest SimpleResponse, ... }`
 2. **Config type** — `data AllServicesConfig m = AllServicesConfig { simpleRequest :: SimpleRequest -> m SimpleResponse, ... }`
 3. **`IsInServiceLib` instances** — one per pair, implementing `callFromServiceLib`
 4. **Builder function** — `mkAllServices :: (MonadUnliftIO m, ...) => AllServicesConfig m -> m (AllServices, [m ()])`
 5. **Tool enumeration type** — `data AllServicesTool = AddTool | SubtractTool | ... deriving (Enum, Bounded, ...)` (empty type when no specs)
-6. **`toolInfo` function** — maps enum values to `ToolDescription`
+6. **`toolInfo` function** — maps enum values to `ToolDescription` (parameter schemas have the spec's hidden fields removed via `hideSchemaParams`)
 7. **`allToolDescriptions`** — `[ToolDescription]` collecting all tools
 8. **`ToolCall` sum type** — `data AllServicesToolCall = SimpleRequestToolCall Text SimpleRequest | ...` (when specs present)
 9. **`ToolResponse` sum type** — `data AllServicesToolResponse = SimpleResponseToolResponse SimpleResponse | ...` (when specs present)
@@ -330,6 +347,7 @@ This generates up to fourteen things:
 12. **`toolCallName` function** — extracts the tool name from a `ToolCall` (when specs present)
 13. **`encodeToolResponse` function** — encodes a `ToolResponse` as JSON with tool name (when specs present)
 14. **Smart constructors** `aiScriptWithAll` and `aiScriptWith` — wrap AI scripts with tool descriptions (when specs present)
+15. **`IsTool` instance** — `instance IsTool AllServicesTool` providing `toolName :: AllServicesTool -> Text`, the key type used to attach tool enrichment (when specs present; no instance is generated for an empty tool list)
 
 ### Step 3. Write Handler Functions
 
@@ -397,6 +415,16 @@ evalScript $ aiScriptWith [AddTool, SubtractTool] $ ask myRequest
 - **Redundant constraint warning.** GHC may emit `-Wredundant-constraints` for the generated
   `mkAllServices` because `HasFailbackValue` constraints are implied by the instances. This is
   harmless.
+- **Hidden fields require a record constructor.** A tool spec with a non-empty hidden-field list
+  on a sum-type constructor (`Add`, `Subtract`, ...) does not compile — hidden fields are
+  removed from the record's parameter schema only.
+- **Hidden names are JSON keys, not selector names.** A hidden name that matches no selector
+  only produces a compile-time warning (a custom `fieldLabelModifier` can make JSON keys differ
+  from selector names), and the runtime `hideSchemaParams` treats absent keys as a no-op — double-check
+  hidden names against the actual schema when using custom `ToSchema` derivations.
+- **All `makeServiceLib` call sites must migrate at once.** Tool specs are 4-tuples; 3-tuple
+  specs no longer compile, and the spec list must be homogeneous (mixing 3- and 4-tuples in one
+  list is a type error).
 
 ### Checklist For TH Service Registration
 

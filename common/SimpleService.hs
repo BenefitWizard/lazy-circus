@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 -- ^ Suppressed intentionally: SimpleRequest uses partial record fields
@@ -12,7 +13,7 @@
 -- full TH code generation path.
 module SimpleService where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), withObject, (.:), (.=), object)
+import Data.Aeson (FromJSON (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON, withObject, (.:), (.=), object)
 import Data.Char (toLower)
 import Data.List (stripPrefix)
 import Data.OpenApi.Internal.Schema (genericDeclareNamedSchema)
@@ -49,6 +50,29 @@ data AddExpressionRequest = AddExpressionRequest
 -- | Result of expression processing.
 data AddExpressionResponse = AddExpressionResult
     { addExpressionResultValue :: Text -- ^ the processed expression text
+    }
+    deriving (Show, Eq, Generic)
+
+-- | Request to run an SQL query on behalf of the current user.
+-- JSON keys equal selector names ("secureRequestUserId", "secureRequestSql");
+-- "secureRequestUserId" is the field hidden from the secure_query tool schema.
+data SecureRequest = SecureRequest
+    { secureRequestUserId :: Text -- ^ identifier of the user running the query
+    , secureRequestSql :: Text    -- ^ the SQL text to run
+    }
+    deriving (Show, Eq, Generic)
+
+-- | Enrichment context injected into secure-query tool arguments.
+-- JSON key must be exactly "secureRequestUserId", matching the SecureRequest
+-- field hidden from the tool schema.
+data SecureCtx = SecureCtx
+    { secureRequestUserId :: Text -- ^ identifier of the user running the query
+    }
+    deriving (Show, Eq, Generic)
+
+-- | Result of a secure query.
+data SecureResponse = SecureResponse
+    { secureRequestResult :: Text -- ^ the query result text
     }
     deriving (Show, Eq, Generic)
 
@@ -91,6 +115,12 @@ instance ToSchema AddExpressionRequest where
 -- | Default generic ToSchema for AddExpressionResponse.
 instance ToSchema AddExpressionResponse
 
+-- | Generic ToSchema for SecureRequest with JSON keys equal to selector names.
+instance ToSchema SecureRequest where
+    declareNamedSchema = genericDeclareNamedSchema defaultSchemaOptions
+        { fieldLabelModifier = id
+        }
+
 -- -- Aeson instances (required by TH-generated FromJSON/ToJSON constraints when tool specs are present)
 
 instance FromJSON SimpleRequest where
@@ -111,6 +141,21 @@ instance FromJSON AddExpressionRequest where
 instance ToJSON AddExpressionResponse where
     toJSON (AddExpressionResult t) = object ["result" .= t]
 
+-- | Default generic decoding: JSON keys equal selector names.
+instance FromJSON SecureRequest where
+    parseJSON = genericParseJSON defaultOptions
+
+-- | Default generic encoding: JSON keys equal selector names.
+instance ToJSON SecureRequest where
+    toJSON = genericToJSON defaultOptions
+
+-- | Default generic encoding; the key is exactly "secureRequestUserId".
+instance ToJSON SecureCtx where
+    toJSON = genericToJSON defaultOptions
+
+instance ToJSON SecureResponse where
+    toJSON (SecureResponse t) = object ["result" .= t]
+
 -- -- Handlers
 
 -- | Processes a simple arithmetic request.
@@ -125,6 +170,11 @@ handleAddExpressionRequest :: AddExpressionRequest -> IO AddExpressionResponse
 handleAddExpressionRequest AddExpressionRequest{addExpressionRequestExpression} =
     pure $ AddExpressionResult (addExpressionRequestExpression <> "!")
 
+-- | Handles a secure query by echoing the user and the SQL text.
+handleSecureRequest :: SecureRequest -> IO SecureResponse
+handleSecureRequest SecureRequest{secureRequestUserId, secureRequestSql} =
+    pure $ SecureResponse (secureRequestUserId <> ": " <> secureRequestSql)
+
 -- -- Failback values
 
 -- | Neutral failback value for SimpleResponse.
@@ -134,3 +184,7 @@ instance HasFailbackValue SimpleResponse where
 -- | Neutral failback value for AddExpressionResponse.
 instance HasFailbackValue AddExpressionResponse where
     failbackValue = AddExpressionResult ""
+
+-- | Neutral failback value for SecureResponse.
+instance HasFailbackValue SecureResponse where
+    failbackValue = SecureResponse ""

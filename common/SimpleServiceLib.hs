@@ -19,6 +19,8 @@ import RIO
 import SimpleService (
     AddExpressionRequest (..),
     AddExpressionResponse (..),
+    SecureRequest (..),
+    SecureResponse (..),
     SimpleRequest (..),
     SimpleResponse (..),
  )
@@ -26,7 +28,10 @@ import SimpleService (
 {- | Generate the AllServices service library with non-empty tool specs.
 Tool specs exercise the full TH code generation path:
 enum type, ToolCall\/ToolResponse, FromJSON dispatch, executeToolCall,
-toolCallName, encodeToolResponse, and smart constructors.
+toolCallName, encodeToolResponse, IsTool instance, and smart constructors.
+The fourth element of each tool spec lists JSON fields hidden from the
+tool's parameter schema; secure_query hides "secureRequestUserId", which
+is injected programmatically via 'SecureCtx'.
 -}
 makeServiceLib
     "AllServices"
@@ -34,15 +39,22 @@ makeServiceLib
         ( ''SimpleRequest
         , ''SimpleResponse
         ,
-            [ ('Add, "add_numbers", "Add two numbers together")
-            , ('Subtract, "subtract_numbers", "Subtract two numbers")
+            [ ('Add, "add_numbers", "Add two numbers together", [])
+            , ('Subtract, "subtract_numbers", "Subtract two numbers", [])
             ]
         )
     ,
         ( ''AddExpressionRequest
         , ''AddExpressionResponse
         ,
-            [ ('AddExpressionRequest, "add_expression", "Add an expression")
+            [ ('AddExpressionRequest, "add_expression", "Add an expression", [])
+            ]
+        )
+    ,
+        ( ''SecureRequest
+        , ''SecureResponse
+        ,
+            [ ('SecureRequest, "secure_query", "Run SQL as the current user", ["secureRequestUserId"])
             ]
         )
     ]
