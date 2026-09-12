@@ -52,7 +52,7 @@ negativePilot = do
     r1 <- waitForReply
     guardWith "deliberately wrong expectation" (r1 == "this text is never sent")
 
--- | T9 trivial smoke: a single /start turn whose reply is the welcome text.
+-- | Trivial smoke: a single /start turn whose reply is the welcome text.
 startPilot :: TelegramTestScript Text
 startPilot = do
     _ <- sendMessage "/start"
@@ -104,7 +104,7 @@ spec = aroundAll withBotTestApp $ do
             (_mailboxes, result) <- runTgTest app negativePilot
             result `shouldSatisfy` isLeft
 
-    describe "tgTest: /start smoke (T9)" $ do
+    describe "tgTest: /start smoke" $ do
         it "returns the welcome text from a single /start turn" $ \app -> do
             (_mailboxes, result) <- runTgTest app startPilot
             case result of

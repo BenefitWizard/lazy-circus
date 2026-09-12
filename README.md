@@ -40,6 +40,7 @@ Lazy Circus ships with a rich set of built-in capabilities ready for production 
 * **Mail Integration:** A robust email effect for composing and sending transactional emails.
 * **AI Provider Integration (DeepSeek):** AI effect DSL tailored for interacting with LLM providers like DeepSeek. It features out-of-the-box support for strict structured responses, a request-level `AIParams` overlay — a right-biased `Monoid` assembled from `with*` smart constructors (`withModel`, `withTemperature`, `withMaxCompletionTokens`, …) via `requestParams` / `agentParams` — for OpenAI sampling parameters, an XML-like prompt templating language (`POML`) which significantly improves prompt adherence, a `makePoml` TemplateHaskell macro that compiles `.poml` files into typed Haskell (`Input -> [POML]`) at compile time (with automatic recompilation on file edit), a `<let src="..."/>` declaration that inlines an external file (e.g. a JSON response-format schema) verbatim into a prompt at compile time, a pure `parsePomlText` parser for runtime/test use, a multi-turn `Conversation` handle that threads context across calls, and an agent loop (`solveWithAgent`) that runs a ReAct cycle with tool use against registered services.
 * **Production & Test Interpreters:** Two distinct performers (`DefaultPerformer` and `TestInterpreter`). The test runtime keeps the same shared-runner architecture as production, but swaps capabilities at the edges: DB can stay real, while Telegram, mail, AI, logging, and async work are captured through mocks in the capability layer.
+* **Executable BDD Feature Specs (`lazy-circus-testing`):** A separate subpackage that turns Gherkin `.feature` files into hspec scenarios over the app's own step dictionary — a pure Gherkin-subset parser, a quoted-parameter pattern matcher, an STM observation journal with cursor waits, and an hspec runner whose coverage meta-test rejects any spec step not backed by code before a single scenario runs. hspec lives here and only here; the core library stays test-dependency-free.
 * **Structured Async Logging:** High-performance, asynchronous structured logging available universally across all effect types. It supports nested log contexts (e.g., automatically attaching a `user_id` or `trace_id` to all subsequent nested calls).
 * **Service Call Infrastructure:** A transparent mechanism for running parallel typed workers with a standardized request/response interface. When the application needs concurrent background workers that process requests one at a time, register them through `LazyCircus.App.Service` and call from scenarios with `callService` — no coupling to concrete implementations. The `makeServiceLib` Template Haskell macro generates the service library data type, config, dispatch instances, builder function, and optional tool-call plumbing for AI integration from a list of request/response/tool-spec triples.
 * **AI Coding Agent Skill:** A pre-configured custom AI skill instruction set located in `docs/skills/lazy-circus/` to teach GitHub Copilot (or other AI assistants) the architectural patterns and conventions of Lazy Circus.
@@ -96,6 +97,25 @@ extra-deps:
   - github: "BenefitWizard/lazy-circus"
     commit: "<commit-hash>"
 ```
+
+**Using the `lazy-circus-testing` subpackage (BDD specs, mocks, `tgTest`):**
+
+The testing layer ships as a second package inside the same repository. Pin both from
+one commit via `subdirs` (the root `.` is supported by stack and cabal):
+
+```yaml
+extra-deps:
+  - git: "https://github.com/BenefitWizard/lazy-circus.git"
+    commit: "<commit-hash>"
+    subdirs:
+      - .
+      - testing
+```
+
+Then add `lazy-circus-testing` to your test dependencies (it already depends on
+`lazy-circus`, so the core comes along). The transitive git dependencies of the core
+(`telegram-bot-simple`, `beam`, the `openai` fork, …) must be listed in your own
+`extra-deps` — pins do not travel with the pin.
 
 ## Table of Contents
 
@@ -277,6 +297,7 @@ dbScript myDb ReadWrite myDbScript :: Script b
 - `withLogContext`, `withLogEntry`, `with2LogEntries` — logging context
 - `getExtraContext`, `readFromExtraContext`, `getFeatureFlag` — configuration
 - `runAsync` — asynchronous execution
+- `runAsyncAfter` — deferred asynchronous execution: a one-shot timer that fires the action once, not before the given delay, on a worker of the async pool (`delay <= 0` = immediate)
 - `runArbitraryIO` — last-resort escape hatch that runs an arbitrary `IO`; runs for real in both production and tests (cannot be mocked), so prefer a scene language or service
 - `callService` — call a registered service via the service library
 
@@ -354,6 +375,10 @@ runRIO app $ runDefaultPerformer $ run @Script @serviceLib myScenario
 --  n = 0 is clamped to 1 and n > 1024 to 1024, each with a warning)
 asyncThread <- async $ runRIO app $
     runAsyncWorkerPool 4 (runDefaultPerformer . run @Script @serviceLib)
+
+-- Start the timer service that moves due runAsyncAfter actions into the
+-- shared queue. WARNING: forgot to start it → deferred actions never fire.
+timerThread <- async $ runRIO app runTimerService
 ```
 
 ### Requirements for `DefaultApp serviceLib` Environment
@@ -372,6 +397,8 @@ asyncThread <- async $ runRIO app $
 - `JWTSettings` — authorization
 - `ExtraContext` — arbitrary configuration (`HashMap Text Text`)
 - `ScheduledActions` — queue of async tasks, drained by `runAsyncWorker` / `runAsyncWorkerPool`
+- `TimedActions` — registry of deferred actions scheduled via `runAsyncAfter`, kept sorted by
+  deadline; served by `runTimerService`, which moves due programs into `ScheduledActions`
 - `serviceLib` — in-process service handlers (or `NoServiceLib`)
 - `appToolDescriptions` — tool descriptions available to AI interpreters
 - `toolCallExec` — closure that dispatches named tool calls with JSON arguments
@@ -432,7 +459,8 @@ withTransactionRLS (RLSContext [("circus_id", "42")]) $ do
 
 ## 7. Testing
 
-The `LazyCircus.Testing.Performer` module provides a mock interpreter for tests:
+The `LazyCircus.Testing.Performer` module (shipped in the `lazy-circus-testing`
+subpackage, module names unchanged) provides a mock interpreter for tests:
 
 ### Test Runtime Architecture
 
@@ -449,7 +477,7 @@ What changes is the capability layer underneath that runner:
 - Mail uses real mail building but mocked send capture
 - AI returns mock answers (`Nothing` by default)
 - HTTP executes real servant-client requests via the configured manager and base URL
-- `runAsync` records deferred scenarios instead of executing them (default; with `tcAsync = Real` the worker is spawned through the same test interpreter)
+- `runAsync` records deferred scenarios instead of executing them, and `runAsyncAfter` captures `(delay, scenario)` pairs in the `scheduledTimers` buffer (default; a single `tcAsync` knob controls both primitives — with `tcAsync = Real` the worker is spawned through the same test interpreter)
 - logging is captured as structured messages with context and call-site metadata
 
 This shared-runner design lets tests validate orchestration behavior very close to production while
@@ -516,6 +544,7 @@ addTgDownloads tgMock [(FileId "doc-2", moreBytes)]
 | DB | Real execution against DB (requires test database) |
 | Logging | Capture in ref-lists (no production queue writes) |
 | `runAsync` | Capture ScenarioProgram without execution (default `tcAsync = Mocked`; `tcAsync = Real` spawns the worker so its side effects land in the capture buffers) |
+| `runAsyncAfter` | Capture `(delay, ScenarioProgram)` pairs without execution — same single `tcAsync` knob (default `Mocked` captures into the `scheduledTimers` buffer; `Real` spawns the worker once the delay elapses, so its side effects land in the capture buffers) |
 
 ### Common Assertions
 
@@ -523,6 +552,8 @@ addTgDownloads tgMock [(FileId "doc-2", moreBytes)]
 - use `readScheduledTgRequests` to inspect deferred Telegram sends
 - use `readOutgoingMailbox` + `OutgoingKind` (`OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` / `OutDeleteMessage`) to assert on side-effect kinds and ordering, including the incremental `MessageId` stamped on each send
 - use `readScheduledScenarios` to inspect `runAsync` capture
+- use `readScheduledTimers` to inspect `runAsyncAfter` captures (`(delay, program)` pairs in capture order; the buffer is not cleared)
+- use `fireScheduledTimers` to execute captured timer programs immediately in capture order (clears the buffer; a second call is a no-op)
 - use `readLogWithContext` when you need to assert `withLogContext`, `lang`, or call-site metadata
 - if needed, rerun a captured async scenario in the same test runtime to verify its downstream effects
 
@@ -559,6 +590,41 @@ For building fake `Update`s in synchronous handler tests, use
 `test/BotHandlerSpec.hs` for worked examples, and the skill reference
 ([tg-test.md](docs/skills/lazy-circus/reference/tg-test.md))
 for the full DSL.
+
+### Executable BDD Feature Specs (`gherkinSpec`)
+
+The subpackage also ships a BDD layer: Gherkin `.feature` files on your own step
+vocabulary, executed as hspec scenarios over the mock runtime. A feature file:
+
+```gherkin
+Feature: Echo bot dialog
+  Scenario: echoes the words of the user
+    Given the echo bot is awake
+    When пользователь отправляет "привет, эхо"
+    Then бот отвечает сообщением "привет, эхо"
+    And бот отвечает сообщением содержит "привет"
+```
+
+is registered against a step dictionary and handed to the runner:
+
+```haskell
+gherkinSpec
+    (FeatureInline "echo.feature" echoFeature)
+    (\scenario -> pure (echoRegistryFor scenario))   -- registry per scenario
+    bootstrap                                        -- app bootstrap, fresh journal per scenario
+    echoVerifier                                     -- post-scenario assertions on the journal
+```
+
+The runner builds `describe`/`it` per scenario (each Outline row becomes its own `it`),
+runs a coverage meta-test FIRST — any step without a registered definition fails as one
+red listing `feature / scenario / line / step text`, before a single scenario executes —
+reports ambiguous registry patterns, and turns `@blocked` scenarios into visible
+pending skips. Telegram effects are journaled as `Observation` values in the same STM
+transaction that fills the mock mailbox, and `Then` steps consume them with
+`awaitObservation` (deterministic waits, explicit timeouts). See
+[reference/bdd.md](docs/skills/lazy-circus/reference/bdd.md) for the grammar subset,
+step-definition contract, journal semantics, and a worked example
+(`testing/test/Bdd/EchoSmokeSpec.hs` runs entirely without PostgreSQL).
 
 ---
 
@@ -731,14 +797,17 @@ cp .env.example .env    # configure API keys and tokens
 ## 11. Build and Tests
 
 ```bash
-# Update cabal file (required before building)
-hpack
+# Update cabal files (required before building — two packages)
+hpack && hpack testing
 
 # Build project
 stack build
 
-# Run tests
+# Run tests (root suite; DB tests need PostgreSQL)
 stack test
+
+# Run the testing-subpackage suite (mocks + BDD specs; no PostgreSQL needed)
+stack test lazy-circus-testing
 ```
 
-DB tests require a running PostgreSQL with user `postgres` (password `my_password`) on `127.0.0.1:5432`. Tests create and drop the `lazy_circus_test` database automatically.
+DB tests require a running PostgreSQL with user `postgres` (password `my_password`) on `127.0.0.1:5432`. Tests create and drop the `lazy_circus_test` database automatically. The `lazy-circus-testing` suite never touches the database — it passes with PostgreSQL stopped.

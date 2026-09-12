@@ -1,5 +1,5 @@
 --   PURPOSE: Re-export the public Telegram scripting language and interpreter surface so backend scripts can depend on a stable facade instead of the underlying modules.
---   SCOPE: Public re-exports for the Telegram interpreter typeclass, runner, algebra, smart constructors, and script alias used by control programs.
+--   SCOPE: Public re-exports for the Telegram interpreter typeclass, runner, algebra, smart constructors, script alias, and Stars payment helpers used by control programs.
 --   DEPENDS: M-LIB-LANG-TELEGRAM-CLASS, M-LIB-LANG-TELEGRAM-LANG
 
 -- | Stable facade for the Telegram scripting language used across backend scripts.
@@ -14,12 +14,15 @@ module LazyCircus.Scene.Telegram (
   getBotName,
   sendMessage,
   sendDocument,
+  sendPoll,
+  sendInvoice,
   sendImportantMessage,
   scheduleMessage,
   scheduleMessages,
   setBotCommands,
   setMessageReaction,
   answerCallbackQuery,
+  answerPreCheckoutQuery,
   editMessageText,
   deleteMessage,
   TelegramScript,
@@ -33,6 +36,10 @@ module LazyCircus.Scene.Telegram (
   FileValidationError (..),
   telegramMaxDownloadBytes,
   fileSha256Hex,
+  -- Stars-payment helper re-exports
+  StarsPackage (..),
+  mkStarsInvoiceRequest,
+  mkPreCheckoutApproval,
 )
 where
 
@@ -66,6 +73,12 @@ import LazyCircus.Scene.Telegram.Lang (sendMessage)
 import LazyCircus.Scene.Telegram.Lang (sendDocument)
 
 
+import LazyCircus.Scene.Telegram.Lang (sendPoll)
+
+
+import LazyCircus.Scene.Telegram.Lang (sendInvoice)
+
+
 import LazyCircus.Scene.Telegram.Lang (sendImportantMessage)
 
 
@@ -84,6 +97,9 @@ import LazyCircus.Scene.Telegram.Lang (setMessageReaction)
 import LazyCircus.Scene.Telegram.Lang (answerCallbackQuery)
 
 
+import LazyCircus.Scene.Telegram.Lang (answerPreCheckoutQuery)
+
+
 import LazyCircus.Scene.Telegram.Lang (editMessageText)
 
 
@@ -97,4 +113,13 @@ import LazyCircus.Scene.Log (slogError, slogInfo, slogSensitive, slogWarn, swith
 
 
 import LazyCircus.Telegram.FileCheck (FileValidationError (..), fileSha256Hex, telegramMaxDownloadBytes)
+
+
+import LazyCircus.Telegram.Stars (StarsPackage (..))
+
+
+import LazyCircus.Telegram.Stars (mkStarsInvoiceRequest)
+
+
+import LazyCircus.Telegram.Stars (mkPreCheckoutApproval)
 

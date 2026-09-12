@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | T9 completion spec: the 'LazyCircus.Testing.TgTest' runner's timeout path.
+{- | Spec for the 'LazyCircus.Testing.TgTest' runner's timeout path.
 
 Negative-control case: a @waitFor*@ that has no forthcoming reply aborts the DSL
 with a 'TgTestTimeout'. The first @/start@ reply is consumed under the default

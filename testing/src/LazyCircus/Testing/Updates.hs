@@ -1,3 +1,14 @@
+-- Extension set mirrored from the lazy-circus-testing package defaults
+-- (these modules rely on it after moving out of the main package's library stanza).
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE StrictData #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
@@ -19,6 +30,8 @@ module LazyCircus.Testing.Updates (
     -- * Pure builders (fixed update_id)
     mkTextUpdate,
     mkNonTextMessageUpdate,
+    mkPreCheckoutQueryUpdate,
+    mkSuccessfulPaymentUpdate,
     -- * Stateful factory
     UpdateFactory,
     newUpdateFactory,
@@ -29,6 +42,9 @@ module LazyCircus.Testing.Updates (
     mkFileUpdate,
     mkDocumentUpdate,
     mkCallbackQueryUpdate,
+    mkPollAnswerUpdate,
+    mkPreCheckoutQueryUpdateByUser,
+    mkSuccessfulPaymentUpdateByUser,
     -- * Document helpers
     mkDocument,
     -- * Defaults
@@ -40,7 +56,7 @@ import Data.Aeson (Value (Object), fromJSON, object, (.=))
 import Data.Aeson.Types (Result (..))
 import RIO
 import Telegram.Bot.API (ChatId (..), Update, UserId (..))
-import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..))
+import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..), PollId (..))
 
 -- | Build a minimal 'Update' carrying a single text message in a private chat.
 -- Used to exercise command routing and dialog logic without a live Telegram connection.
@@ -82,6 +98,38 @@ mkNonTextMessageUpdate = case fromJSON jsonVal of
             , "chat" .= object ["id" .= (1 :: Int), "type" .= ("private" :: Text)]
             ]
         ]
+
+-- | Build a minimal 'Update' carrying a @pre_checkout_query@ from the default
+-- test user: the chat-less confirmation step Telegram sends before a payment
+-- completes (the handler is expected to answer it via @answerPreCheckoutQuery@).
+-- Currency is fixed to @XTR@ (Telegram Stars).
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns a valid 'Update' whose @pre_checkout_query@ @id@,
+-- @invoice_payload@ and @total_amount@ equal the supplied values, or 'error'
+-- if the constructed JSON fails to parse (a bug in this helper).
+mkPreCheckoutQueryUpdate :: Text -> Text -> Integer -> Update
+mkPreCheckoutQueryUpdate queryId payload amount = case fromJSON jsonVal of
+    Success u -> u
+    Error err -> error $ "mkPreCheckoutQueryUpdate: failed to parse Update: " <> err
+  where
+    jsonVal = preCheckoutQueryPayload 0 defaultTestUserId queryId payload amount
+
+-- | Build a minimal 'Update' carrying a private-chat @successful_payment@
+-- service message from the default test user/chat: the notification Telegram
+-- delivers after a payment completes. Currency is fixed to @XTR@ (Telegram
+-- Stars).
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns a valid 'Update' whose @successful_payment@
+-- @telegram_payment_charge_id@, @invoice_payload@ and @total_amount@ equal the
+-- supplied values, or 'error' if the constructed JSON fails to parse (a bug
+-- in this helper).
+mkSuccessfulPaymentUpdate :: Text -> Text -> Integer -> Update
+mkSuccessfulPaymentUpdate chargeId payload amount = case fromJSON jsonVal of
+    Success u -> u
+    Error err -> error $ "mkSuccessfulPaymentUpdate: failed to parse Update: " <> err
+  where
+    jsonVal =
+        successfulPaymentPayload 0 defaultTestUserId defaultTestChatId chargeId payload amount
 
 -- | Default sender used by the stateless 'sendMessage' DSL op when no explicit
 -- 'UserId' is supplied. A plausible non-bot user id.
@@ -179,6 +227,49 @@ mkCallbackQueryUpdate factory userId chatId (MessageId msgIdNum) cbData =
     buildUpdate factory $ \uid ->
         callbackQueryPayload uid userId chatId msgIdNum cbData
 
+-- | Build a @poll_answer@ 'Update' from a specific user who answered a poll,
+-- selecting the given option ids. Poll answers are chat-less updates — they
+-- carry no @message@ and no chat, so 'updateChatId' returns 'Nothing' on the
+-- result. This property is load-bearing: handlers must survive chat-less
+-- updates, and the demo's poll_answer handling is exercised through this
+-- builder precisely because no chat id can be extracted.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns a valid 'Update' whose @poll_answer.poll_id@ equals
+-- the supplied 'PollId' (encoded as a JSON string), whose @option_ids@ equal
+-- the supplied list, and whose @updateChatId@ is 'Nothing'; 'error' on parse
+-- failure (a bug in this helper).
+mkPollAnswerUpdate :: UpdateFactory -> UserId -> PollId -> [Int] -> IO Update
+mkPollAnswerUpdate factory userId (PollId pollIdText) optionIds =
+    buildUpdate factory $ \uid ->
+        pollAnswerPayload uid userId pollIdText optionIds
+
+-- | Build a @pre_checkout_query@ 'Update' from a specific user. Like a
+-- @poll_answer@ it is chat-less — it carries no @message@, so 'updateChatId'
+-- returns 'Nothing' on the result and handlers must resolve the sender through
+-- the query's mandatory @from@ object.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns a valid 'Update' with a fresh @update_id@ whose
+-- @pre_checkout_query@ @id@, @invoice_payload@ and @total_amount@ equal the
+-- supplied values; 'error' on parse failure (a bug in this helper).
+mkPreCheckoutQueryUpdateByUser :: UpdateFactory -> UserId -> Text -> Text -> Integer -> IO Update
+mkPreCheckoutQueryUpdateByUser factory userId queryId payload amount =
+    buildUpdate factory $ \uid ->
+        preCheckoutQueryPayload uid userId queryId payload amount
+
+-- | Build a message 'Update' carrying a @successful_payment@ service object
+-- from a specific user in a specific chat. The carrier message has no @text@;
+-- the payment details ride in @message.successful_payment@, and the
+-- @message_id@ mirrors the fresh @update_id@ like the other message payloads.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns a valid 'Update' with a fresh @update_id@ whose
+-- @successful_payment@ @telegram_payment_charge_id@, @invoice_payload@ and
+-- @total_amount@ equal the supplied values; 'error' on parse failure (a bug
+-- in this helper).
+mkSuccessfulPaymentUpdateByUser :: UpdateFactory -> UserId -> ChatId -> Text -> Text -> Integer -> IO Update
+mkSuccessfulPaymentUpdateByUser factory userId chatId chargeId payload amount =
+    buildUpdate factory $ \uid ->
+        successfulPaymentPayload uid userId chatId chargeId payload amount
+
 -- | Internal: allocate the next update_id and parse the constructed payload.
 buildUpdate :: UpdateFactory -> (Int -> Value) -> IO Update
 buildUpdate factory mkPayload = do
@@ -252,6 +343,62 @@ callbackQueryPayload uid (UserId userNum) (ChatId chatNum) msgIdNum cbData =
                 , "text" .= ("" :: Text)
                 ]
             , "data" .= cbData
+            ]
+        ]
+
+-- | JSON for a @poll_answer@ wrapped in an 'Update'. Chat-less by nature:
+-- contains no @chat@ / @message@ field, only the poll id (a JSON string),
+-- the selected option ids, and the answering user.
+pollAnswerPayload :: Int -> UserId -> Text -> [Int] -> Value
+pollAnswerPayload uid (UserId userNum) pollIdText optionIds =
+    Object $ mconcat
+        [ "update_id" .= uid
+        , "poll_answer" .= object
+            [ "poll_id" .= pollIdText
+            , "option_ids" .= optionIds
+            , "user" .= userObject userNum
+            ]
+        ]
+
+-- | JSON for a @pre_checkout_query@ wrapped in an 'Update'. Chat-less by
+-- nature: contains no @chat@ / @message@ field, only the query id, the
+-- mandatory sender object, and the payment summary. Currency is fixed to
+-- @XTR@ (Telegram Stars).
+preCheckoutQueryPayload :: Int -> UserId -> Text -> Text -> Integer -> Value
+preCheckoutQueryPayload uid (UserId userNum) queryId payload amount =
+    Object $ mconcat
+        [ "update_id" .= uid
+        , "pre_checkout_query" .= object
+            [ "id" .= queryId
+            , "from" .= userObject userNum
+            , "currency" .= ("XTR" :: Text)
+            , "total_amount" .= amount
+            , "invoice_payload" .= payload
+            ]
+        ]
+
+-- | JSON for a private-chat message carrying a @successful_payment@ service
+-- object wrapped in an 'Update'. The message has no @text@ — @message_id@,
+-- @date@ and @chat@ alone satisfy the 'Update' parser. Currency is fixed to
+-- @XTR@ (Telegram Stars); @provider_payment_charge_id@ is required by the
+-- 'Update' parser, so a distinguishable placeholder derived from the charge id
+-- is serialized alongside it.
+successfulPaymentPayload :: Int -> UserId -> ChatId -> Text -> Text -> Integer -> Value
+successfulPaymentPayload uid (UserId userNum) (ChatId chatNum) chargeId payload amount =
+    Object $ mconcat
+        [ "update_id" .= uid
+        , "message" .= object
+            [ "message_id" .= uid
+            , "date" .= (0 :: Int)
+            , "from" .= userObject userNum
+            , "chat" .= chatObject chatNum
+            , "successful_payment" .= object
+                [ "currency" .= ("XTR" :: Text)
+                , "total_amount" .= amount
+                , "invoice_payload" .= payload
+                , "telegram_payment_charge_id" .= chargeId
+                , "provider_payment_charge_id" .= ("provider-" <> chargeId)
+                ]
             ]
         ]
 

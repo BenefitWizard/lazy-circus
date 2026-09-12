@@ -8,7 +8,11 @@ Read this when:
 - building fake Telegram `Update`s (`LazyCircus.Testing.Updates`)
 
 For end-to-end tests that drive the bot's own update handler (routing, dialog state,
-inline keyboards), see [tg-test.md](tg-test.md).
+inline keyboards), see [tg-test.md](tg-test.md). For executable Gherkin feature specs
+(`.feature` files, step registries, the observation journal), see [bdd.md](bdd.md).
+
+Everything in this reference lives in the `lazy-circus-testing` subpackage (`testing/`),
+not in the core library — the module names (`LazyCircus.Testing.*`) are unchanged.
 
 ## Contents
 
@@ -47,7 +51,7 @@ all mockable sub-languages are mocked:
 - Mail capability reuses real mail construction but captures sends (`tcMailSend = Mocked`)
 - AI capability uses a transport-level mock with FIFO canned responses (`tcAI = Mocked`)
 - HTTP capability executes real servant-client requests via the configured manager and base URL (always real)
-- async capability captures scheduled scenarios instead of executing them (`tcAsync = Mocked`, the default); with `tcAsync = Real` it spawns the scenario on a background thread through the same test interpreter
+- async capability captures scheduled scenarios (`runAsync`) and timers (`runAsyncAfter`, each paired with its delay) instead of executing them (`tcAsync = Mocked`, the default — one knob for both); with `tcAsync = Real` it spawns the scenario on a background thread through the same test interpreter
 - logging capability captures structured entries instead of draining the production queue
 
 Each mockable sub-language (Telegram, AI, Mail-send, async) can be switched to `Real` mode individually via
@@ -63,12 +67,13 @@ capabilities at the edges.
 | `Mocks serviceLib` | collected mock state (Tg requests, mails, logs, async tasks) |
 | `TgMock` | Telegram mock with configurable response queue, staged canned downloads, and an STM `outgoingMailbox` |
 | `OutgoingMessage` | one captured outgoing Telegram side effect (kind, chat id, text, message id, reply markup) |
-| `OutgoingKind` | tag on `OutgoingMessage`: `OutSendMessage` / `OutSendDocument` / `OutSetReaction` / `OutEditMessage` / `OutDeleteMessage` |
+| `OutgoingKind` | tag on `OutgoingMessage`: `OutSendMessage` / `OutSendDocument` / `OutSendPoll` / `OutSendInvoice` / `OutSetReaction` / `OutAnswerPreCheckoutQuery` / `OutEditMessage` / `OutDeleteMessage` |
 | `MailMock` | Mail mock for capturing sent mails |
 | `Mode` | runtime mode for a sub-language: `Mocked` or `Real` |
-| `TestConfig` | per-sub-language mode selection (`tcTelegram`, `tcAI`, `tcMailSend`, `tcAsync`) |
-| `EnvWithMocks serviceLib` | environment extended with mock state and `TestConfig` |
-| `TestInterpreter serviceLib a` | the test-performer monad |
+| `TestConfig app` | per-sub-language mode selection (`tcTelegram`, `tcAI`, `tcMailSend`, `tcAsync`) plus optional observation journaling (`tcJournal`, `tcMailHook`, `tcAiHook`) |
+| `EnvWithMocks serviceLib app` | environment extended with mock state and `TestConfig app` |
+| `TestInterpreter serviceLib app a` | the test-performer monad |
+| `ObservationLog app` / `Observation app` | append-only observation journal (`LazyCircus.Testing.Bdd.Journal`); wired via `tcJournal` — see [bdd.md](bdd.md) |
 | `OnSendMessageRequest` | callback type for custom Telegram send handling |
 
 ## Main Helpers
@@ -93,20 +98,22 @@ capabilities at the edges.
 | `readSentMails` | read outgoing mails |
 | `readAiRequests` | read captured AI chat-completion requests (Mocked mode only) |
 | `readScheduledScenarios` | read captured async scenario requests |
+| `readScheduledTimers` | read captured `runAsyncAfter` requests as `(delay, program)` pairs, in capture order (buffer not cleared) |
+| `fireScheduledTimers` | execute captured timer programs immediately, in capture order, through the same test interpreter and clear the buffer (idempotent) |
 
 Signatures (module `LazyCircus.Testing.Performer`; `sl` = `serviceLib`):
 
 ```haskell
 makeMocks                 :: IO (Mocks sl)
-runWithMocks              :: DefaultApp sl -> Mocks sl -> TestInterpreter sl a -> IO a
-runWithDefaultMocks       :: DefaultApp sl -> TestInterpreter sl a -> IO (Mocks sl, a)
-runWithConfig             :: DefaultApp sl -> TestConfig -> Mocks sl -> TestInterpreter sl a -> IO a
-runWithDefaultConfig      :: DefaultApp sl -> TestConfig -> TestInterpreter sl a -> IO (Mocks sl, a)
-runInsideWithConfig       :: TestConfig -> Mocks sl -> TestInterpreter sl a -> RIO (DefaultApp sl) a
-runInsideWithDefaultConfig:: TestConfig -> TestInterpreter sl a -> RIO (DefaultApp sl) (Mocks sl, a)
-runScenarioProgram        :: ScenarioProgram Script sl a -> TestInterpreter sl a
-runScript                 :: Script a -> TestInterpreter sl a
-runTestInterpreter        :: TestInterpreter sl a -> RIO (EnvWithMocks sl) a
+runWithMocks              :: DefaultApp sl -> Mocks sl -> TestInterpreter sl app a -> IO a
+runWithDefaultMocks       :: DefaultApp sl -> TestInterpreter sl app a -> IO (Mocks sl, a)
+runWithConfig             :: DefaultApp sl -> TestConfig app -> Mocks sl -> TestInterpreter sl app a -> IO a
+runWithDefaultConfig      :: DefaultApp sl -> TestConfig app -> TestInterpreter sl app a -> IO (Mocks sl, a)
+runInsideWithConfig       :: TestConfig app -> Mocks sl -> TestInterpreter sl app a -> RIO (DefaultApp sl) a
+runInsideWithDefaultConfig:: TestConfig app -> TestInterpreter sl app a -> RIO (DefaultApp sl) (Mocks sl, a)
+runScenarioProgram        :: ScenarioProgram Script sl a -> TestInterpreter sl app a
+runScript                 :: Script a -> TestInterpreter sl app a
+runTestInterpreter        :: TestInterpreter sl app a -> RIO (EnvWithMocks sl app) a
 
 readTgRequests            :: Mocks sl -> IO [WithImportance SendMessageRequest]
 readScheduledTgRequests   :: Mocks sl -> IO [SendMessageRequest]
@@ -114,8 +121,17 @@ readOutgoingMailbox       :: Mocks sl -> IO [OutgoingMessage]      -- destructiv
 readLog                   :: Mocks sl -> IO [AppLogMsg]
 readLogWithContext        :: Mocks sl -> IO [AppLogMsgWithContext]
 readSentMails             :: Mocks sl -> IO [Mail]
+readAiRequests            :: Mocks sl -> IO [Chat.CreateChatCompletion]
 readScheduledScenarios    :: Mocks sl -> IO [ScenarioProgram Script sl ()]
+readScheduledTimers       :: Mocks sl -> IO [(NominalDiffTime, ScenarioProgram Script sl ())]
+fireScheduledTimers       :: HasCallStack => TestInterpreter sl app ()
 ```
+
+The `app` parameter is the observation-journal slot (see `TestConfig`'s `tcJournal` /
+`tcMailHook` / `tcAiHook` below and [bdd.md](bdd.md)). It is inferred from usage;
+`defaultTestConfig :: TestConfig app` and `defaultTgTestConfig :: TgTestConfig app` stay
+polymorphic, so most call sites need no annotation — only explicit signatures gain the
+slot (use `Void` when an app records no observations of its own).
 
 Also useful for custom harnesses:
 
@@ -127,7 +143,8 @@ Also useful for custom harnesses:
 
 ## AI Mocks (Canned Completions)
 
-All helpers live in `LazyCircus.Testing.Performer` (source: `src/LazyCircus/Testing/Performer.hs`);
+All helpers live in `LazyCircus.Testing.Performer` (source:
+`testing/src/LazyCircus/Testing/Performer.hs` in the `lazy-circus-testing` subpackage);
 the canned-response type comes from `OpenAI.V1.Chat.Completions` (import qualified as `Chat`).
 
 ```haskell
@@ -141,10 +158,10 @@ makeMocksWithAi :: [Chat.ChatCompletionObject] -> IO (Mocks serviceLib)
 
 -- | runWithDefaults-style runner whose fresh mocks are pre-seeded with canned responses.
 runWithAiMocks :: App.DefaultApp serviceLib -> [Chat.ChatCompletionObject]
-               -> TestInterpreter serviceLib a -> IO (Mocks serviceLib, a)
+               -> TestInterpreter serviceLib app a -> IO (Mocks serviceLib, a)
 
 -- | Same as runWithAiMocks, but inside RIO DefaultApp (app comes from ask).
-runInsideWithAiMocks :: [Chat.ChatCompletionObject] -> TestInterpreter serviceLib a
+runInsideWithAiMocks :: [Chat.ChatCompletionObject] -> TestInterpreter serviceLib app a
                      -> RIO (App.DefaultApp serviceLib) (Mocks serviceLib, a)
 
 -- | Captured rendered requests, earliest-first. Only meaningful when tcAI = Mocked.
@@ -256,6 +273,9 @@ captures side effects; `Real` delegates to production implementations without ca
 |---|---|---|---|
 | Telegram `sendMessage` | `tcTelegram` | captures `WithImportance SendMessageRequest` in the `SomeRef` log (`readTgRequests`) AND publishes an `OutSendMessage` to the STM `outgoingMailbox` carrying a fresh incremental `MessageId`; returns the canned/default response stamped with that id | delegates to `TG.sendMessage` via `timedAndLog`; mailbox/request log stay empty |
 | Telegram `sendDocument` | `tcTelegram` | publishes an `OutSendDocument` to the `outgoingMailbox` (with a fresh incremental `MessageId`) and returns the mock `defaultResponse` stamped with that id; not added to the `readTgRequests` log | delegates to `TG.sendDocument` via `timedAndLog` |
+| Telegram `sendPoll` | `tcTelegram` | publishes an `OutSendPoll` to the `outgoingMailbox` (`omText = Just` poll question, fresh incremental `MessageId`) and returns `(PollId, Message)` with poll id `poll-<assigned id>` and the message stamped with that id | delegates to `TG.sendPoll` via `timedAndLog` |
+| Telegram `sendInvoice` | `tcTelegram` | publishes an `OutSendInvoice` to the `outgoingMailbox` (`omChatId = Just` target chat, `omText = Just` invoice title, `omMessageId` = fresh incremental id; the invoice **payload is NOT captured**) and returns the mock `defaultResponse` stamped with that id; not added to the `readTgRequests` log | delegates to `TG.sendInvoice` via `timedAndLog` |
+| Telegram `answerPreCheckoutQuery` | `tcTelegram` | publishes an `OutAnswerPreCheckoutQuery` to the `outgoingMailbox` (`omText = Just` the answered query id, no chat id, no message id) and returns `()`; the approval flag is visible only in the journal observation (`ObsTgPreCheckoutAnswer`) | delegates to `TG.answerPreCheckoutQuery` via `timedAndLog` |
 | Telegram `setMessageReaction` | `tcTelegram` | publishes an `OutSetReaction` to the `outgoingMailbox` carrying the target `MessageId` | delegates to `TG.setMessageReaction` via `timedAndLog` |
 | Telegram `editMessageText` | `tcTelegram` | publishes an `OutEditMessage` to the `outgoingMailbox`; still always returns `Nothing` | delegates to `TG.editMessageText` via `timedAndLog` (returns real response) |
 | Telegram `deleteMessage` | `tcTelegram` | publishes an `OutDeleteMessage` to the `outgoingMailbox` carrying the target `MessageId` | delegates to `TG.deleteMessage` via `timedAndLog` |
@@ -270,7 +290,7 @@ captures side effects; `Real` delegates to production implementations without ca
 | HTTP `runClient` | — (always real) | real execution via servant-client against target base URL | same |
 | DB | — (always real) | runs against a real DB (one pooled connection per script) | same |
 | Logging | — (always captured) | captured in refs, not pushed to shared queue | same |
-| `runAsync` | `tcAsync` | captures scenario without executing it (`readScheduledScenarios`) | spawns the scenario on a background thread through the same test interpreter; side effects land in the usual capture buffers / mailbox (no capture in `readScheduledScenarios`) |
+| `runAsync` / `runAsyncAfter` | `tcAsync` | one knob for both primitives: `runAsync` captures the scenario without executing it (`readScheduledScenarios`); `runAsyncAfter` captures the `(delay, scenario)` pair in the `scheduledTimers` buffer (`readScheduledTimers`, executed via `fireScheduledTimers`) | spawns the scenario on a background thread through the same test interpreter (for `runAsyncAfter` once the requested delay elapses); side effects land in the usual capture buffers / mailbox (no capture in `readScheduledScenarios` / `scheduledTimers`) |
 
 ## Typical Test Pattern
 
@@ -326,6 +346,24 @@ it "schedules background cleanup" $ do
 If you want to verify the deferred effect itself, explicitly run the captured scenario later with
 the same test runtime and then inspect the corresponding capture buffer.
 
+Deferred `runAsyncAfter` requests are captured the same way (same `tcAsync` knob), each paired
+with its requested delay. `readScheduledTimers` only reads — firing is explicit and executes the
+captured programs immediately, in capture order:
+
+```haskell
+it "schedules a delayed reminder" $ do
+    (mocks, _) <- runWithDefaultMocks app $ do
+        runScenarioProgram myScenario
+
+    timers <- readScheduledTimers mocks
+    map fst timers `shouldBe` [3600]
+
+    -- fire the captured timer programs immediately (same mocks), then assert their effects:
+    (_, ()) <- runWithConfig app defaultTestConfig mocks fireScheduledTimers
+    mails <- readSentMails mocks
+    length mails `shouldBe` 1
+```
+
 ## Debugging: Where Did My Logs Go?
 
 Scenario and scene logs are **never printed** during a test run — the test performer
@@ -377,14 +415,34 @@ switched to `Real` via `TestConfig`:
 ```haskell
 data Mode = Mocked | Real
 
-data TestConfig = TestConfig
-    { tcTelegram :: Mode   -- Telegram send/receive
-    , tcAI       :: Mode   -- AI ask / solveWithAgent
-    , tcMailSend :: Mode   -- Mail send (SMTP)
-    , tcAsync    :: Mode   -- runAsync (capture vs spawn)
+data TestConfig app = TestConfig
+    { tcTelegram :: Mode                        -- Telegram send/receive
+    , tcAI       :: Mode                        -- AI ask / solveWithAgent (direct asks AND agent loop)
+    , tcMailSend :: Mode                        -- Mail send (SMTP)
+    , tcAsync    :: Mode                        -- runAsync / runAsyncAfter (capture vs spawn; one knob for both)
+    , tcJournal  :: Maybe (ObservationLog app)  -- append one Observation per intercepted side effect
+    , tcMailHook :: Maybe (Mail -> Observation app)                       -- app projection of sent mail
+    , tcAiHook   :: Maybe (forall a. AIRequest a -> Text -> Observation app)  -- app projection of AI replies
     }
 
-defaultTestConfig :: TestConfig   -- all Mocked (backward-compatible)
+defaultTestConfig :: TestConfig app   -- all Mocked, journal and hooks unset (polymorphic)
+```
+
+With `tcJournal` set, the performer records one `Observation` per intercepted side effect:
+every Telegram operation in Mocked mode (appended in the SAME STM transaction that
+publishes to the outgoing mailbox), `runAsync` captures, and — when the hooks are also
+set — the app projections of sent mail and AI replies (in both Mocked and Real mode).
+`Nothing` disables journaling. The journal, its cursor waits (`awaitObservation`), and the
+BDD layer built on top are covered in [bdd.md](bdd.md).
+
+The Telegram observation vocabulary covers every mocked operation, including the Stars
+loop (module `LazyCircus.Testing.Bdd.Journal`):
+
+```haskell
+ObsTgInvoice{obsChatId :: Maybe ChatId, obsTitle :: Text}
+    -- ^ a sent invoice; the invoice payload is not journaled
+ObsTgPreCheckoutAnswer{obsQueryId :: Text, obsOk :: Bool}
+    -- ^ a pre-checkout answer; obsOk carries the approval flag (True for mkPreCheckoutApproval)
 ```
 
 **Mode semantics:**
@@ -394,7 +452,7 @@ defaultTestConfig :: TestConfig   -- all Mocked (backward-compatible)
 | Telegram | mailbox capture + canned responses | `TG.*` API calls (real bot token required) |
 | AI | transport intercept via `buildMockAiMethods` with FIFO canned responses | real `askAIContinuing` without override (real `cfgAiApiKey` required) |
 | Mail send | capture in `readSentMails` | real SMTP via `Mail.sendMail` |
-| Async (`runAsync`) | capture in `readScheduledScenarios` (no execution) | spawn on a background thread through the same test interpreter; side effects land in the usual capture buffers / mailbox |
+| Async (`runAsync` and `runAsyncAfter` — one `tcAsync` knob for both) | capture in `readScheduledScenarios` / `readScheduledTimers` + `fireScheduledTimers` (no execution) | spawn on a background thread through the same test interpreter; side effects land in the usual capture buffers / mailbox |
 
 DB and HTTP are **always real** — there is no mock for them. Async (`runAsync`) is the only
 sub-language whose `Real` mode still captures side effects, because the spawned worker runs
@@ -403,8 +461,8 @@ through the same test interpreter.
 **Configurable runners:**
 
 ```haskell
-runWithConfig        :: DefaultApp sl -> TestConfig -> Mocks sl -> TestInterpreter sl a -> IO a
-runWithDefaultConfig :: DefaultApp sl -> TestConfig -> TestInterpreter sl a -> IO (Mocks sl, a)
+runWithConfig        :: DefaultApp sl -> TestConfig app -> Mocks sl -> TestInterpreter sl app a -> IO a
+runWithDefaultConfig :: DefaultApp sl -> TestConfig app -> TestInterpreter sl app a -> IO (Mocks sl, a)
 ```
 
 The existing `runWithMocks` / `runWithDefaultMocks` use `defaultTestConfig` (all-mocked) and remain
@@ -461,6 +519,8 @@ without a live Telegram connection.
 |---|---|
 | `mkTextUpdate txt` | a private-chat text message |
 | `mkNonTextMessageUpdate` | a message with no `text` field (sticker/location branch) |
+| `mkPreCheckoutQueryUpdate queryId payload amount` | a chat-less `pre_checkout_query` from the default test user — no `chat`/`message`, so `updateChatId` is `Nothing`; currency fixed to `XTR` |
+| `mkSuccessfulPaymentUpdate chargeId payload amount` | a private-chat `successful_payment` service message from the default test user/chat; currency fixed to `XTR` |
 
 **Stateful `UpdateFactory`** (monotonically increasing `update_id`, for `tgTest`
 or any loop that needs distinct ids):
@@ -475,6 +535,9 @@ or any loop that needs distinct ids):
 | `mkDocumentUpdate f userId chatId doc` | a document upload carrying the full `Document` (client-declared name / MIME / size) |
 | `mkDocument fileId` | a minimal `Document` value; attach metadata via record update |
 | `mkCallbackQueryUpdate f userId chatId msgId cbData` | a `callback_query` on `msgId` |
+| `mkPollAnswerUpdate f userId pollId optionIds` | a chat-less `poll_answer` (`updateChatId` is `Nothing` on the result) |
+| `mkPreCheckoutQueryUpdateByUser f userId queryId payload amount` | a chat-less `pre_checkout_query` from a specific user (fresh `update_id`); currency fixed to `XTR` |
+| `mkSuccessfulPaymentUpdateByUser f userId chatId chargeId payload amount` | a `successful_payment` service message in a specific chat (fresh `update_id`); currency fixed to `XTR` |
 
 Defaults: `defaultTestUserId = UserId 1001`, `defaultTestChatId = ChatId 1`.
 
@@ -510,6 +573,8 @@ does not exercise the headless dispatch loop or the STM mailbox.
 
 ## Review Checklist
 
-- Are async assertions aligned with the async mode (`readScheduledScenarios` / `mbScheduledScenarioCount` for `Mocked`; capture buffers / mailbox for `Real`)?
+- Are async assertions aligned with the async mode (`readScheduledScenarios` / `readScheduledTimers` + `fireScheduledTimers` / `mbScheduledScenarioCount` for `Mocked`; capture buffers / mailbox for `Real`)?
 - Are logs read via `readLog` / `readLogWithContext` instead of expected in terminal output?
 - Are canned downloads staged by `FileId` (third `createTgMock` argument or `addTgDownloads`) before Mocked download assertions?
+- Do new `TestConfig` / `TestInterpreter` annotations carry the `app` slot (`Void` when the app records no `ObsApp` observations)?
+- When journaling is on, are app facts observed through `tcMailHook` / `tcAiHook` or `ObsApp` rather than overloading the Telegram constructors?

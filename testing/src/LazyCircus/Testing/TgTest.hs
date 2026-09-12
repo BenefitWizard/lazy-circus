@@ -1,3 +1,14 @@
+-- Extension set mirrored from the lazy-circus-testing package defaults
+-- (these modules rely on it after moving out of the main package's library stanza).
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE StrictData #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -14,7 +25,7 @@ DSL's @waitFor*@ operations consume that mailbox deterministically via STM, with
 a 'registerDelay' timeout as the only non-deterministic safety net.
 
 The runner is /generic/: it knows nothing about your handler. You supply a
-@buildAction :: TestConfig -> Mocks serviceLib -> IO (Update -> IO ())@ that
+@buildAction :: TestConfig app -> Mocks serviceLib -> IO (Update -> IO ())@ that
 wires your bot's ordinary update-driver under the test performer (so
 Telegram\/AI\/mail are mocked and replies land in the shared mailbox). The
 runner feeds fake updates the DSL produces and observes the replies. A typical
@@ -60,6 +71,8 @@ module LazyCircus.Testing.TgTest (
     sendDocumentAs,
     sendKeypress,
     sendKeypressByUser,
+    sendPreCheckoutQueryByUser,
+    sendSuccessfulPaymentByUser,
     -- ** Waiting for bot replies
     waitForReplies,
     waitForReply,
@@ -112,22 +125,25 @@ import LazyCircus.Testing.Updates
     , mkDocument
     , mkDocumentUpdate
     , mkFileUpdate
+    , mkPreCheckoutQueryUpdateByUser
+    , mkSuccessfulPaymentUpdateByUser
     , mkTextUpdateByUser
     , newUpdateFactory
     )
 
--- | Run-level configuration for 'tgTest'.
-data TgTestConfig = TgTestConfig
+-- | Run-level configuration for 'tgTest', parameterized over the app
+-- observation payload type carried by the performer config's journal and hooks.
+data TgTestConfig app = TgTestConfig
     { ttgTimeout :: !Int
       -- ^ microseconds a @waitFor*@ waits before failing with 'TgTestTimeout'
-    , ttgPerformerConfig :: !TestConfig
+    , ttgPerformerConfig :: !(TestConfig app)
       -- ^ per-sub-language performer config (Telegram MUST be 'Mocked' for
       -- 'tgTest'; see 'TgTestConfigError')
     }
 
 -- | Default config: a 2-second @waitFor*@ timeout (generous to absorb CI jitter),
 -- with the default all-mocked performer config.
-defaultTgTestConfig :: TgTestConfig
+defaultTgTestConfig :: TgTestConfig app
 defaultTgTestConfig =
     TgTestConfig
         { ttgTimeout = 2_000_000
@@ -174,6 +190,8 @@ data Mailboxes = Mailboxes
     }
 
 -- | Mutable per-run state shared between the DSL and the headless dispatch loop.
+-- Keeps only the timeout from 'TgTestConfig' (the only field the DSL reads),
+-- so the 'TelegramTestScript' monad stays parameter-free.
 data TgTestRuntime = TgTestRuntime
     { ttrQueue :: !(TBQueue Update)
     -- ^ queue fed into 'runHeadlessBot'
@@ -189,7 +207,10 @@ data TgTestRuntime = TgTestRuntime
     -- by @asyncLink@); awaited at 'tgTest' teardown so the snapshot is taken
     -- only once in-flight work has settled and no action thread can touch a
     -- closed DB connection after the surrounding app teardown
-    , ttrConfig :: !TgTestConfig
+    , ttrTimeout :: !Int
+    -- ^ microseconds a @waitFor*@ waits before failing with 'TgTestTimeout'
+    -- (seeded from 'ttgTimeout' of the run config; adjustable per sub-program
+    -- via 'withTimeout')
     , ttrFactory :: !UpdateFactory
     }
 
@@ -199,7 +220,7 @@ data TgTestRuntime = TgTestRuntime
 -- @buildAction@ will wire into the test performer.
 -- POST-CONTRACT: The returned runtime is fresh (empty queue/mailbox/deferred,
 -- zero inflight) and safe to use for exactly one 'tgTest' run.
-makeTestRuntime :: TgTestConfig -> Mocks serviceLib -> IO TgTestRuntime
+makeTestRuntime :: TgTestConfig app -> Mocks serviceLib -> IO TgTestRuntime
 makeTestRuntime cfg mocks = do
     queue <- newTBQueueIO 64
     errVar <- newTVarIO Nothing
@@ -213,7 +234,7 @@ makeTestRuntime cfg mocks = do
             , ttrDeferred = deferred
             , ttrError = errVar
             , ttrInflight = inflight
-            , ttrConfig = cfg
+            , ttrTimeout = ttgTimeout cfg
             , ttrFactory = factory
             }
 
@@ -285,8 +306,8 @@ POST-CONTRACT: The headless drain loop is cancelled; the returned 'Mailboxes'
 reflect all side effects observable once in-flight work has settled.
 -}
 tgTest ::
-    TgTestConfig ->
-    (TestConfig -> Mocks serviceLib -> IO (Update -> IO ())) ->
+    TgTestConfig app ->
+    (TestConfig app -> Mocks serviceLib -> IO (Update -> IO ())) ->
     TelegramTestScript a ->
     IO (Mailboxes, Either TgTestError a)
 tgTest cfg buildAction script = do
@@ -455,6 +476,29 @@ sendKeypressByUser userId chatId targetMsgId cbData = do
     upd <- liftIO $ mkCallbackQueryUpdate (ttrFactory rt) userId chatId targetMsgId cbData
     feedAndReturnId rt upd
 
+-- | Send a @pre_checkout_query@ from a specific user: the chat-less
+-- confirmation step Telegram delivers before a payment completes (the handler
+-- is expected to answer it via @answerPreCheckoutQuery@).
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns the update's 'UpdateId'. The update carries no
+-- @message@ (like 'sendKeypress'), so no 'MessageId' is available.
+sendPreCheckoutQueryByUser :: UserId -> Text -> Text -> Integer -> TelegramTestScript UpdateId
+sendPreCheckoutQueryByUser userId queryId payload amount = do
+    rt <- ttsAsk
+    upd <- liftIO $ mkPreCheckoutQueryUpdateByUser (ttrFactory rt) userId queryId payload amount
+    feedAndReturnId rt upd
+
+-- | Send a @successful_payment@ service message from a specific user in a
+-- specific chat: the notification Telegram delivers after a payment completes.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns the update's 'UpdateId' and the 'MessageId' of the
+-- carrier payment message.
+sendSuccessfulPaymentByUser :: UserId -> ChatId -> Text -> Text -> Integer -> TelegramTestScript (UpdateId, MessageId)
+sendSuccessfulPaymentByUser userId chatId chargeId payload amount = do
+    rt <- ttsAsk
+    upd <- liftIO $ mkSuccessfulPaymentUpdateByUser (ttrFactory rt) userId chatId chargeId payload amount
+    feedAndReturn rt upd
+
 -- | Feed a constructed update into the headless queue and return its 'UpdateId'.
 feedAndReturnId :: TgTestRuntime -> Update -> TelegramTestScript UpdateId
 feedAndReturnId rt upd = do
@@ -564,7 +608,7 @@ guardWith reason False = ttsThrow (TgTestGuardFailed reason)
 -- | Run a sub-program with a different @waitFor*@ timeout (microseconds).
 withTimeout :: Int -> TelegramTestScript a -> TelegramTestScript a
 withTimeout us =
-    ttsLocal (\rt -> rt{ttrConfig = (ttrConfig rt){ttgTimeout = us}})
+    ttsLocal (\rt -> rt{ttrTimeout = us})
 
 --------------------------------------------------------------------------------
 -- Lower-level building blocks
@@ -593,7 +637,7 @@ waitForMatching predicate awaitDesc = do
     let mailbox = ttrMailbox rt
         deferredVar = ttrDeferred rt
         errVar = ttrError rt
-        timeoutUs = ttgTimeout (ttrConfig rt)
+        timeoutUs = ttrTimeout rt
         awaitTx delay = do
             mErr <- readTVar errVar
             case mErr of

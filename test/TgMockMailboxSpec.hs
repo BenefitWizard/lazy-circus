@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | T7 completion spec: the 'LazyCircus.Testing.Performer' outgoing-mailbox
+{- | The 'LazyCircus.Testing.Performer' outgoing-mailbox
 capture and the incremental 'MessageId' stamping that backs the @tgTest@ DSL's
 @waitFor*@ correlation.
 

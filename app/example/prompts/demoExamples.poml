@@ -1,0 +1,7 @@
+<poml>
+  <let name="intro" type="string"/>
+  <examples caption="Refusals" introducer="{{intro}}">
+    <example caption="Missing required field"><input>Order without an id</input><output>Refuse politely.</output></example>
+    <example><input>Unknown customer</input><output>Ask for details.</output></example>
+  </examples>
+</poml>

@@ -22,6 +22,7 @@ module LazyCircus.Scenario (
   withLogEntry,
   with2LogEntries,
   runAsync,
+  runAsyncAfter,
   runArbitraryIO,
   callService,
   KnownHowToEval (..),
@@ -34,7 +35,7 @@ import LazyCircus.App.Log
 import LazyCircus.App.Service qualified as S
 import LazyCircus.Scene.Log
 import RIO hiding (log, logError, logInfo, logWarn)
-import RIO.Time (UTCTime)
+import RIO.Time (NominalDiffTime, UTCTime)
 
 -- | Database connection mode used to select between read-write and read-only connections.
 data DbMode = ReadWrite | ReadOnly deriving (Eq, Show)
@@ -51,6 +52,7 @@ data Scenario script serviceLib a where
   ScenarioWithLogCtx :: [(Text, Text)] -> ScenarioProgram script serviceLib b -> (b -> a) -> Scenario script serviceLib a
   GetExtraContext :: (HashMap Text Text -> a) -> Scenario script serviceLib a
   RunAsync :: ScenarioProgram script serviceLib () -> a -> Scenario script serviceLib a
+  RunAsyncAfter :: NominalDiffTime -> ScenarioProgram script serviceLib () -> a -> Scenario script serviceLib a
   RunArbitraryIO :: IO b -> (b -> a) -> Scenario script serviceLib a
   CallService ::
     (S.IsInServiceLib serviceLib request response) =>
@@ -65,6 +67,7 @@ instance Functor (Scenario script serviceLib) where
   fmap f (GetExtraContext g) = GetExtraContext (f . g)
   fmap f (ScenarioWithLogCtx values act g) = ScenarioWithLogCtx values act (f . g)
   fmap f (RunAsync act g) = RunAsync act (f g)
+  fmap f (RunAsyncAfter d act g) = RunAsyncAfter d act (f g)
   fmap f (RunArbitraryIO io g) = RunArbitraryIO io (f . g)
   fmap f (CallService req g) = CallService req (f . g)
 
@@ -81,6 +84,7 @@ class (Monad m) => ScenarioPerformer script serviceLib m where
   getExtraContext' :: m (HashMap Text Text)
   withLogContext' :: [(Text, Text)] -> ScenarioProgram script serviceLib a -> m a
   runAsync' :: ScenarioProgram script serviceLib () -> m ()
+  runAsyncAfter' :: NominalDiffTime -> ScenarioProgram script serviceLib () -> m ()
   runArbitraryIO' :: IO a -> m a
   callService' :: (S.IsInServiceLib serviceLib request response) => request -> m response
 
@@ -115,6 +119,9 @@ run = FC.iterM go
     next v
   go (RunAsync act next) = do
     runAsync' act
+    next
+  go (RunAsyncAfter d act next) = do
+    runAsyncAfter' d act
     next
   go (RunArbitraryIO io next) = do
     b <- runArbitraryIO' @script @serviceLib io
@@ -245,6 +252,13 @@ POST-CONTRACT: Returns a program that delegates asynchronous scheduling to the a
 -}
 runAsync :: ScenarioProgram script serviceLib () -> ScenarioProgram script serviceLib ()
 runAsync act = FC.liftF $ RunAsync act ()
+
+{- | Execute an action later: not before the delay has elapsed, on a worker of the async pool.
+PRE-CONTRACT: In production the runTimerService + worker pool must be running.
+POST-CONTRACT: Returns immediately; the action runs exactly once, not before the deadline; equal deadlines run FIFO in registration order; delay ≤ 0 means immediate.
+-}
+runAsyncAfter :: NominalDiffTime -> ScenarioProgram script serviceLib () -> ScenarioProgram script serviceLib ()
+runAsyncAfter delay act = FC.liftF $ RunAsyncAfter delay act ()
 
 {- | Escape hatch that runs an arbitrary 'IO' action inside a scenario.
 

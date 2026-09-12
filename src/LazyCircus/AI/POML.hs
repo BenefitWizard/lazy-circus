@@ -32,10 +32,24 @@ renderPOMLTag (ExampleInput ExampleInputParams{} content) =
     renderTag "input" [] (concatMap renderPOMLTag content)
 renderPOMLTag (ExampleOutput ExampleOutputParams{} content) =
     renderTag "output" [] (concatMap renderPOMLTag content)
-renderPOMLTag (ExampleSet ExampleSetParams{} examples) =
-    renderTag "examples" [] (renderItems "example" [] examples)
-renderPOMLTag (Example ExampleParams{} content) =
-    renderTag "example" [] (concatMap renderPOMLTag content)
+-- | Grouped example block (@<examples>@). The set-level caption is always
+-- emitted as an attribute (per the spec it defaults to a visible
+-- \"Examples\" header); an 'exampleSetIntroducer' is emitted only when
+-- present. Each entry renders as its own @<example>@ tag, carrying a
+-- @caption@ attribute when its caption differs from the default.
+renderPOMLTag (ExampleSet ExampleSetParams{exampleSetCaption = setCaption, exampleSetIntroducer = mIntro} exampleEntries) =
+    renderTag
+        "examples"
+        ( [("caption", setCaption)]
+            <> maybe [] (\t -> [("introducer", t)]) mIntro
+        )
+        (concatMap renderExampleEntry exampleEntries)
+  where
+    -- | Renders one @(params, children)@ entry of an example set.
+    renderExampleEntry (exampleParams, children) =
+        renderTag "example" (exampleCaptionAttrs exampleParams) (concatMap renderPOMLTag children)
+renderPOMLTag (Example params content) =
+    renderTag "example" (exampleCaptionAttrs params) (concatMap renderPOMLTag content)
 renderPOMLTag (Role RoleParams{} content) =
     renderTag "role" [] (concatMap renderPOMLTag content)
 renderPOMLTag (Task TaskParams{} content) =
@@ -121,11 +135,35 @@ longestBacktickRun = snd . T.foldl' step (0 :: Int, 0 :: Int)
 sha256Hex :: Text -> Text
 sha256Hex = tshow . hashWith SHA256 . encodeUtf8
 
+-- | Caption attribute of an @<example>@ tag. Per the spec an example's
+-- caption is hidden by default, so the attribute is emitted only when the
+-- caption differs from the default @\"Example\"@.
+-- POST-CONTRACT: For 'defaultExampleParams' the result is empty.
+exampleCaptionAttrs :: ExampleParams -> [(Text, Text)]
+exampleCaptionAttrs ExampleParams{exampleCaption = cap}
+    | cap /= "Example" = [("caption", cap)]
+    | otherwise = []
+
 renderTag :: Text -> [(Text, Text)] -> [Text] -> [Text]
 renderTag tag attrs content = openTag tag attrs <> content <> closeTag tag
 
+-- | Renders one key-value pair as a quoted XML-style attribute.
+-- POST-CONTRACT: The value is escaped ('escapeAttrValue'), so any 'Text'
+-- value yields well-formed attribute output.
 renderAttribute :: (Text, Text) -> Text
-renderAttribute (k, v) = " " <> k <> "=\"" <> v <> "\""
+renderAttribute (k, v) = " " <> k <> "=\"" <> escapeAttrValue v <> "\""
+
+-- | Escapes the XML special characters of an attribute value: @&@, @<@,
+-- @>@ and @\"@. @&@ is replaced first, so replacement entities are never
+-- re-escaped.
+-- POST-CONTRACT: Idempotent input yields well-formed output; escaping is
+-- deterministic and injective on 'Text'.
+escapeAttrValue :: Text -> Text
+escapeAttrValue =
+    T.replace "\"" "&quot;"
+        . T.replace ">" "&gt;"
+        . T.replace "<" "&lt;"
+        . T.replace "&" "&amp;"
 
 openTag :: Text -> [(Text, Text)] -> [Text]
 openTag tag attrs =

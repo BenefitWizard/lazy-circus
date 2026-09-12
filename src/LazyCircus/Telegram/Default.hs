@@ -127,3 +127,24 @@ defaultMessage =
         , messageGiveawayWinners = Nothing
         , messageGiveawayCompleted = Nothing
         }
+
+-- | Placeholder Telegram poll used where a stable fallback poll payload is needed.
+-- Covers every field of the pinned library's 'Poll' with neutral values.
+defaultPoll :: Poll
+defaultPoll =
+    Poll
+        { pollId = PollId ""
+        , pollQuestion = ""
+        , pollQuestionEntities = Nothing
+        , pollOptions = []
+        , pollTotalVoterCount = 0
+        , pollIsClosed = False
+        , pollIsAnonymous = False
+        , pollType = PollTypeRegular
+        , pollAllowsMultipleAnswers = False
+        , pollCorrectOptionId = Nothing
+        , pollExplanation = Nothing
+        , pollExplanationEntities = Nothing
+        , pollOpenPeriod = Nothing
+        , pollCloseData = Nothing
+        }

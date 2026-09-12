@@ -11,12 +11,15 @@ module LazyCircus.Scene.Telegram.Lang (
   getBotName,
   sendMessage,
   sendDocument,
+  sendPoll,
+  sendInvoice,
   sendImportantMessage,
   scheduleMessage,
   scheduleMessages,
   setBotCommands,
   setMessageReaction,
   answerCallbackQuery,
+  answerPreCheckoutQuery,
   editMessageText,
   deleteMessage,
   TelegramScript,
@@ -28,23 +31,28 @@ import LazyCircus.Scene.Log (HasLogLang (..), LogLangF)
 import LazyCircus.Telegram.FileCheck (FileValidationError (..), checkDownloadedBytes, checkFileSize)
 import LazyCircus.Telegram.Types (WithImportance (..))
 import RIO
-import Telegram.Bot.API (ChatId, Message, MessageId, Response (..), SendMessageRequest, SetMessageReactionRequest)
+import Telegram.Bot.API (ChatId, Message, MessageId, PollId, Response (..), SendMessageRequest, SetMessageReactionRequest)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
 import Telegram.Bot.API.Methods.SendDocument (SendDocumentRequest)
+import Telegram.Bot.API.Methods.SendPoll (SendPollRequest)
+import Telegram.Bot.API.Payments (AnswerPreCheckoutQueryRequest, SendInvoiceRequest)
 import Telegram.Bot.API.Types (File (..), FileId)
 import Telegram.Bot.API.UpdatingMessages (EditMessageResponse, EditMessageTextRequest)
 
--- | Effect functor describing Telegram file, file-download, identity, message, reaction, command, callback, edit, deletion, and logging operations.
+-- | Effect functor describing Telegram file, file-download, identity, message, poll, invoice, reaction, command, callback, pre-checkout, edit, deletion, and logging operations.
 data TelegramScriptF a where
   GetFile :: FileId -> (Response File -> a) -> TelegramScriptF a
   DownloadFile :: File -> (ByteString -> a) -> TelegramScriptF a
   GetBotName :: (Text -> a) -> TelegramScriptF a
   SendMessage :: (WithImportance SendMessageRequest) -> (Response Message -> a) -> TelegramScriptF a
   SendDocument :: SendDocumentRequest -> (Response Message -> a) -> TelegramScriptF a
+  SendPoll :: SendPollRequest -> ((PollId, Message) -> a) -> TelegramScriptF a
+  SendInvoice :: SendInvoiceRequest -> (Response Message -> a) -> TelegramScriptF a
   ScheduleMessages :: [SendMessageRequest] -> a -> TelegramScriptF a
   SetMessageReaction :: SetMessageReactionRequest -> a -> TelegramScriptF a
   SetBotCommands :: HashMap LangCode [(Text, Text)] -> a -> TelegramScriptF a
   AnswerCallbackQuery :: AnswerCallbackQueryRequest -> a -> TelegramScriptF a
+  AnswerPreCheckoutQuery :: AnswerPreCheckoutQueryRequest -> a -> TelegramScriptF a
   EditMessageText :: EditMessageTextRequest -> (Maybe EditMessageResponse -> a) -> TelegramScriptF a
   DeleteMessage :: ChatId -> MessageId -> a -> TelegramScriptF a
   TgLog :: LogLangF TelegramScript b -> (b -> a) -> TelegramScriptF a
@@ -56,10 +64,13 @@ instance Functor TelegramScriptF where
   fmap f (GetBotName next) = GetBotName (f . next)
   fmap f (SendMessage request next) = SendMessage request (f . next)
   fmap f (SendDocument req next) = SendDocument req (f . next)
+  fmap f (SendPoll req next) = SendPoll req (f . next)
+  fmap f (SendInvoice req next) = SendInvoice req (f . next)
   fmap f (ScheduleMessages requests next) = ScheduleMessages requests (f next)
   fmap f (SetBotCommands commands next) = SetBotCommands commands (f next)
   fmap f (SetMessageReaction request next) = SetMessageReaction request (f next)
   fmap f (AnswerCallbackQuery req next) = AnswerCallbackQuery req (f next)
+  fmap f (AnswerPreCheckoutQuery req next) = AnswerPreCheckoutQuery req (f next)
   fmap f (EditMessageText req next) = EditMessageText req (f . next)
   fmap f (DeleteMessage chatId messageId next) = DeleteMessage chatId messageId (f next)
   fmap f (TgLog logOp next) = TgLog logOp (f . next)
@@ -158,6 +169,20 @@ POST-CONTRACT: Produces a script that yields the Telegram API response for a doc
 sendDocument :: SendDocumentRequest -> TelegramScript (Response Message)
 sendDocument req = liftF $ SendDocument req id
 
+{- | Lift sending a poll via the Telegram Bot API into the Telegram script language.
+PRE-CONTRACT: The request must be valid for the configured Telegram bot and API endpoint.
+POST-CONTRACT: Produces a script that yields the poll identifier and the message carrying the poll as supplied by the interpreter.
+-}
+sendPoll :: SendPollRequest -> TelegramScript (PollId, Message)
+sendPoll req = liftF $ SendPoll req id
+
+{- | Lift sending a Telegram Stars invoice into the Telegram script language.
+PRE-CONTRACT: The request must carry a chat identifier the bot is allowed to invoice; for Stars payments its provider token must be empty and its currency @XTR@ (see "LazyCircus.Telegram.Stars").
+POST-CONTRACT: Produces a script that yields the Telegram API response carrying the invoice message.
+-}
+sendInvoice :: SendInvoiceRequest -> TelegramScript (Response Message)
+sendInvoice req = liftF $ SendInvoice req id
+
 {- | Lift scheduling of a single Telegram message into the Telegram script language.
 PRE-CONTRACT: The request must be valid for the interpreter's deferred-delivery queue.
 POST-CONTRACT: Produces a script that schedules exactly one message and returns unit.
@@ -192,6 +217,13 @@ POST-CONTRACT: Produces a script that acknowledges the callback query and return
 -}
 answerCallbackQuery :: AnswerCallbackQueryRequest -> TelegramScript ()
 answerCallbackQuery req = liftF $ AnswerCallbackQuery req ()
+
+{- | Lift answering a Telegram pre-checkout query into the Telegram script language.
+PRE-CONTRACT: The request must reference a pre-checkout query received from Telegram; the answer must reach Telegram within 10 seconds or the payment times out.
+POST-CONTRACT: Produces a script that acknowledges the pre-checkout query and returns unit.
+-}
+answerPreCheckoutQuery :: AnswerPreCheckoutQueryRequest -> TelegramScript ()
+answerPreCheckoutQuery req = liftF $ AnswerPreCheckoutQuery req ()
 
 {- | Lift editing a Telegram message's text into the Telegram script language.
 PRE-CONTRACT: The request must target an existing message and provide valid text content for the configured bot.

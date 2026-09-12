@@ -142,7 +142,18 @@ internal-libraries:
 tests:
   lazy-circus-test:
     main: Spec.hs
-    source-dirs: test
+    source-dirs:
+      - test
+      # Testing.* helpers are compiled into the suite from the subpackage sources:
+      # a package dependency on lazy-circus-testing would create a cyclic graph
+      # (lazy-circus:test -> lazy-circus-testing -> lazy-circus), which both
+      # stack and cabal reject. Sources stay owned by the lazy-circus-testing package.
+      - testing/src
+    # OverloadedStrings is mirrored from the lazy-circus-testing package: the
+    # testing/src modules compiled here rely on it (the rest of their
+    # default-extensions is either inert or per-file in these sources).
+    default-extensions:
+      - OverloadedStrings
     verbatim:
       build-tool-depends: hspec-discover:hspec-discover == 2.*
     ghc-options:
@@ -154,3 +165,5 @@ tests:
       - lazy-circus
       - common-circus
       - hspec
+      # Mirrors deps of testing/src sources compiled into this suite (see source-dirs note).
+      - text

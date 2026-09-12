@@ -6,13 +6,15 @@ module LazyCircus.Telegram.Types (
     AppWithBotEnv(..),
     HasTgMessageQueue(..),
     TelegramClientError(..),
+    NoPollInResponse(..),
+    TelegramApiRejected(..),
     TelegramDownloadStatusError(..),
  ) where
 
 import Network.HTTP.Types (Status)
 import RIO
 import Servant.Client hiding (Response)
-import Telegram.Bot.API (ReactionType (..), Token)
+import Telegram.Bot.API (Message, ReactionType (..), Response, Token)
 
 import Telegram.Bot.API.Methods (SendMessageRequest)
 
@@ -83,6 +85,29 @@ instance Show TelegramClientError where
 
 -- | Enables throwing and catching TelegramClientError as a typed exception.
 instance Exception TelegramClientError
+
+-- | Telegram answered successfully but the returned message carried no poll payload.
+-- Carries the raw 'Response' — it contains only response data, never request URLs,
+-- so the bot token cannot leak through 'Show'.
+newtype NoPollInResponse = NoPollInResponse (Response Message)
+    deriving (Show)
+
+-- | Enables throwing and catching NoPollInResponse as a typed exception.
+instance Exception NoPollInResponse
+
+-- | Telegram API rejected the request: the HTTP transport delivered a 2xx
+-- response whose @ok@ field is @false@ (seen with local Bot API servers and
+-- proxies). The cause lives in the carried error code and description.
+-- Carries only response payload fields — never request URLs, so the bot token
+-- cannot leak through 'Show'.
+data TelegramApiRejected = TelegramApiRejected
+    { telegramApiRejectedErrorCode :: Maybe Integer -- ^ Bot API @error_code@ field, if present
+    , telegramApiRejectedDescription :: Maybe Text  -- ^ Bot API @description@ field, if present
+    }
+    deriving (Show, Eq)
+
+-- | Enables throwing and catching TelegramApiRejected as a typed exception.
+instance Exception TelegramApiRejected
 
 -- | Non-2xx HTTP status returned by the Telegram file-download endpoint.
 -- Carries only the 'Status' — never the request URL, which embeds the bot token.

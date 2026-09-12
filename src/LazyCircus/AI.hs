@@ -191,10 +191,14 @@ defaultModel :: Models.Model
 defaultModel = "deepseek-v4-flash"
 
 -- | Construct the DeepSeek thinking extra object.
--- POST-CONTRACT: Returns 'Just' with @{"thinking": {"type": "enabled"}}@ when True, 'Nothing' when False.
+-- DeepSeek enables thinking by default when the field is absent, so BOTH cases
+-- are sent explicitly: 'True' -> @{"thinking": {"type": "enabled"}}@, 'False'
+-- -> @{"thinking": {"type": "disabled"}}@. Returning 'Nothing' for 'False'
+-- would leave thinking ON by default and generate large 'reasoning_content'.
+-- POST-CONTRACT: Always returns 'Just'; the "thinking" type is "enabled" or "disabled".
 thinkingExtra :: Bool -> Maybe Object
 thinkingExtra True  = Just $ KM.fromList [("thinking", object ["type" .= ("enabled" :: Text)])]
-thinkingExtra False = Nothing
+thinkingExtra False = Just $ KM.fromList [("thinking", object ["type" .= ("disabled" :: Text)])]
 
 -- | Overlay 'AIParams' on a base chat-completion request.
 -- POST-CONTRACT: Every 'Just' field replaces the base value; every 'Nothing'

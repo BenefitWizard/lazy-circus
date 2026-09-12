@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | End-to-end spec for the Telegram file operations (T12): size-gated
+{- | End-to-end spec for the Telegram file operations: size-gated
 download ('downloadCheckedFile') and message deletion ('deleteMessage') driven
 through the @tgTest@ mock infrastructure via the demo 'handleDocumentUpload'
 scenario, plus a direct e2e of the raw 'downloadFileById' composite (which
@@ -113,7 +113,7 @@ buildFileOpsAction ::
     DefaultApp AllServices ->
     Integer ->
     [(FileId, ByteString)] ->
-    TestConfig ->
+    TestConfig app ->
     Mocks AllServices ->
     IO (Update -> IO ())
 buildFileOpsAction app maxBytes downloads cfg mocks = do
@@ -196,7 +196,7 @@ directDownloadScenario botName chatId fid = do
 buildDirectDownloadAction ::
     DefaultApp AllServices ->
     [(FileId, ByteString)] ->
-    TestConfig ->
+    TestConfig app ->
     Mocks AllServices ->
     IO (Update -> IO ())
 buildDirectDownloadAction app downloads cfg mocks = do
@@ -264,7 +264,7 @@ metadataEchoScenario botName chatId doc =
 -- staged — the scenario must NOT download anything.
 buildMetadataEchoAction ::
     DefaultApp AllServices ->
-    TestConfig ->
+    TestConfig app ->
     Mocks AllServices ->
     IO (Update -> IO ())
 buildMetadataEchoAction app cfg mocks =

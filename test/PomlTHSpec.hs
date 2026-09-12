@@ -92,6 +92,18 @@ $(makePoml "jsonFmt" "app/example/prompts/jsonFmt.poml")
 -- protective fence.
 $(makePoml "untrusted" "app/example/prompts/untrusted.poml")
 
+-- | Generates @DemoExamplesInput@ and @demoExamples :: DemoExamplesInput ->
+-- [POML]@ from @app/example/prompts/demoExamples.poml@ — an example set with a
+-- static set-level caption, a templated introducer, one captioned example, and
+-- one plain example.
+$(makePoml "demoExamples" "app/example/prompts/demoExamples.poml")
+
+-- | Generates @plainExamples :: [POML]@ (no input record) from
+-- @app/example/prompts/plainExamples.poml@ — an example set with no caption or
+-- introducer attributes, guarding against a regression where the generated
+-- params expression was an empty (non-compiling) record update.
+$(makePoml "plainExamples" "app/example/prompts/plainExamples.poml")
+
 spec :: Spec
 spec = describe "makePoml" $ do
     it "substitutes a string <let> variable into the rendered prompt" $
@@ -184,6 +196,25 @@ spec = describe "makePoml" $ do
     it "derives Show on the generated untrusted input record" $
         show (UntrustedInput{resume = "X"})
             `shouldSatisfy` ("UntrustedInput" `isInfixOf`)
+
+    it "renders an example set with caption, templated introducer, and per-example caption" $
+        renderPOMLtoPrompt (demoExamples (DemoExamplesInput{intro = "Each case shows a refusal:"}))
+            `shouldBe`
+                "<examples caption=\"Refusals\" introducer=\"Each case shows a refusal:\">"
+                    <> "<example caption=\"Missing required field\">"
+                    <> "<input>Order without an id</input>"
+                    <> "<output>Refuse politely.</output>"
+                    <> "</example>"
+                    <> "<example><input>Unknown customer</input><output>Ask for details.</output></example>"
+                    <> "</examples>"
+
+    it "substitutes the introducer template from the input field" $
+        renderPOMLtoPrompt (demoExamples (DemoExamplesInput{intro = "More cases:"}))
+            `shouldSatisfy` ("introducer=\"More cases:\"" `Text.isInfixOf`)
+
+    it "lowers a plain <examples> without attributes (no empty record update)" $
+        renderPOMLtoPrompt plainExamples
+            `shouldBe` "<examples caption=\"Examples\"><example><input>q</input><output>a</output></example></examples>"
 
 -- NOTE: A `.poml` with a `poml`-typed variable inside a concatenation
 -- (e.g. {{pomlVar + "text"}}) causes `makePoml` to call `fail` at compile

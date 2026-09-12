@@ -20,6 +20,7 @@ extra-source-files:
     CHANGELOG.md
     app/example/prompts/caption.poml
     app/example/prompts/contact.poml
+    app/example/prompts/demoExamples.poml
     app/example/prompts/greeting.poml
     app/example/prompts/hello.poml
     app/example/prompts/inner.poml
@@ -28,6 +29,7 @@ extra-source-files:
     app/example/prompts/multi.poml
     app/example/prompts/notice.poml
     app/example/prompts/outer.poml
+    app/example/prompts/plainExamples.poml
     app/example/prompts/refer.poml
     app/example/prompts/untrusted.poml
     app/example/prompts/refer-disclaimer.txt
@@ -86,10 +88,8 @@ library
       LazyCircus.Telegram
       LazyCircus.Telegram.Default
       LazyCircus.Telegram.FileCheck
+      LazyCircus.Telegram.Stars
       LazyCircus.Telegram.Types
-      LazyCircus.Testing.Performer
-      LazyCircus.Testing.TgTest
-      LazyCircus.Testing.Updates
   other-modules:
       Paths_lazy_circus
   autogen-modules:
@@ -152,8 +152,10 @@ library common-circus
       ChatStateStore
       Common
       DemoEnv
+      PollRegistry
       SimpleService
       SimpleServiceLib
+      StarsScenarios
   other-modules:
       Paths_lazy_circus
   autogen-modules:
@@ -323,6 +325,7 @@ test-suite lazy-circus-test
       BotHandlerSpec
       BotScenariosSpec
       ChatStateStoreSpec
+      ClassifyPollResponseSpec
       ConfigurablePerformerSpec
       DBLangSpec
       DbPoolSpec
@@ -333,20 +336,38 @@ test-suite lazy-circus-test
       PomlParserSpec
       PomlRendererSpec
       PomlTHSpec
+      SendPollSpec
       ServiceCallSpec
+      StarsFlowSpec
+      StarsTgTestSpec
       TestDbSupport
       TestHelpers.Bot
       TgFileOpsSpec
       TgMockMailboxSpec
+      TgStarsOpsSpec
       TgTestRunnerSpec
       TgTestSpec
+      TimerServiceSpec
       ToolSchemaSpec
       UpdateFactorySpec
+      LazyCircus.Testing.Bdd.Gherkin
+      LazyCircus.Testing.Bdd.Given
+      LazyCircus.Testing.Bdd.Journal
+      LazyCircus.Testing.Bdd.Pattern
+      LazyCircus.Testing.Bdd.Runner
+      LazyCircus.Testing.Bdd.Step
+      LazyCircus.Testing.Bdd.Tg
+      LazyCircus.Testing.Performer
+      LazyCircus.Testing.TgTest
+      LazyCircus.Testing.Updates
       Paths_lazy_circus
   autogen-modules:
       Paths_lazy_circus
   hs-source-dirs:
       test
+      testing/src
+  default-extensions:
+      OverloadedStrings
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson

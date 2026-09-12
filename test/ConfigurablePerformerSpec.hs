@@ -17,6 +17,12 @@ Verifies the branching contract of 'LazyCircus.Testing.Performer':
 * 'LazyCircus.Testing.TgTest.tgTest' refuses to start when
   'tcTelegram' = 'Real', throwing 'TgTestConfigError' before the headless
   bot is spawned.
+* 'LazyCircus.Scenario.runAsyncAfter' obeys the same 'tcAsync' knob:
+  'Mocked' captures @(delay, program)@ pairs in 'readScheduledTimers'
+  without touching the plain async buffer, 'fireScheduledTimers' drains and
+  executes them synchronously in capture order (idempotently), and 'Real'
+  spawns the delayed worker so its side effects land in the usual capture
+  buffers while 'readScheduledTimers' stays empty.
 -}
 module ConfigurablePerformerSpec (spec) where
 
@@ -29,16 +35,20 @@ import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.Scene.AI qualified as Scene (ask)
 import LazyCircus.Scene.Mail.Lang qualified as Mail (makeMail, sendMail)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg (sendMessage)
-import LazyCircus.Scenario (ScenarioProgram, evalScript, runAsync)
+import LazyCircus.Scenario (ScenarioProgram, evalScript, runAsync, runAsyncAfter)
 import LazyCircus.Script (Script (..))
 import LazyCircus.Testing.Performer
-    ( Mode (..)
+    ( Mocks (asyncInflight)
+    , Mode (..)
+    , OutgoingMessage (..)
     , TestConfig (..)
     , defaultTestConfig
+    , fireScheduledTimers
     , makeMocks
     , readAiRequests
     , readOutgoingMailbox
     , readScheduledScenarios
+    , readScheduledTimers
     , readSentMails
     , readTgRequests
     , runScenarioProgram
@@ -84,13 +94,19 @@ mailSendScript = mailScript $ do
     -- \| Minimal recipient address (display name omitted).
     recipient = Address Nothing "recipient@example.com"
 
--- | Send one @sendMessage@ as @demo-bot@ to chat 1, discarding the response.
-tgSendScenario :: ScenarioProgram Script serviceLib ()
-tgSendScenario =
+-- | Send one @sendMessage@ carrying the given text as @demo-bot@ to chat 1,
+-- discarding the response.
+tgSendTextScenario :: Text -> ScenarioProgram Script serviceLib ()
+tgSendTextScenario text =
     void $
         evalScript $
             tgScript "demo-bot" $
-                Tg.sendMessage (defSendMessage (SomeChatId (ChatId 1)) "hello")
+                Tg.sendMessage (defSendMessage (SomeChatId (ChatId 1)) text)
+
+-- | Send @hello@ as @demo-bot@ to chat 1 (fixed-mark variant of
+-- 'tgSendTextScenario').
+tgSendScenario :: ScenarioProgram Script serviceLib ()
+tgSendScenario = tgSendTextScenario "hello"
 
 -- | Schedule a Telegram send as background work via 'runAsync'.
 asyncTgSendScenario :: ScenarioProgram Script serviceLib ()
@@ -147,6 +163,59 @@ spec = do
                 length outgoing `shouldBe` 1
                 tgReqs <- readTgRequests mocks
                 length tgReqs `shouldBe` 1
+
+        describe "runAsyncAfter timers (Mocked capture, fire, Real execution)" $ do
+            it "Async Mocked captures the requested delay in readScheduledTimers" $ \app -> do
+                (mocks, _) <-
+                    runWithDefaultConfig app defaultTestConfig $
+                        runScenarioProgram (runAsyncAfter 0.5 (tgSendTextScenario "deferred"))
+                timers <- readScheduledTimers mocks
+                map fst timers `shouldBe` [0.5]
+                -- Timer captures must not leak into the plain async buffer or spawn workers.
+                scheduled <- readScheduledScenarios mocks
+                length scheduled `shouldBe` 0
+                inflight <- atomically (readTVar (asyncInflight mocks))
+                inflight `shouldBe` 0
+                -- Mocked mode does not execute the deferred program.
+                outgoing <- readOutgoingMailbox mocks
+                length outgoing `shouldBe` 0
+
+            it "fireScheduledTimers runs captured timers in capture order and is idempotent" $ \app -> do
+                (mocks, _) <-
+                    runWithDefaultConfig app defaultTestConfig $
+                        runScenarioProgram $
+                            runAsyncAfter 9 (tgSendTextScenario "timer-a")
+                                >> runAsyncAfter 9 (tgSendTextScenario "timer-b")
+                timers <- readScheduledTimers mocks
+                map fst timers `shouldBe` [9, 9]
+                -- Fire once: both deferred programs run through the same test
+                -- interpreter, in capture order, and the buffer is drained.
+                runWithConfig app defaultTestConfig mocks fireScheduledTimers
+                remaining <- readScheduledTimers mocks
+                length remaining `shouldBe` 0
+                outgoing <- readOutgoingMailbox mocks
+                map omText outgoing `shouldBe` [Just "timer-a", Just "timer-b"]
+                -- Firing again is a no-op: no additional effects anywhere.
+                runWithConfig app defaultTestConfig mocks fireScheduledTimers
+                again <- readOutgoingMailbox mocks
+                length again `shouldBe` 0
+                tgReqs <- readTgRequests mocks
+                length tgReqs `shouldBe` 2
+
+            it "Async Real executes the delayed worker and captures nothing" $ \app -> do
+                let cfg = defaultTestConfig{tcAsync = Real}
+                (mocks, _) <-
+                    runWithDefaultConfig app cfg $
+                        runScenarioProgram (runAsyncAfter 0.05 (tgSendTextScenario "delayed"))
+                -- Real mode spawns after the delay instead of capturing.
+                timers <- readScheduledTimers mocks
+                length timers `shouldBe` 0
+                scheduled <- readScheduledScenarios mocks
+                length scheduled `shouldBe` 0
+                -- The spawned worker ran sendMessage once the delay elapsed,
+                -- which published to the mailbox (engine awaited the worker).
+                outgoing <- readOutgoingMailbox mocks
+                map omText outgoing `shouldBe` [Just "delayed"]
 
         describe "Real non-capture (exception + empty capture)" $ do
             it "AI Real does not capture requests (readAiRequests is empty)" $ \app -> do
