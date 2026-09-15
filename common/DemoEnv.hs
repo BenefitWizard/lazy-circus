@@ -187,7 +187,7 @@ withDemoApp cfg action = do
     bracket
         ( do
             workerThreads <- runAllWorkers workers
-            logThread <- async $ runRIO (logAppFromDefaultApp app') logWorker
+            logThread <- async $ runRIO (logAppFromDefaultApp LogDev app') logWorker
             asyncThread <- async $ runRIO app' (runAsyncWorkerPool (cfgAsyncWorkers cfg) (runDefaultPerformer . run @Script @AllServices))
             timerThread <- async $ runRIO app' (runTimerService @Script @AllServices)
             pure (app', logThread, asyncThread, timerThread, workerThreads)

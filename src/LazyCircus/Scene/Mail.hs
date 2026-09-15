@@ -13,6 +13,7 @@ module LazyCircus.Scene.Mail (
     slogWarn,
     slogError,
     slogSensitive,
+    slogNotice,
     swithLogCtx,
 )
 where
@@ -29,5 +30,5 @@ import LazyCircus.Scene.Mail.Lang (makeMail)
 import LazyCircus.Scene.Mail.Lang (MailScript)
 
 
-import LazyCircus.Scene.Log (slogError, slogInfo, slogSensitive, slogWarn, swithLogCtx)
+import LazyCircus.Scene.Log (slogError, slogInfo, slogNotice, slogSensitive, slogWarn, swithLogCtx)
 

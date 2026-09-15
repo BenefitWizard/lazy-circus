@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to the
 [Haskell Package Versioning Policy](https://pvp.haskell.org/).
 
-## Unreleased
+## 0.2.0.0
 
 ### Added
 - **New subpackage `lazy-circus-testing`** (`testing/`): the test layer
@@ -84,6 +84,19 @@ and this project adheres to the
   per-chat serialisation — the Bot API answer deadline is 10 seconds), and
   idempotent payment crediting via `ON CONFLICT (telegram_payment_charge_id)
   DO NOTHING` + `RETURNING` with a confirmation message on first credit only.
+- Logging profiles: `LogProfile` (`LogDev` — render every message, including
+  sensitive lines; `LogProd` — drop debug-level diagnostics), the
+  `HasLogProfile` class (`logProfileL` lens), and a `logProfile` field in
+  `LogApp`; `logWorker` consults the profile once per drained message and
+  passes only accepted messages to the underlying `LogFunc`.
+- `logNotice` / `slogNotice` (`ScenarioProgram` and the scene languages): a
+  new `NOTICE` severity for dev-only diagnostics that are not sensitive
+  content.
+- Timestamped log rendering: `logWorker` output and the default app's
+  `logFunc` now render `ISO-8601Z [LEVEL] module:line | msg | k=v` lines
+  (trailing `k=v` segment omitted when the context is empty); the pure
+  helpers `shouldRender`, `renderLogLine`, and `timestampedLogFunc` are
+  exported for custom wiring.
 
 #### Manual verification checklist — real Stars purchase
 
@@ -114,5 +127,11 @@ mocks; see `StarsFlowSpec` / `StarsTgTestSpec`):
   Consumers should migrate call sites like `renderPOMLtoPrompt [hello x]` to
   `renderPOMLtoPrompt (hello x)` (the generated function already returns a list).
   An empty `.poml` body is still rejected (`Left` / compile-time `fail`).
+- **(Breaking)** `logAppFromDefaultApp` now takes a `LogProfile` first
+  argument: the stored profile drives `logWorker` filtering, and the default
+  `logFunc` renders timestamped lines. Migrate the common composition
+  pattern `logAppFromDefaultApp . appLC` to
+  `logAppFromDefaultApp LogDev . appLC` (`LogDev` preserves the old
+  print-everything behavior).
 
 ## 0.1.0.0 - YYYY-MM-DD

@@ -15,6 +15,7 @@ module LazyCircus.Scenario (
   logWarn,
   logError,
   logSensitive,
+  logNotice,
   getExtraContext,
   readFromExtraContext,
   getFeatureFlag,
@@ -192,6 +193,13 @@ POST-CONTRACT: Logs the supplied message using the sensitive log variant.
 -}
 logSensitive :: (HasCallStack) => Text -> ScenarioProgram script serviceLib ()
 logSensitive msg = FC.liftF $ ScenarioLogMsg callStack (SensitiveLogMsg msg) ()
+
+{- | Emit a dev-only diagnostic notice that is not sensitive content.
+PRE-CONTRACT: None
+POST-CONTRACT: Logs the supplied message using the notice log variant.
+-}
+logNotice :: (HasCallStack) => Text -> ScenarioProgram script serviceLib ()
+logNotice msg = FC.liftF $ ScenarioLogMsg callStack (NoticeLogMsg msg) ()
 
 {- | Read the interpreter-provided extra context map.
 PRE-CONTRACT: None

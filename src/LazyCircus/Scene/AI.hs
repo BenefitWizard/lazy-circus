@@ -37,6 +37,7 @@ module LazyCircus.Scene.AI (
     slogWarn,
     slogError,
     slogSensitive,
+    slogNotice,
     swithLogCtx,
 )
 where
@@ -60,5 +61,5 @@ import LazyCircus.Scene.AI.Lang (solveWithAgentContinuing)
 import LazyCircus.Scene.AI.Lang (AIScript)
 
 
-import LazyCircus.Scene.Log (slogError, slogInfo, slogSensitive, slogWarn, swithLogCtx)
+import LazyCircus.Scene.Log (slogError, slogInfo, slogNotice, slogSensitive, slogWarn, swithLogCtx)
 

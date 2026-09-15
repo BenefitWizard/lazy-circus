@@ -31,6 +31,7 @@ module LazyCircus.Scene.Telegram (
   slogWarn,
   slogError,
   slogSensitive,
+  slogNotice,
   swithLogCtx,
   -- File-validation re-exports
   FileValidationError (..),
@@ -109,7 +110,7 @@ import LazyCircus.Scene.Telegram.Lang (deleteMessage)
 import LazyCircus.Scene.Telegram.Lang (TelegramScript)
 
 
-import LazyCircus.Scene.Log (slogError, slogInfo, slogSensitive, slogWarn, swithLogCtx)
+import LazyCircus.Scene.Log (slogError, slogInfo, slogNotice, slogSensitive, slogWarn, swithLogCtx)
 
 
 import LazyCircus.Telegram.FileCheck (FileValidationError (..), fileSha256Hex, telegramMaxDownloadBytes)

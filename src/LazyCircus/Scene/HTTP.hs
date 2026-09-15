@@ -12,6 +12,7 @@ module LazyCircus.Scene.HTTP (
     slogWarn,
     slogError,
     slogSensitive,
+    slogNotice,
     swithLogCtx,
 ) where
 
@@ -24,4 +25,4 @@ import LazyCircus.Scene.HTTP.Lang (runClient)
 import LazyCircus.Scene.HTTP.Lang (HTTPScript)
 
 
-import LazyCircus.Scene.Log (slogError, slogInfo, slogSensitive, slogWarn, swithLogCtx)
+import LazyCircus.Scene.Log (slogError, slogInfo, slogNotice, slogSensitive, slogWarn, swithLogCtx)

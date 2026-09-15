@@ -327,5 +327,6 @@ isLogContaining :: Text -> AppLogMsg -> Bool
 isLogContaining target = \case
     AppLogMsg t       -> target `T.isInfixOf` t
     SensitiveLogMsg t -> target `T.isInfixOf` t
+    NoticeLogMsg t    -> target `T.isInfixOf` t
     ErrorLogMsg t     -> target `T.isInfixOf` t
     WarnLogMsg t      -> target `T.isInfixOf` t

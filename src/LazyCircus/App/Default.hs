@@ -55,6 +55,7 @@ import RIO
 import RIO.HashMap qualified as HM
 import RIO.Map qualified as M
 import RIO.Process (HasProcessContext (..), ProcessContext, mkDefaultProcessContext)
+import RIO.Time (getCurrentTime)
 import Servant.Auth.Server (JWTSettings, defaultJWTSettings)
 import System.IO (putStrLn)  -- String-based, used as default sqlLogAction
 import Telegram.Bot.API (Token (..))
@@ -140,7 +141,7 @@ logging action used by the DebugInterpreter to trace Beam queries during develop
 -}
 data DefaultApp serviceLib = App
     { logFunc :: LogFunc
-    -- ^ RIO standard logging function
+    -- ^ timestamped log-line renderer printing to stdout
     , genLogFunc :: GLogFunc AppLogMsgWithContext
     -- ^ generic structured log writer
     , pgDbPool :: Pool Connection
@@ -242,13 +243,11 @@ newDefaultApp config = do
                     , timedActionsNextSeq = timedNextSeqVar
                     }
         processCtx <- mkDefaultProcessContext
-        let logFuncVal = mkLogFunc $ \_cs _src _lvl msg ->
-                hPutBuilder stdout (getUtf8Builder msg <> "\n")
         let genLogFuncVal = mkGLogFunc $ \_cs msg ->
                 atomically $ writeTQueue logQueueVal msg
         let sqlLog = fromMaybe putStrLn (cfgSqlLogAction config)
         pure App
-            { logFunc = logFuncVal
+            { logFunc = timestampedLogFunc
             , genLogFunc = genLogFuncVal
             , pgDbPool = rwPool
             , pgDbPoolReadOnly = mReadOnlyPool
@@ -381,20 +380,23 @@ constructTokens :: [(Text, Maybe Text)] -> Tokens
 constructTokens tokens' = constructFromMList tokens' & M.map Token
 
 {- | Project the logging subset of DefaultApp needed by the shared log worker.
-Creates a fresh GLogFunc that prints to stdout rather than copying the
+Creates a fresh GLogFunc that renders timestamped log lines to stdout rather than copying the
 queue-writer from DefaultApp, so that logWorker is the sole printing path.
+PRE-CONTRACT: the profile selects which severities 'logWorker' renders.
 POST-CONTRACT: Returned LogApp shares the same logFunc and logQueue as the input;
-its genLogFunc writes directly to stdout.
+its genLogFunc writes each message to stdout as a single line rendered by
+'renderLogLine' with the current UTC time; the profile is stored for 'logWorker'.
 -}
-logAppFromDefaultApp :: DefaultApp serviceLib -> LogApp
-logAppFromDefaultApp app =
+logAppFromDefaultApp :: LogProfile -> DefaultApp serviceLib -> LogApp
+logAppFromDefaultApp profile app =
     let
         logFunc' = app ^. logFuncL
-        genLogFunc' = mkGLogFunc $ \_cs msg ->
-            hPutBuilder stdout (getUtf8Builder (display msg) <> "\n")
+        genLogFunc' = mkGLogFunc $ \_cs msg -> do
+            now <- getCurrentTime
+            hPutBuilder stdout (getUtf8Builder (renderLogLine now msg) <> "\n")
         logQueue' = app ^. logQueueL
      in
-        LogApp logFunc' genLogFunc' logQueue'
+        LogApp logFunc' genLogFunc' logQueue' profile
 
 -- | ORPHAN: MonadRandom and RIO are from separate packages.
 -- LAW: getRandomBytes preserves length: holds — n == ByteString.length (getRandomBytes n) by delegation to the Crypto.Random instance.

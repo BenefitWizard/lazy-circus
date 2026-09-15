@@ -4,7 +4,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 
---   PURPOSE: Define a reusable logging effect language that can be embedded into any sub-language, providing unified slogInfo/slogWarn/slogError/slogSensitive and swithLogCtx operations across DBScript, TelegramScript, CryptoScript, MailScript, AIScript, and ScenarioProgram.
+--   PURPOSE: Define a reusable logging effect language that can be embedded into any sub-language, providing unified slogInfo/slogWarn/slogError/slogSensitive/slogNotice and swithLogCtx operations across DBScript, TelegramScript, CryptoScript, MailScript, AIScript, and ScenarioProgram, where slogNotice carries dev-only diagnostics that are not sensitive content.
 --   SCOPE: LogLangF functor, HasLogLang typeclass with functional dependency, polymorphic smart constructors, and the handleLogLang interpreter helper.
 --   DEPENDS: M-LIB-APP-LOG
 
@@ -16,6 +16,7 @@ module LazyCircus.Scene.Log (
     slogWarn,
     slogError,
     slogSensitive,
+    slogNotice,
     swithLogCtx,
     timedAndLog,
     handleLogLang,
@@ -71,6 +72,12 @@ Usage: @slogSensitive "sensitive" :: DBScript MainDb ()@
 -}
 slogSensitive :: (HasCallStack, Functor f, MonadFree f m, HasLogLang f prog) => Text -> m ()
 slogSensitive msg = liftF $ embedLog $ LogMsg callStack (SensitiveLogMsg msg) ()
+
+{- | Emit a dev-only diagnostic notice from any sub-language; the message must not contain sensitive content.
+Usage: @slogNotice "notice" :: DBScript MainDb ()@
+-}
+slogNotice :: (HasCallStack, Functor f, MonadFree f m, HasLogLang f prog) => Text -> m ()
+slogNotice msg = liftF $ embedLog $ LogMsg callStack (NoticeLogMsg msg) ()
 
 {- | Run a sub-program with additional logging context entries.
 Inner context values override outer values for the same keys.

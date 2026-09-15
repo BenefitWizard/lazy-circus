@@ -5,7 +5,7 @@ cabal-version: 2.0
 -- see: https://github.com/sol/hpack
 
 name:           lazy-circus
-version:        0.1.0.0
+version:        0.2.0.0
 description:    Please see the README on GitHub at <https://github.com/BenefitWizard/lazy-circus#readme>
 homepage:       https://github.com/BenefitWizard/lazy-circus#readme
 bug-reports:    https://github.com/BenefitWizard/lazy-circus/issues

@@ -24,6 +24,7 @@ import LazyCircus.App.Log qualified as Log
 import RIO hiding (logInfo)
 import RIO.Map qualified as M
 import RIO.Text qualified as Text
+import RIO.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Test.Hspec
 import Common
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
@@ -55,6 +56,37 @@ hasTimingCtx :: AppLogMsgWithContext -> Bool
 hasTimingCtx (AppLogMsgWithContext _ (LogContext ctx) _) =
     M.member "elapsed_ms" ctx
 
+-- | Fixed rendering timestamp: 2026-09-13T12:34:56Z.
+sampleTime :: UTCTime
+sampleTime = UTCTime (fromGregorian 2026 9 13) (secondsToDiffTime 45296)
+
+-- | Timestamp prefix shared by every rendered line.
+tsPrefix :: Text
+tsPrefix = "2026-09-13T12:34:56Z"
+
+-- | Contextualize a payload with a fixed call site and a two-pair context.
+withSampleMeta :: AppLogMsg -> AppLogMsgWithContext
+withSampleMeta payload = AppLogMsgWithContext
+    payload
+    (LogContext $ M.fromList [("key", "v1"), ("key2", "v2")])
+    (Just (Log.CallSite "Bot.Router" 113))
+
+-- | Contextualize a payload with a call site but an empty context.
+withoutCtx :: AppLogMsg -> AppLogMsgWithContext
+withoutCtx payload = AppLogMsgWithContext payload (LogContext M.empty) (Just (Log.CallSite "Bot.Router" 113))
+
+-- | Expected bracketed tag for a payload, mirroring 'Log.renderLogLine'.
+tagOf :: AppLogMsg -> Text
+tagOf AppLogMsg{} = "INFO"
+tagOf WarnLogMsg{} = "WARN"
+tagOf ErrorLogMsg{} = "ERROR"
+tagOf SensitiveLogMsg{} = "SENSITIVE"
+tagOf NoticeLogMsg{} = "NOTICE"
+
+-- | Render a message at the sample timestamp and decode the line to Text.
+renderedAt :: AppLogMsgWithContext -> Text
+renderedAt = utf8BuilderToText . Log.renderLogLine sampleTime
+
 mkEnv :: IO TestLogEnv
 mkEnv = do
     queue <- newTQueueIO
@@ -62,6 +94,32 @@ mkEnv = do
 
 readSingleLog :: LogQueue -> IO AppLogMsgWithContext
 readSingleLog queue = atomically $ readTQueue queue
+
+-- | Pre-load a queue, run 'Log.logWorker' under the given profile and collect
+-- what reaches its GLogFunc; asserts the queue was fully drained.
+runWorkerCapturing ::
+    Log.LogProfile ->
+    Int ->
+    [AppLogMsgWithContext] ->
+    IO [AppLogMsgWithContext]
+runWorkerCapturing profile expectedAccepted msgs = do
+    queue <- newTQueueIO
+    capturedRef <- newIORef [] :: IO (IORef [AppLogMsgWithContext])
+    let genLogFuncVal = mkGLogFunc $ \_cs msg -> modifyIORef' capturedRef (msg :)
+        logApp = Log.LogApp noopLogFunc genLogFuncVal queue profile
+    mapM_ (atomically . writeTQueue queue) msgs
+    withAsync (runRIO logApp Log.logWorker) $ \_workerThread -> do
+        let pollForCapture attempts
+                | attempts <= (0 :: Int) = do
+                    expectationFailure "logWorker did not consume the messages in time"
+                    error "unreachable"
+                | otherwise = do
+                    captured <- readIORef capturedRef
+                    queueDrained <- atomically $ isEmptyTQueue queue
+                    if length captured >= expectedAccepted && queueDrained
+                        then pure (reverse captured)
+                        else threadDelay 10000 >> pollForCapture (attempts - 1)
+        pollForCapture 50
 
 -- | Run a test action with a DefaultApp used for logging-runtime assertions.
 withLogApp :: (DefaultApp AllServices -> IO ()) -> IO ()
@@ -100,11 +158,45 @@ spec = do
                     actualMap `shouldBe` M.fromList [("lang", "DB"), ("request_id", "abc")]
             pure ()
 
+    describe "shouldRender" $ do
+        it "LogDev renders sensitive and notice messages" $ do
+            Log.shouldRender Log.LogDev (withSampleMeta (SensitiveLogMsg "secret")) `shouldBe` True
+            Log.shouldRender Log.LogDev (withSampleMeta (NoticeLogMsg "fyi")) `shouldBe` True
+        it "LogProd drops sensitive and notice messages" $ do
+            Log.shouldRender Log.LogProd (withSampleMeta (SensitiveLogMsg "secret")) `shouldBe` False
+            Log.shouldRender Log.LogProd (withSampleMeta (NoticeLogMsg "fyi")) `shouldBe` False
+        it "renders info, warn and error messages under both profiles" $
+            forM_ [AppLogMsg "hello", WarnLogMsg "hmm", ErrorLogMsg "boom"] $ \payload -> do
+                Log.shouldRender Log.LogDev (withSampleMeta payload) `shouldBe` True
+                Log.shouldRender Log.LogProd (withSampleMeta payload) `shouldBe` True
+
+    describe "renderLogLine" $ do
+        it "renders an info line with call site and context" $
+            renderedAt (withSampleMeta (AppLogMsg "hello")) `shouldBe`
+                "2026-09-13T12:34:56Z [INFO] Bot.Router:113 | hello | key=v1 key2=v2"
+        it "tags warn, error, sensitive and notice lines" $ do
+            renderedAt (withSampleMeta (WarnLogMsg "hmm")) `shouldBe`
+                "2026-09-13T12:34:56Z [WARN] Bot.Router:113 | hmm | key=v1 key2=v2"
+            renderedAt (withSampleMeta (ErrorLogMsg "boom")) `shouldBe`
+                "2026-09-13T12:34:56Z [ERROR] Bot.Router:113 | boom | key=v1 key2=v2"
+            renderedAt (withSampleMeta (SensitiveLogMsg "secret")) `shouldBe`
+                "2026-09-13T12:34:56Z [SENSITIVE] Bot.Router:113 | secret | key=v1 key2=v2"
+            renderedAt (withSampleMeta (NoticeLogMsg "fyi")) `shouldBe`
+                "2026-09-13T12:34:56Z [NOTICE] Bot.Router:113 | fyi | key=v1 key2=v2"
+        it "omits the trailing context segment when the context is empty" $
+            renderedAt (withoutCtx (AppLogMsg "hello")) `shouldBe`
+                "2026-09-13T12:34:56Z [INFO] Bot.Router:113 | hello"
+        it "starts every rendered line with the timestamp and bracketed tag" $
+            forM_ [AppLogMsg "hello", WarnLogMsg "hmm", ErrorLogMsg "boom", SensitiveLogMsg "secret", NoticeLogMsg "fyi"] $ \payload ->
+                (tsPrefix <> " [" <> tagOf payload <> "] ")
+                    `Text.isPrefixOf` renderedAt (withSampleMeta payload)
+                    `shouldBe` True
+
     describe "glog in a queue-writer GLogFunc context" $ do
         it "writes to the TQueue" $ do
             queue <- newTQueueIO
             let genLogFuncVal = mkGLogFunc $ \_cs msg -> atomically $ writeTQueue queue msg
-                logApp = Log.LogApp noopLogFunc genLogFuncVal queue
+                logApp = Log.LogApp noopLogFunc genLogFuncVal queue Log.LogDev
             runRIO logApp $ glog (AppLogMsgWithContext (AppLogMsg "hello") mempty Nothing)
             logged <- readSingleLog queue
             case logMsg logged of
@@ -116,7 +208,7 @@ spec = do
             queue <- newTQueueIO
             capturedRef <- newIORef Nothing :: IO (IORef (Maybe AppLogMsgWithContext))
             let genLogFuncVal = mkGLogFunc $ \_cs msg -> writeIORef capturedRef (Just msg)
-                logApp = Log.LogApp noopLogFunc genLogFuncVal queue
+                logApp = Log.LogApp noopLogFunc genLogFuncVal queue Log.LogDev
                 testMsg = AppLogMsgWithContext (WarnLogMsg "worker-test") mempty Nothing
             atomically $ writeTQueue queue testMsg
             withAsync (runRIO logApp Log.logWorker) $ \_asyncThread -> do
@@ -136,9 +228,29 @@ spec = do
                     WarnLogMsg "worker-test" -> pure ()
                     _ -> expectationFailure "logWorker captured wrong message"
 
+        it "LogProd profile drains the queue but drops the sensitive message" $ do
+            captured <- runWorkerCapturing Log.LogProd 1
+                [ AppLogMsgWithContext (SensitiveLogMsg "worker-secret") mempty Nothing
+                , AppLogMsgWithContext (AppLogMsg "worker-visible") mempty Nothing
+                ]
+            case captured of
+                [AppLogMsgWithContext (AppLogMsg "worker-visible") _ _] -> pure ()
+                _ -> expectationFailure "Expected only the visible info message"
+
+        it "LogDev profile drains the queue and emits every message" $ do
+            captured <- runWorkerCapturing Log.LogDev 2
+                [ AppLogMsgWithContext (SensitiveLogMsg "worker-secret") mempty Nothing
+                , AppLogMsgWithContext (AppLogMsg "worker-visible") mempty Nothing
+                ]
+            case captured of
+                [ AppLogMsgWithContext (SensitiveLogMsg "worker-secret") _ _
+                  , AppLogMsgWithContext (AppLogMsg "worker-visible") _ _
+                  ] -> pure ()
+                _ -> expectationFailure "Expected both messages in emission order"
+
     describe "logAppFromDefaultApp" $ do
         it "creates a LogApp with a fresh stdout-printing GLogFunc" $ withLogApp $ \app -> do
-            let logApp = logAppFromDefaultApp app
+            let logApp = logAppFromDefaultApp Log.LogDev app
                 testMsg = AppLogMsgWithContext (AppLogMsg "stdout-msg") mempty Nothing
             runRIO logApp $ glog testMsg
             isEmpty <- atomically $ isEmptyTQueue (logQueue app)
