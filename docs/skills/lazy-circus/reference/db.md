@@ -91,6 +91,26 @@ Important DB semantics:
 - `update` / `updateMany` patches are sparse `table Maybe` records: `Nothing` leaves the column untouched, `Just value` assigns it, and for a nullable column `Just Nothing` assigns SQL `NULL` (`Just (Just x)` assigns `x`). The returned list holds the actually updated rows; `[]` means nothing matched — a wrong key OR an RLS policy filtering the row out — and is NOT an error. See [extension.md](extension.md#partial-updates-use-table-maybe) for the instance side (`generateAssigment`).
 - `withTransactionRLS` applies `SET LOCAL rls.<key> = ?` inside the transaction; the context is built directly, e.g. `RLSContext [("circus_id", "42")]`, and contexts combine with `<>` / `mempty`
 
+Narrowing a result list to its only expected element is done by the pure helper
+`exactlyOne` from `LazyCircus.List` — a generic list helper, not a DB operation
+(it performs no DB effect itself):
+
+```haskell
+exactlyOne :: MonadFail m => Text -> [a] -> m a
+```
+
+`[]` fails with `"<what>: got none"`, a singleton `[x]` returns `x`, and a
+longer list fails with `"<what>: got <N>"` — the count in the message is
+load-bearing for downstream diagnostics. Because it needs only `MonadFail`,
+it works inside `runQuery` (in the `Pg` monad, where the `fail` surfaces as a
+`SomeException` at the scenario layer) as well as in DB-free pure tests:
+
+```haskell
+runQuery $ \db -> do
+    acts <- select (all_ (dbCircusActs db))
+    exactlyOne "circus act" acts
+```
+
 ## Row Locking
 
 `findLocked` and `findAllLocked` acquire a row lock (the Postgres `FOR UPDATE` family) on the matched rows. They take a `LockSpec` that pairs a lock strength with a waiting policy:
@@ -180,6 +200,35 @@ evalScript $ dbScript simpleDb ReadWrite $ find (CircusActId 42)
 There is no need to use `DBScriptDef` directly — the `dbScript` smart constructor
 (from `LazyCircus`) is the idiomatic wrapper, mirroring `tgScript` / `mailScript` /
 `aiScript` / `httpScript`. `DBScriptDef` remains available via `Script(..)`.
+
+### The tenant idiom
+
+When a scenario step works on an RLS-protected table, `tenantTransaction` (from
+`LazyCircus`) fuses the embedding and the RLS wrap into one combinator:
+
+```haskell
+tenantTransaction :: PgDB db -> RLSContext -> DBScript db a -> ScenarioProgram Script serviceLib a
+tenantTransaction db ctx body = evalScript $ dbScript db ReadWrite $ withTransactionRLS ctx body
+```
+
+The body is evaluated as one `Script` on a single `ReadWrite` connection (the
+fixed mode is deliberate — tenant work is transactional writes) inside one
+transaction with `ctx` applied via `SET LOCAL rls.*`. Two pre-conditions:
+`body` must not open its own transaction (DBLang transactions are flat), and
+`body` must not assume any RLS context other than `ctx`. Nesting is NOT
+detected — an inner transaction's `COMMIT` ends the wrapper transaction early
+and drops the RLS context for the remainder of `body`. Exceptions roll the
+transaction back and propagate. Prefer it over hand-writing the
+`evalScript . dbScript . withTransactionRLS` chain:
+
+```haskell
+renameActScenario :: Int32 -> Text -> ScenarioProgram Script serviceLib ()
+renameActScenario circusId newDescription =
+    tenantTransaction simpleDb (rlsCircusId circusId) $
+        void $ update patch (CircusActId 1)
+  where
+    patch = CircusAct Nothing Nothing Nothing (Just newDescription) Nothing
+```
 
 ## Review Checklist
 

@@ -14,6 +14,19 @@
 # Tests
 Tests are run with `stack test`.
 
+The full matrix:
+* Root suite `lazy-circus-test` needs a live PostgreSQL (127.0.0.1:5432, db `lazy_circus_test`).
+* `stack test lazy-circus-testing` is DB-free and passes with PostgreSQL stopped.
+
+Targeted run of a single spec/label — the test component is `lazy-circus-test` (not `test`), and hspec arguments go through stack's `--ta`:
+
+```
+stack test lazy-circus:lazy-circus-test --ta '--match "/MyLabel/"'
+stack test lazy-circus-testing --ta '--match "/MyLabel/"'
+```
+
+`--match` follows the hspec describe/it path and is case-insensitive.
+
 
 ## Function Documentation
 

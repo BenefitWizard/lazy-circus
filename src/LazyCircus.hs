@@ -1,8 +1,8 @@
 --   PURPOSE: Provide a top-level facade that re-exports the Script coproduct and
 --   smart constructors for wrapping domain-specific scripts into the unified
 --   interpreter dispatch used by ScenarioProgram.
---   SCOPE: Script coproduct re-export and smart constructors (tgScript, mailScript, aiScript, httpScript, dbScript).
---   DEPENDS: LazyCircus.Script, LazyCircus.Scene.AI.Lang, LazyCircus.Scene.DB.Lang, LazyCircus.Scene.Mail.Lang, LazyCircus.Scene.Telegram.Lang, LazyCircus.Scene.HTTP.Lang
+--   SCOPE: Script coproduct re-export and smart constructors (tgScript, mailScript, aiScript, httpScript, dbScript, tenantTransaction).
+--   DEPENDS: LazyCircus.Script, LazyCircus.Scene.AI.Lang, LazyCircus.Scene.DB.Lang, LazyCircus.Scene.DB.RLS, LazyCircus.Scene.Mail.Lang, LazyCircus.Scene.Telegram.Lang, LazyCircus.Scene.HTTP.Lang
 module LazyCircus (
     -- * Script coproduct
     Script (..),
@@ -12,15 +12,17 @@ module LazyCircus (
     aiScript,
     httpScript,
     dbScript,
+    tenantTransaction,
 ) where
 
 import LazyCircus.DB.Types (PgDB)
 import LazyCircus.Scene.AI.Lang (AIScript)
-import LazyCircus.Scene.DB.Lang (DBScript)
+import LazyCircus.Scene.DB.Lang (DBScript, withTransactionRLS)
+import LazyCircus.Scene.DB.RLS (RLSContext)
 import LazyCircus.Scene.HTTP.Lang (HTTPScript)
 import LazyCircus.Scene.Mail.Lang (MailScript)
 import LazyCircus.Scene.Telegram.Lang (TelegramScript)
-import LazyCircus.Scenario (DbMode)
+import LazyCircus.Scenario (DbMode (..), ScenarioProgram, evalScript)
 import LazyCircus.Script (Script (..))
 import RIO
 import Servant.Client (BaseUrl)
@@ -57,3 +59,20 @@ run against @db@ in the given 'DbMode' ('ReadWrite' or 'ReadOnly').
 -}
 dbScript :: PgDB db -> DbMode -> DBScript db b -> Script b
 dbScript = DBScriptDef
+
+{- | Run a database script as one tenant-scoped transaction inside a scenario.
+PRE-CONTRACT: @body@ must NOT open its own @withTransaction@ /
+'withTransactionRLS'. Nesting is NOT detected or rejected by the framework:
+an inner transaction emits a no-op @BEGIN@ (a Postgres warning) whose @COMMIT@
+ends this wrapper's transaction early — the rest of @body@ then runs outside
+the transaction and without the RLS context, and a later exception no longer
+rolls back the already-committed part. @body@ must not assume any RLS context
+other than @ctx@ — only @ctx@ applies inside the wrapper.
+POST-CONTRACT: Evaluated as one 'Script' via 'evalScript': a single ReadWrite
+connection (the fixed mode is deliberate — tenant scripts are transactional
+writes; use plain 'dbScript' with 'ReadOnly' for context-free reads) inside
+one transaction with @ctx@ applied via @SET LOCAL rls.*@; exceptions roll the
+transaction back and propagate.
+-}
+tenantTransaction :: PgDB db -> RLSContext -> DBScript db a -> ScenarioProgram Script serviceLib a
+tenantTransaction db ctx body = evalScript $ dbScript db ReadWrite $ withTransactionRLS ctx body

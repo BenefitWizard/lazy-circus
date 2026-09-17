@@ -10,6 +10,7 @@ Read this when:
 
 - Operations
 - File Downloads
+- Long Text Chunking
 - Telegram Stars (XTR) Loop
 - Periodic Chat-Action Refresh
 - Review Checklist
@@ -32,6 +33,7 @@ Main operations:
 | `downloadCheckedFile` | `Either FileValidationError (Response File, ByteString)` — two size gates |
 | `getBotName` | `Text` |
 | `sendMessage` | `Response Message` |
+| `sendLongMessage` | `[Response Message]` — splits the text, one `sendMessage` per chunk |
 | `sendDocument` | `Response Message` |
 | `sendInvoice` | `Response Message` — Stars (XTR) invoice |
 | `answerPreCheckoutQuery` | `()` — pre-checkout answer (10 s Bot API deadline) |
@@ -48,6 +50,7 @@ Signatures (module `LazyCircus.Scene.Telegram.Lang`; request/response types come
 ```haskell
 getBotName           :: TelegramScript Text
 sendMessage          :: SendMessageRequest -> TelegramScript (Response Message)
+sendLongMessage      :: SendMessageRequest -> TelegramScript [Response Message]
 sendDocument         :: SendDocumentRequest -> TelegramScript (Response Message)
 sendInvoice          :: SendInvoiceRequest -> TelegramScript (Response Message)
 answerPreCheckoutQuery :: AnswerPreCheckoutQueryRequest -> TelegramScript ()
@@ -117,6 +120,62 @@ Wrap Telegram scripts with `tgScript`:
 ```haskell
 evalScript $ tgScript "demo-bot" $ sendMessage req
 ```
+
+## Long Text Chunking
+
+Module `LazyCircus.Telegram.LongText` is pure: it cuts a text into pieces that
+fit Telegram's message size limit before sending them one chunk per message
+(the Bot API rejects messages over 4096 UTF-16 code units).
+
+| Function | Result |
+|---|---|
+| `telegramMessageChunkLimit` | `Int` — 4000, the chunk length in code points |
+| `splitTelegramText` | `[Text]` — the chunks, in order |
+
+```haskell
+telegramMessageChunkLimit :: Int
+splitTelegramText        :: Text -> [Text]
+```
+
+Each 4000-code-point window is cut at a natural boundary: the LAST newline of
+the window (kept at the end of the chunk), falling back to the LAST space
+(also kept at the chunk end), and only hard-cutting at exactly 4000 when the
+window has neither. The split is lossless
+(`mconcat (splitTelegramText t) == t`); the empty input yields the single
+chunk `[""]`. Lengths are code points (`T.length`), not UTF-16 code units:
+text heavy in astral-plane characters (e.g. emoji) may still exceed Telegram's
+wire limit even when every chunk respects the code-point bound.
+
+Example — send a long report as several messages:
+
+```haskell
+sendLongReport :: Text -> ChatId -> TelegramScript [Response Message]
+sendLongReport body chatId =
+    sendLongMessage (defSendMessage (SomeChatId chatId) body)
+```
+
+### Long messages
+
+The `sendLongMessage` composite (module `LazyCircus.Scene.Telegram.Lang`,
+re-exported by `LazyCircus.Scene.Telegram` together with the pure helpers
+`splitTelegramText` / `telegramMessageChunkLimit`) applies the chunking above
+for you: it splits the request's text with `splitTelegramText` and sends one
+`sendMessage` per chunk, preserving every other request field (parse mode,
+chat id, link preview options, reply markup) unchanged in each chunk send.
+
+```haskell
+sendLongMessage :: SendMessageRequest -> TelegramScript [Response Message]
+```
+
+- PRE: the request text must be the FINAL rendered string — HTML-escape it
+  before calling; the splitter does not account for message entities.
+- POST: responses are returned in send order. Sequencing is best-effort — a
+  failure on chunk i stops the loop with chunks 1..i-1 already delivered
+  (no rollback, no retry of the tail).
+
+Prefer it over a manual `mapM_` over `splitTelegramText` chunks (the pattern
+above before this composite existed) so field preservation and ordering stay
+in one reviewed place.
 
 ## Telegram Stars (XTR) Loop
 
@@ -226,6 +285,7 @@ with `fireScheduledTimers` (see [testing.md](testing.md)).
 ## Review Checklist
 
 - Is the download size limit explicit (`downloadCheckedFile` rather than raw `downloadFileById`)?
+- Is text that may exceed `telegramMessageChunkLimit` split before sending — via `sendLongMessage` (preserves the other request fields), or manually one `sendMessage` per `splitTelegramText` chunk?
 - Are only size rejects handled as `Left` (`FileValidationError`)? Transport errors are exceptions — guarded with `runSafely`.
 - Is periodic chat-action refresh implemented with the re-arm pattern (`runAsyncAfter` tick that re-schedules itself) instead of a `forever`/`threadDelay` worker loop?
 - Do chat-less payment updates (`pre_checkout_query`) route before the chat-id gate and outside per-chat serialisation (10-second answer deadline)?

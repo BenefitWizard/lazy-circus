@@ -9,6 +9,7 @@ module LazyCircus.Scenario (
   evalScript,
   throw,
   runSafely,
+  degradeSafely,
   getDateTime,
   log,
   logInfo,
@@ -19,6 +20,7 @@ module LazyCircus.Scenario (
   getExtraContext,
   readFromExtraContext,
   getFeatureFlag,
+  readExtraContextKnob,
   withLogContext,
   withLogEntry,
   with2LogEntries,
@@ -36,6 +38,7 @@ import LazyCircus.App.Log
 import LazyCircus.App.Service qualified as S
 import LazyCircus.Scene.Log
 import RIO hiding (log, logError, logInfo, logWarn)
+import RIO.Text qualified as Text
 import RIO.Time (NominalDiffTime, UTCTime)
 
 -- | Database connection mode used to select between read-write and read-only connections.
@@ -152,6 +155,20 @@ POST-CONTRACT: Returns a program that yields Either e a according to interpreter
 runSafely :: (Exception e) => ScenarioProgram script serviceLib a -> ScenarioProgram script serviceLib (Either e a)
 runSafely act = FC.liftF $ RunSafely act id
 
+{- | Run an action with graceful degradation: any failure is replaced by a fallback value.
+PRE-CONTRACT: None
+POST-CONTRACT: On success yields the action's value without logging; on any exception emits exactly
+one warning of the form @label: \<error\>@ and yields the supplied fallback value.
+-}
+degradeSafely :: (HasCallStack) => Text -> a -> ScenarioProgram script serviceLib a -> ScenarioProgram script serviceLib a
+degradeSafely label fallback act = do
+  outcome <- runSafely @SomeException act
+  case outcome of
+    Left e -> do
+      logWarn (label <> ": " <> tshow e)
+      pure fallback
+    Right value -> pure value
+
 {- | Request the current UTC time from the interpreter.
 PRE-CONTRACT: None
 POST-CONTRACT: Produces the current time value supplied by the active interpreter.
@@ -225,6 +242,27 @@ getFeatureFlag key = FC.liftF $ GetExtraContext (isEnabled . HM.lookup key)
   isEnabled r = case r of
     Nothing -> False
     Just v -> v == "true"
+
+{- | Read an extra-context knob as a parsed value with a validated default fallback.
+PRE-CONTRACT: None
+POST-CONTRACT: When the key is absent yields the default without logging; when the raw value
+fails to parse or the parsed value fails the predicate, emits exactly one warning and yields
+the default; otherwise yields the parsed value.
+-}
+readExtraContextKnob :: (Read a, Show a) => Text -> (a -> Bool) -> a -> ScenarioProgram script serviceLib a
+readExtraContextKnob key valid fallback = do
+  raw <- readFromExtraContext key
+  let parsed = raw >>= readMaybe . Text.unpack
+  case (raw, parsed) of
+    (Just _, Just value) | valid value -> pure value
+    (Just garbage, _) -> do
+      logWarn $
+        "Invalid " <> key <> " extra-context value "
+          <> tshow garbage
+          <> "; falling back to the default "
+          <> tshow fallback
+      pure fallback
+    _ -> pure fallback
 
 {- | Run a control program with additional logging context entries.
 PRE-CONTRACT: None

@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to the
 [Haskell Package Versioning Policy](https://pvp.haskell.org/).
 
+## 0.3.0.0
+
+### Added
+- `degradeSafely` in `LazyCircus.Scenario`: best-effort scenario combinator — runs
+  an action and, on any exception, emits exactly one `logWarn` (`"<label>: <error>"`)
+  and yields a fallback value; success passes through without logging.
+- `readExtraContextKnob` in `LazyCircus.Scenario`: typed extra-context knob —
+  `Read`-parsed and validated by a predicate; an absent key silently yields the
+  default, a garbage or invalid value emits one warning and yields the default.
+- `tenantTransaction` in the `LazyCircus` facade: the canonical multi-tenant DB
+  idiom — one DB script evaluated as a single `ReadWrite` transaction with an RLS
+  context applied (`evalScript $ dbScript db ReadWrite $ withTransactionRLS ctx body`).
+- `exactlyOne` in the new pure module `LazyCircus.List`: pure `MonadFail`
+  helper requiring exactly one element from a result list, failing with a
+  descriptive message that names the entity and the actual count.
+- New pure module `LazyCircus.Telegram.LongText`: `telegramMessageChunkLimit`
+  (4000 code points) and lossless `splitTelegramText` (cut at the last newline,
+  else the last space, else a hard split; the separator stays at the chunk end).
+  Plus `sendLongMessage` in `LazyCircus.Scene.Telegram.Lang` (re-exported by the
+  `LazyCircus.Scene.Telegram` facade together with the splitter): splits an
+  outgoing message into delivery-sized chunks and sends one `sendMessage` per
+  chunk, preserving all other request fields.
+
 ## 0.2.0.0
 
 ### Added

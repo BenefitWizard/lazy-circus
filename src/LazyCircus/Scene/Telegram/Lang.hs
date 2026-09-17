@@ -14,6 +14,7 @@ module LazyCircus.Scene.Telegram.Lang (
   sendPoll,
   sendInvoice,
   sendImportantMessage,
+  sendLongMessage,
   scheduleMessage,
   scheduleMessages,
   setBotCommands,
@@ -29,9 +30,10 @@ import Control.Monad.Free.Church
 import LazyCircus.LangCode
 import LazyCircus.Scene.Log (HasLogLang (..), LogLangF)
 import LazyCircus.Telegram.FileCheck (FileValidationError (..), checkDownloadedBytes, checkFileSize)
+import LazyCircus.Telegram.LongText (splitTelegramText)
 import LazyCircus.Telegram.Types (WithImportance (..))
 import RIO
-import Telegram.Bot.API (ChatId, Message, MessageId, PollId, Response (..), SendMessageRequest, SetMessageReactionRequest)
+import Telegram.Bot.API (ChatId, Message, MessageId, PollId, Response (..), SendMessageRequest, SetMessageReactionRequest, sendMessageText)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
 import Telegram.Bot.API.Methods.SendDocument (SendDocumentRequest)
 import Telegram.Bot.API.Methods.SendPoll (SendPollRequest)
@@ -161,6 +163,22 @@ POST-CONTRACT: Produces a script that yields the Telegram API response for an im
 -}
 sendImportantMessage :: SendMessageRequest -> TelegramScript (Response Message)
 sendImportantMessage request = liftF $ SendMessage (Important request) id
+
+{- | Composite: split the request text with 'splitTelegramText' and send one
+'sendMessage' per chunk, preserving ALL other request fields (parse mode, chat
+id, link preview options, reply markup, ...) unchanged in every chunk send.
+PRE-CONTRACT: The request text must be the FINAL rendered string — HTML-escape
+it before calling; message entities are not accounted for by the splitter.
+POST-CONTRACT: Produces a script that yields the 'Response Message' of every
+chunk send, in send order. Sequencing is best-effort: a failure on chunk i
+stops the loop with chunks 1..i-1 already delivered — there is no rollback and
+no retry of the tail.
+-}
+sendLongMessage :: SendMessageRequest -> TelegramScript [Response Message]
+sendLongMessage request =
+    traverse (sendMessage . withChunk) (splitTelegramText (sendMessageText request))
+  where
+    withChunk chunk = request{sendMessageText = chunk}
 
 {- | Lift sending a document file via the Telegram Bot API into the Telegram script language.
 PRE-CONTRACT: The request must be valid for the configured Telegram bot and API endpoint.

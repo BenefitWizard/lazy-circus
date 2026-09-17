@@ -89,10 +89,12 @@ multiple effects and control concerns.
 | `evalScript` | run one embedded `Script` |
 | `throw` | raise an exception through the interpreter |
 | `runSafely` | catch typed exceptions and return `Either` |
+| `degradeSafely` | best-effort run: on any exception emit one warning and yield a fallback value |
 | `getDateTime` | get current UTC time |
 | `log` / `logInfo` / `logWarn` / `logError` / `logSensitive` | scenario-level logging |
 | `withLogContext` / `withLogEntry` / `with2LogEntries` | enrich logging context |
 | `getExtraContext` / `readFromExtraContext` / `getFeatureFlag` | read runtime config |
+| `readExtraContextKnob` | parse an extra-context knob with validation, degrading to a default |
 | `runAsync` | schedule async work |
 | `runAsyncAfter` | schedule deferred async work (one-shot timer: fires once, not before the delay, on an async worker; `delay <= 0` = immediate) |
 | `runArbitraryIO` | **fallback** escape hatch — run an arbitrary `IO` when no structured effect fits (see below) |
@@ -104,6 +106,7 @@ Signatures (`sl` = `serviceLib`; module `LazyCircus.Scenario`):
 evalScript            :: script a -> ScenarioProgram script sl a
 throw                 :: Exception e => e -> ScenarioProgram script sl a
 runSafely             :: Exception e => ScenarioProgram script sl a -> ScenarioProgram script sl (Either e a)
+degradeSafely         :: HasCallStack => Text -> a -> ScenarioProgram script sl a -> ScenarioProgram script sl a
 getDateTime           :: ScenarioProgram script sl UTCTime
 logInfo, logWarn, logError, logSensitive :: HasCallStack => Text -> ScenarioProgram script sl ()
 withLogContext        :: [(Text, Text)] -> ScenarioProgram script sl a -> ScenarioProgram script sl a
@@ -112,6 +115,7 @@ with2LogEntries       :: (Show a, Show b) => ((Text, a), (Text, b)) -> ScenarioP
 getExtraContext       :: ScenarioProgram script sl (HashMap Text Text)
 readFromExtraContext  :: Text -> ScenarioProgram script sl (Maybe Text)
 getFeatureFlag        :: Text -> ScenarioProgram script sl Bool
+readExtraContextKnob  :: (Read a, Show a) => Text -> (a -> Bool) -> a -> ScenarioProgram script sl a
 runAsync              :: ScenarioProgram script sl () -> ScenarioProgram script sl ()
 runAsyncAfter         :: NominalDiffTime -> ScenarioProgram script sl () -> ScenarioProgram script sl ()
 runArbitraryIO        :: IO a -> ScenarioProgram script sl a
@@ -196,6 +200,18 @@ featureScenario = do
         logInfo "Feature is enabled"
 ```
 
+For `Read`-able knobs (numbers, durations) use `readExtraContextKnob` instead of hand-rolling
+`readMaybe`: it parses the raw value, validates it with a predicate, and degrades to a default —
+silently when the key is absent, with exactly one `logWarn` when the value is garbage or fails
+validation (garbage and invalid are not distinguished in the log).
+
+```haskell
+readExtraContextKnob :: (Read a, Show a) => Text -> (a -> Bool) -> a -> ScenarioProgram script sl a
+
+-- Non-negative Int knob: "5" -> 5; key absent -> 10 with no log; "banana" or "-3" -> 10 with one warn.
+maxRetries <- readExtraContextKnob "max-retries" (>= 0) 10
+```
+
 ### Using Async Work
 
 `runAsync` does not define how work is executed. It delegates to the active interpreter.
@@ -251,7 +267,30 @@ Good:
 Avoid:
 
 - wrapping the whole scenario by default
-- swallowing errors without logging or handling them
+- swallowing errors without logging or handling them (when a logged fallback IS the intended handling, use `degradeSafely` instead of hand-rolled `runSafely` + discard)
+
+### Graceful Degradation With `degradeSafely`
+
+`degradeSafely` packages the most common `runSafely` use case — best effort, but never crash.
+It runs the action with the exception type pinned to `SomeException`; on failure it emits
+exactly one `logWarn` of the form `"<label>: <error>"` and yields a fallback value; on success
+it yields the value and logs nothing.
+
+```haskell
+degradeSafely :: HasCallStack => Text -> a -> ScenarioProgram script sl a -> ScenarioProgram script sl a
+
+-- Best-effort enrichment: on failure the count degrades to 0, with one warn in the logs.
+unread <- degradeSafely "fetch-unread-count" 0 fetchUnreadCount
+```
+
+`label` is the caller's name of the degraded operation — make it specific enough to find the
+failure in production logs. Use `degradeSafely` for optional, non-critical steps (nice-to-have
+enrichment, cached counters, best-effort notifications) where a degraded answer is acceptable.
+The warning log is the essential half of the contract: swallowing errors WITHOUT logging is
+the anti-pattern — a `runSafely` whose `Left` is silently discarded hides the failure from
+production observability and from test log captures alike. When the failure needs a real
+decision or recovery beyond "log and fall back", use `runSafely` directly and handle the
+`Either` yourself.
 
 ### When To Use `runArbitraryIO`
 

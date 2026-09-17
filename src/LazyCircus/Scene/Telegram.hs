@@ -1,5 +1,5 @@
 --   PURPOSE: Re-export the public Telegram scripting language and interpreter surface so backend scripts can depend on a stable facade instead of the underlying modules.
---   SCOPE: Public re-exports for the Telegram interpreter typeclass, runner, algebra, smart constructors, script alias, and Stars payment helpers used by control programs.
+--   SCOPE: Public re-exports for the Telegram interpreter typeclass, runner, algebra, smart constructors, long-message composite, pure long-text helpers, script alias, and Stars payment helpers used by control programs.
 --   DEPENDS: M-LIB-LANG-TELEGRAM-CLASS, M-LIB-LANG-TELEGRAM-LANG
 
 -- | Stable facade for the Telegram scripting language used across backend scripts.
@@ -17,6 +17,7 @@ module LazyCircus.Scene.Telegram (
   sendPoll,
   sendInvoice,
   sendImportantMessage,
+  sendLongMessage,
   scheduleMessage,
   scheduleMessages,
   setBotCommands,
@@ -37,6 +38,9 @@ module LazyCircus.Scene.Telegram (
   FileValidationError (..),
   telegramMaxDownloadBytes,
   fileSha256Hex,
+  -- Long-text helper re-exports
+  splitTelegramText,
+  telegramMessageChunkLimit,
   -- Stars-payment helper re-exports
   StarsPackage (..),
   mkStarsInvoiceRequest,
@@ -83,6 +87,9 @@ import LazyCircus.Scene.Telegram.Lang (sendInvoice)
 import LazyCircus.Scene.Telegram.Lang (sendImportantMessage)
 
 
+import LazyCircus.Scene.Telegram.Lang (sendLongMessage)
+
+
 import LazyCircus.Scene.Telegram.Lang (scheduleMessage)
 
 
@@ -114,6 +121,9 @@ import LazyCircus.Scene.Log (slogError, slogInfo, slogNotice, slogSensitive, slo
 
 
 import LazyCircus.Telegram.FileCheck (FileValidationError (..), fileSha256Hex, telegramMaxDownloadBytes)
+
+
+import LazyCircus.Telegram.LongText (splitTelegramText, telegramMessageChunkLimit)
 
 
 import LazyCircus.Telegram.Stars (StarsPackage (..))
