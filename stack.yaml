@@ -50,8 +50,9 @@ extra-deps:
     commit: "0767cd8b37358d051b8405c28bb1f7ff7de5e313"
     subdirs:
       - servant-auth/servant-auth-server
-  - github: fizruk/telegram-bot-simple
-    commit: 494251f7cde155955add20f62e1bfc03ea98eba7
+  # Форк с отправкой документов из памяти (ветка send-document-bytes)
+  - github: BenefitWizard/telegram-bot-simple
+    commit: 4183793bbfd077d1bb87f78ef43d25bbdce242cb
     subdirs:
       - telegram-bot-api
       - telegram-bot-simple
@@ -61,7 +62,7 @@ extra-deps:
       - beam-core
       - beam-postgres
   - github: BenefitWizard/telegram-bot-extra
-    commit: 1d8be5aff2668ca15f44417fc7352649f010909f
+    commit: c1620279d1f4f57fd6df9d2e6ad60532df8cb76b
 # - acme-missiles-0.3
 # - git: https://github.com/commercialhaskell/stack.git
 #   commit: e7b331f14bcffb8367cd58fbfc8b40ec7642100a

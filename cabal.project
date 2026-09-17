@@ -15,14 +15,15 @@ source-repository-package
 
 source-repository-package
     type: git
-    location: https://github.com/fizruk/telegram-bot-simple.git
-    tag: 494251f7cde155955add20f62e1bfc03ea98eba7
+    -- Форк с отправкой документов из памяти (ветка send-document-bytes)
+    location: https://github.com/BenefitWizard/telegram-bot-simple.git
+    tag: 4183793bbfd077d1bb87f78ef43d25bbdce242cb
     subdir: telegram-bot-simple
 
 source-repository-package
     type: git
     location: https://github.com/BenefitWizard/telegram-bot-extra.git
-    tag: 1d8be5aff2668ca15f44417fc7352649f010909f
+    tag: c1620279d1f4f57fd6df9d2e6ad60532df8cb76b
 
 source-repository-package
     type: git
