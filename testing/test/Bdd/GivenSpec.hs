@@ -49,7 +49,7 @@ spec = do
             mocks <- makeMocks
             let registry =
                     mkRegistry
-                        [ givenDef "file doc-1 is downloadable" (stagedTgDownloads [(FileId "doc-1", bytes "PDF-BYTES")])
+                        [ givenDef "file doc-1 is downloadable" (\_params -> stagedTgDownloads [(FileId "doc-1", bytes "PDF-BYTES")])
                         ]
                 steps = [st GivenKeyword 2 "file doc-1 is downloadable"]
             result <- runGivens registry steps (appContextFor mocks)
@@ -82,8 +82,8 @@ spec = do
         it "composes as Given defs: seeds accumulate through the interpreter" $ do
             let registry =
                     mkRegistry
-                        [ givenDef "app seeded with alice" (withAppSeed "alice")
-                        , givenDef "app seeded with bob" (withAppSeed "bob")
+                        [ givenDef "app seeded with alice" (\_params -> withAppSeed "alice")
+                        , givenDef "app seeded with bob" (\_params -> withAppSeed "bob")
                         ]
                 steps =
                     [ st GivenKeyword 2 "app seeded with alice"
@@ -104,9 +104,9 @@ spec = do
             mocks <- makeMocks
             let registry =
                     mkRegistry
-                        [ givenDef "file doc-1 is downloadable" (stagedTgDownloads [(FileId "doc-1", "PDF-BYTES")])
-                        , givenDef "assistant answer 4 queued" (queuedAiAnswers [completion "4"])
-                        , givenDef "a clean slate" pure
+                        [ givenDef "file doc-1 is downloadable" (\_params -> stagedTgDownloads [(FileId "doc-1", "PDF-BYTES")])
+                        , givenDef "assistant answer 4 queued" (\_params -> queuedAiAnswers [completion "4"])
+                        , givenDef "a clean slate" (\_params -> pure)
                         ]
                 -- a fixture-free scenario: the only executed Given stages nothing
                 steps = [st GivenKeyword 2 "a clean slate"]

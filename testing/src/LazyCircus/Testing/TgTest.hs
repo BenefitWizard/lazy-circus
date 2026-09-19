@@ -55,6 +55,7 @@ module LazyCircus.Testing.TgTest (
     TgTestConfigError (..),
     -- * The runner
     tgTest,
+    tgTestWithMocks,
     makeTestRuntime,
     Mailboxes (..),
     TgTestError (..),
@@ -259,12 +260,45 @@ ttsLocal f (TelegramTestScript m) = TelegramTestScript (Reader.local f m)
 ttsThrow :: TgTestError -> TelegramTestScript a
 ttsThrow e = TelegramTestScript $ lift (throwE e)
 
-{- | Run a 'TelegramTestScript' end-to-end.
+{- | Run a 'TelegramTestScript' end-to-end against a freshly-allocated 'Mocks'.
 
-The runner owns the observable state: it allocates a fresh 'Mocks' (and thus a
-fresh mailbox), builds a 'TgTestRuntime' via 'makeTestRuntime', and hands both
-the per-sub-language 'TestConfig' and the @Mocks@ to @buildAction@ so your bot
-driver can run under the test performer against the /same/ mocks. It then spawns
+The self-contained flavor of 'tgTestWithMocks': it allocates a fresh 'Mocks'
+(and thus a fresh mailbox) and delegates there, so the two entry points share
+the @buildAction@ seam, the 'TgTestConfigError' runtime guard, the quiescent
+teardown and the 'Mailboxes' snapshot semantics — see 'tgTestWithMocks'.
+
+@buildAction@ receives the 'TestConfig' ('ttgPerformerConfig') and the freshly
+allocated mocks, and returns the bot's @Update -> IO ()@ action — normally your
+production update-driver with the test performer substituted for the production
+performer (e.g. via 'LazyCircus.Testing.Performer.runWithConfig', or
+'LazyCircus.Testing.Performer.runWithMocks' if you want the all-mocked default).
+
+PRE-CONTRACT: @buildAction@ must wire the test performer against the 'Mocks'
+this runner hands it (it does — the allocation is internal), and its returned
+action is safe to run concurrently (the runner dispatches updates
+fire-and-forget). 'ttgPerformerConfig' MUST set 'tcTelegram' = 'Mocked'
+(otherwise 'TgTestConfigError' is thrown).
+POST-CONTRACT: Same as 'tgTestWithMocks' over mocks nothing has been staged
+into; the headless drain loop is cancelled and the returned 'Mailboxes' reflect
+all side effects observable once in-flight work has settled.
+-}
+tgTest ::
+    TgTestConfig app ->
+    (TestConfig app -> Mocks serviceLib -> IO (Update -> IO ())) ->
+    TelegramTestScript a ->
+    IO (Mailboxes, Either TgTestError a)
+tgTest cfg buildAction script = do
+    mocks <- makeMocks
+    tgTestWithMocks cfg mocks buildAction script
+
+{- | Run a 'TelegramTestScript' end-to-end over CALLER-OWNED 'Mocks' — the
+mock-injection flavor of 'tgTest', which allocates fresh mocks and delegates
+here.
+
+The runner treats the supplied mocks as the observable state: 'makeTestRuntime'
+wires the DSL to the mocks' outgoing mailbox, and both the per-sub-language
+'TestConfig' and the @Mocks@ are handed to @buildAction@ so your bot driver can
+run under the test performer against the /same/ mocks. It then spawns
 'runHeadlessBot' in a background thread, feeds the DSL's @send*@ updates into
 the bot, and observes replies through the mailbox. Returns the final 'Mailboxes'
 and either the DSL result or a 'TgTestError'.
@@ -277,11 +311,22 @@ update-driver with the test performer substituted for the production performer
 That is how the test runs the bot's ordinary script with Telegram\/AI\/mail
 mocked.
 
+= Mock-construction compatibility
+
+Any 'Mocks' built the ordinary way is acceptable: mocks from
+'LazyCircus.Testing.Performer.makeMocks' (empty AI queue) with answers appended
+afterwards via the queued-AI-answers helper
+('LazyCircus.Testing.Bdd.Given.queuedAiAnswers') are compatible with
+pre-seeding through 'LazyCircus.Testing.Performer.createAiMock' /
+'LazyCircus.Testing.Performer.makeMocksWithAi' — both shapes are the same
+record with the same FIFO AI response queue and staged-download store the run
+consumes.
+
 = Runtime guard
 
-Before starting the headless bot, 'tgTest' checks that the supplied
+Before starting the headless bot, 'tgTestWithMocks' checks that the supplied
 'TestConfig' mocks Telegram ('tcTelegram' == 'Mocked'). If Telegram is requested
-as 'Real', it throws 'TgTestConfigError' immediately: 'tgTest' observes bot
+as 'Real', it throws 'TgTestConfigError' immediately: the runner observes bot
 replies exclusively through the STM outgoing mailbox, which a real Telegram API
 never populates, so a real-Telegram run would hang forever on the first
 @waitFor*@. AI and Mail MAY still be 'Real' inside 'tgTest' — only Telegram is
@@ -293,24 +338,30 @@ required to be mocked.
 per-update threads are NOT cancelled when the drain loop is cancelled (a known
 library limitation). To keep the 'Mailboxes' snapshot deterministic and to avoid
 an in-flight action thread touching the app's DB connection after the
-surrounding teardown, 'tgTest' waits for the update queue to drain AND for the
+surrounding teardown, the runner waits for the update queue to drain AND for the
 in-flight action count to reach zero before it cancels the drain loop and
 snapshots. A bounded 'quiescenceTimeout' guards against an indefinite hang. A
 short grace covers the microsecond dequeue→spawn window of @asyncLink@.
 
-PRE-CONTRACT: @buildAction@ wires the test performer against the supplied
-@Mocks@, and its returned action is safe to run concurrently (the runner
-dispatches updates fire-and-forget). 'ttgPerformerConfig' MUST set
+PRE-CONTRACT: @mocks@ must be freshly allocated for this run (the BDD runner's
+responsibility) — stale or reused mocks carry prior runs' traffic into the
+returned 'Mailboxes' snapshot. @buildAction@ wires the test performer against
+the SAME @Mocks@, and its returned action is safe to run concurrently (the
+runner dispatches updates fire-and-forget). 'ttgPerformerConfig' MUST set
 'tcTelegram' = 'Mocked' (otherwise 'TgTestConfigError' is thrown).
-POST-CONTRACT: The headless drain loop is cancelled; the returned 'Mailboxes'
+POST-CONTRACT: The DSL observes the passed mocks' outgoing mailbox and
+@buildAction@ is wired to the same mocks, so anything staged into the mocks
+BEFORE the run (queued AI answers, staged downloads) is visible to the bot
+during it. The headless drain loop is cancelled; the returned 'Mailboxes'
 reflect all side effects observable once in-flight work has settled.
 -}
-tgTest ::
+tgTestWithMocks ::
     TgTestConfig app ->
+    Mocks serviceLib ->
     (TestConfig app -> Mocks serviceLib -> IO (Update -> IO ())) ->
     TelegramTestScript a ->
     IO (Mailboxes, Either TgTestError a)
-tgTest cfg buildAction script = do
+tgTestWithMocks cfg mocks buildAction script = do
     let performerCfg = ttgPerformerConfig cfg
     case tcTelegram performerCfg of
         Real ->
@@ -320,7 +371,6 @@ tgTest cfg buildAction script = do
                         <> "Set tcTelegram = Mocked (default) for tgTest, or use runScenarioProgram/runWithConfig for "
                         <> "real-Telegram tests. (AI and Mail may still be Real inside tgTest.)"
         Mocked -> pure ()
-    mocks <- makeMocks
     runtime <- makeTestRuntime cfg mocks
     action <- buildAction performerCfg mocks
     let onActionError e = atomically $ writeTVar (ttrError runtime) (Just e)

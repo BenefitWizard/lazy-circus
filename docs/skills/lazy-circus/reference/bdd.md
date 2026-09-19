@@ -29,10 +29,10 @@ library dependency of this subpackage only; the core stays hspec-free.
 | Module | Responsibility |
 |---|---|
 | `LazyCircus.Testing.Bdd.Gherkin` | pure `parseFeature :: Text -> Either GherkinParseError GherkinFeature`; AST carries line numbers; Outline rows expand at parse time |
-| `LazyCircus.Testing.Bdd.Pattern` | `matchStep :: Pattern -> Text -> Maybe [(ParamName, ParamValue)]`; quoted spans `"..."` and `«...»` capture parameters; `matchAll` for the ambiguity probe |
-| `LazyCircus.Testing.Bdd.Step` | `StepDef m c s a`, `StepRegistry` (first registered match wins), `runScenarioSteps`, structural `StepError` values |
+| `LazyCircus.Testing.Bdd.Pattern` | the `Pattern` ADT (`Template` / `Literal`, `IsString`), `matchStep :: Pattern -> Text -> Maybe [(ParamName, ParamValue)]`; quoted spans `"..."` and `«...»` capture strictly quoted values; `patternSource`, `duplicateParamNames`, `matchAll` (every matching name, input order) |
+| `LazyCircus.Testing.Bdd.Step` | `StepDef m c s a` (actions receive the captured `StepParams`), `StepRegistry` with deterministic `matchingDefs` selection (`Literal` first, then `Template` in registration order), `runScenarioSteps`, structural `StepError` values |
 | `LazyCircus.Testing.Bdd.Journal` | `Observation app`, append-only `ObservationLog`, `awaitObservation`, `peekLastConsumed`, `ScenarioState` |
-| `LazyCircus.Testing.Bdd.Tg` | ready-made Telegram `Then` dictionary over the journal |
+| `LazyCircus.Testing.Bdd.Tg` | ready-made Telegram `Then` dictionary over the journal (expected values read from captures via `lookupParam`) and the canonical `tgTestBootstrap` |
 | `LazyCircus.Testing.Bdd.Given` | `AppContext app` and Given-phase staging combinators |
 | `LazyCircus.Testing.Bdd.Runner` | `gherkinSpec`: hspec tree, coverage meta-test, ambiguity probe, `@blocked` |
 
@@ -71,25 +71,41 @@ row, `And`/`But` before any `Given`/`When`/`Then`).
 
 Not supported: docstrings (`"""`) and data tables in steps.
 
-Parameters live in the PATTERN side as quoted spans — `"name"` and `«name»`. The span
-content is the parameter NAME; the captured step text is the VALUE. Unquoted pattern text
-must match literally after whitespace normalization (runs of whitespace collapse to one
-space on both sides). Captures are non-empty and resolve shortest-first.
+Patterns are the `Pattern` ADT: a string literal denotes a `Template`, and a `Literal`
+matches exactly (quotes are ordinary characters there — use it for step texts that
+contain quotes verbatim). In a template, quoted spans `"name"` and `«name»` hold the
+parameter NAME; the captured step text is the VALUE. Matching is STRICT about quote
+boundaries: a value must appear in the step text wrapped in a PAIR of matching quote
+characters — either style, regardless of the style the span uses (`"alice"`, `«alice»`,
+or a guillemet value under a straight-quote span all match the span `"name"`), the
+capture is the non-empty text strictly between the quotes, and the first closer ends it.
+Unquoted pattern text must match literally; both sides are whitespace-normalized first
+(runs of spaces/tabs collapse to one space, ends trimmed), but quote characters survive
+normalization — collapsing never merges text across a quoted span. An unterminated
+quoted span in the pattern is not an error: it and the rest of the pattern match
+literally.
 
 ## Step Definitions And The Registry
 
 ```haskell
 data StepDef m c s a
-    = GivenDef Pattern (c -> IO c)                          -- pure accumulation
-    | DialogDef GherkinKeyword Pattern (s -> m (s, Maybe a)) -- keyword participates in matching
+    = GivenDef Pattern (StepParams -> c -> IO c)                           -- pure accumulation, captures delivered
+    | DialogDef GherkinKeyword Pattern (StepParams -> s -> m (s, Maybe a)) -- keyword participates in matching
 ```
 
 - All `Given` steps of a scenario must precede its first `When`/`Then` — violations are
   structural `StepError` values with the line number, not runtime exceptions.
 - Matching uses the step's RESOLVED keyword: a `Then` step never fires a When-registered
   pattern.
-- Registries are `Semigroup`/`Monoid`; `mkRegistry` builds one; the FIRST registered
-  matching definition wins. Register narrower patterns before catch-alls.
+- Registries are `Semigroup`/`Monoid`; `mkRegistry` builds one. Selection is
+  deterministic via `matchingDefs`: `Literal` patterns match FIRST, then `Template`
+  patterns, each class in registration order — a fully spelled-out step text always wins
+  over competing templates, so no registration-order discipline is required.
+- Captured parameters are delivered to the action as `StepParams` (name/value pairs in
+  the order the quoted spans appear in the pattern); read one with
+  `lookupParam :: ParamName -> StepParams -> Maybe ParamValue` — `Nothing` only for a
+  name the pattern does not contain. A pattern binding the same name twice fails the
+  step at execution with `StepDuplicateParam`, before the action runs.
 - The interpreter is generic over `m` (needs `MonadIO` only); the canonical instantiation
   is `m = TelegramTestScript`, `c = AppContext app`, `s = ScenarioState app` — that is,
   `ScenarioRegistry serviceLib app m = StepRegistry m (AppContext app) (ScenarioState app) ()`.
@@ -97,12 +113,12 @@ data StepDef m c s a
 ```haskell
 registry :: ScenarioRegistry NoServiceLib () TelegramTestScript
 registry = mkRegistry
-    [ givenDef "the echo bot is awake" (pure . id)
-    , whenDef "the user sends \"$msg\"" $ \st -> do
-        _ <- sendMessage msg                -- plain TelegramTestScript effect
+    [ givenDef "the echo bot is awake" (\_params -> pure . id)
+    , whenDef "the user sends \"$msg\"" $ \params st -> do
+        _ <- sendMessage (fromMaybe "" (lookupParam "$msg" params))  -- plain TelegramTestScript effect
         pure (st, Nothing)
-    , botReplyContains frag                 -- BEFORE the catch-all exact-match step
-    , botRepliesWithMessage msg
+    , botReplyContains                      -- library Then-dictionary values: the expected
+    , botRepliesWithMessage                 -- texts are read from their own captures
     ]
 ```
 
@@ -165,8 +181,14 @@ gherkinSpec :: MonadIO m
   own `it` with the substituted name), preceded by the meta-test and the ambiguity probe
 - `@blocked` scenarios become `pendingWith` skips (their steps still must be registered)
 - the ambiguity probe is a visible, NON-blocking example listing same-phase registry
-  patterns that both match a probe text
+  templates that both match a probe text (a `Literal` match shadows templates by rule
+  and is never reported as ambiguous)
 - isolation mirrors `tgTest`: a fresh `ObservationLog` and fresh `Mocks` per scenario
+- the CANONICAL bootstrap is `tgTestBootstrap` (`LazyCircus.Testing.Bdd.Tg`): pass it
+  your run config and `buildAction` — `tgTestBootstrap defaultTgTestConfig (buildAction
+  app)` — and the library wires each scenario's fresh journal via `tcJournal` and runs
+  the step program as a `tgTestWithMocks` dialog over the runner-owned mocks (a
+  `gherkinSpec` scenario IS a `tgTest` run)
 - the runner never touches PostgreSQL; `testing/test/Bdd/RunnerSpec.hs` shows a
   database-free `DefaultApp` construction for the test-performer path
 - known limitation: attribution of a failed step is runner-granular (the `StepError`
@@ -180,8 +202,9 @@ emptyAppContext :: AppContext app              -- the DEFAULT: nothing wired
 appContextFor   :: Mocks serviceLib -> AppContext app   -- wire mock targets
 
 -- Given-action producers: each returns `AppContext app -> IO (AppContext app)` —
--- exactly the action slot of `GivenDef`, so an app registry bakes its fixture
--- values in via `givenDef`:
+-- exactly the action slot of `GivenDef` once the captured params are fixed
+-- (`\_params -> stagedTgDownloads ...`); fixture values are NOT baked in at
+-- registration — a staging step keys them off its own captures:
 stagedTgDownloads :: [(FileId, ByteString)]
                   -> AppContext app -> IO (AppContext app)  -- stage canned downloads (addTgDownloads)
 queuedAiAnswers   :: [Chat.ChatCompletionObject]
@@ -189,8 +212,8 @@ queuedAiAnswers   :: [Chat.ChatCompletionObject]
 withAppSeed       :: app
                   -> AppContext app -> IO (AppContext app)  -- accumulate an app-specific seed
 
--- > givenDef "file \"doc-1\" is downloadable"
--- >     (stagedTgDownloads [(FileId "doc-1", pdfBytes)])
+-- > givenDef "file \"$name\" is downloadable" $ \params ->
+-- >     stagedTgDownloads [(FileId (fromMaybe "doc-1" (lookupParam "$name" params)), pdfBytes)]
 ```
 
 The default context is empty by design: a spec cannot silently rely on fixtures it never
@@ -199,17 +222,32 @@ declared — staging into an unwired context fails loudly.
 ## Worked Example (Echo Bot)
 
 `testing/test/Bdd/EchoSmokeSpec.hs` runs an inline feature through `gherkinSpec` against a
-database-free echo app: When `the user sends "$msg"` drives `sendMessage`, Then
-`the bot replies with "$msg"` consumes the journaled reply, And
-`the bot replies with a message containing "$frag"` re-inspects the last consumed message
-without waiting. The suite passes with PostgreSQL
-stopped — DB and HTTP are the only always-real sub-languages and the echo never touches them.
+database-free echo app. The registry is a STATIC value shared by every scenario
+(`\_ -> pure echoRegistry`) — nothing is baked in at registration: the When action reads
+the user's words via `lookupParam "$msg"`, the Given staging def keys the canned bytes
+off its own `"$name"` capture, and the library Then-constructors read their expected
+texts from their own captures. The bootstrap is the canonical `tgTestBootstrap
+defaultTgTestConfig (buildEchoAction app)`.
+
+Covered flows: When `the user sends "$msg"` drives `sendMessage`; Then `the bot replies
+with "$text"` consumes the journaled reply; And `the bot replies with a message
+containing "$frag"` re-inspects the last consumed message without waiting; the scenario
+`echoes twice with different words` runs the same When/Then patterns at two values (the
+static-registry regression); the scenario `replies with the staged file size` stages a
+download via `file "doc-1" is downloadable`, uploads it via `the user uploads document
+"$file"`, and asserts the byte-length reply. The suite passes with PostgreSQL stopped —
+DB and HTTP are the only always-real sub-languages and the echo never touches them.
 
 ## Review Checklist
 
 - Does every feature step match a registry entry (meta-test green) and does the ambiguity
   probe report no unintended collisions?
-- Are narrower patterns registered before catch-alls (first match wins)?
+- Does every pattern bind each parameter name at most once (`StepDuplicateParam` fails
+  the step at execution)?
+- Do feature steps quote every parameter value (`"value"` / `«value»`)? An unquoted
+  value does not match.
+- Is deterministic selection used consciously (`Literal` beats competing templates;
+  within a class, registration order decides)?
 - Are `Given` steps before the first `When`/`Then`, and is the default context empty unless
   fixtures are explicitly staged?
 - Is each `Then` consuming exactly one observation, with `And`-continuations reading via

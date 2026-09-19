@@ -8,14 +8,17 @@
 -- after a Then), the Given-after-When\/Then phase violation with its line
 -- number, keyword participation in matching (a Then step does not select a
 -- When-registered pattern), context\/state threading observed through the
--- collected values, first-registered-match-wins determinism, and the
+-- collected values, literal-before-template selection determinism (the
+-- shared registry selector), duplicate-parameter rejection, and the
 -- structural undefined-step error with line and text.
 module Bdd.StepSpec (spec) where
 
 import Control.Monad.Trans.State.Strict (StateT, modify', runStateT)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import LazyCircus.Testing.Bdd.Gherkin
+import LazyCircus.Testing.Bdd.Pattern (Pattern (..), lookupParam)
 import LazyCircus.Testing.Bdd.Step
 import Test.Hspec
 
@@ -26,10 +29,10 @@ spec = do
             do
                 let steps =
                         [ st GivenKeyword 2 "a user"
-                        , st WhenKeyword 3 "user alice acts"
-                        , st ThenKeyword 4 "role admin assigned"
-                        , st WhenKeyword 5 "user alice departs"
-                        , st ThenKeyword 6 "role admin revoked"
+                        , st WhenKeyword 3 "user \"alice\" acts"
+                        , st ThenKeyword 4 "role \"admin\" assigned"
+                        , st WhenKeyword 5 "user \"alice\" departs"
+                        , st ThenKeyword 6 "role \"admin\" revoked"
                         ]
                 (result, dialogLog) <- runSteps eimRegistry steps
                 case result of
@@ -43,11 +46,11 @@ spec = do
             do
                 let registry =
                         mkRegistry
-                            [ whenDef "user \"name\" acts" (bump "acts")
-                            , givenDef "a user" (appendContext "A")
+                            [ whenDef "user \"name\" acts" (\_params -> bump "acts")
+                            , givenDef "a user" (\_params -> appendContext "A")
                             ]
                     steps =
-                        [ st WhenKeyword 3 "user alice acts"
+                        [ st WhenKeyword 3 "user \"alice\" acts"
                         , st GivenKeyword 4 "a user"
                         ]
                 (result, _) <- runSteps registry steps
@@ -62,15 +65,15 @@ spec = do
 
         it "does not match a Then step against a When-registered pattern (resolved keyword participates)" $
             do
-                let registry = mkRegistry [whenDef "user \"name\" acts" (bump "acts")]
-                    steps = [st ThenKeyword 3 "user alice acts"]
+                let registry = mkRegistry [whenDef "user \"name\" acts" (\_params -> bump "acts")]
+                    steps = [st ThenKeyword 3 "user \"alice\" acts"]
                 (result, _) <- runSteps registry steps
                 result
                     `shouldBe` Left
                         (StepError
                             { stepErrorScenario = "test scenario"
                             , stepErrorLine = 3
-                            , stepErrorStepText = "user alice acts"
+                            , stepErrorStepText = "user \"alice\" acts"
                             , stepErrorReason = StepKeywordMismatch WhenKeyword
                             })
 
@@ -78,10 +81,10 @@ spec = do
             do
                 let registry =
                         mkRegistry
-                            [ givenDef "context starts" (appendContext "A")
-                            , givenDef "context grows" (appendContext "B")
-                            , whenDef "action happens" (bump "act")
-                            , thenDef "all good" (bump "check")
+                            [ givenDef "context starts" (\_params -> appendContext "A")
+                            , givenDef "context grows" (\_params -> appendContext "B")
+                            , whenDef "action happens" (\_params -> bump "act")
+                            , thenDef "all good" (\_params -> bump "check")
                             ]
                     steps =
                         [ st GivenKeyword 2 "context starts"
@@ -97,29 +100,72 @@ spec = do
                         stepOutcomeState outcome `shouldBe` 2
                     other -> expectationFailure ("unexpected error: " <> show other)
 
-        it "selects the first registered matching definition when two patterns of the same phase match" $
+        it "selects the literal definition over a matching template regardless of registration order (strict semantics)" $
             do
-                let greedy = whenDef "user \"name\"" (bump "greedy")
-                    exact = whenDef "user \"name\" acts" (bump "exact")
-                    steps = [st WhenKeyword 3 "user alice acts"]
-                (greedyFirst, _) <- runSteps (mkRegistry [greedy, exact]) steps
-                (exactFirst, _) <- runSteps (mkRegistry [exact, greedy]) steps
-                case greedyFirst of
-                    Right outcome -> do
-                        stepOutcomeValues outcome `shouldBe` ["greedy:1"]
-                        map stepRunParams (stepOutcomeSteps outcome)
-                            `shouldBe` [[("name", "alice acts")]]
+                let capture = whenDef "user \"$x\" acts" (\_params -> bump "capture")
+                    exact = whenDef (Literal "user \"mary\" acts") (\_params -> bump "exact")
+                    steps = [st WhenKeyword 3 "user \"mary\" acts"]
+                (captureFirst, _) <- runSteps (mkRegistry [capture, exact]) steps
+                (exactFirst, _) <- runSteps (mkRegistry [exact, capture]) steps
+                mapM_
+                    ( \result -> case result of
+                        Right outcome -> do
+                            stepOutcomeValues outcome `shouldBe` ["exact:1"]
+                            map stepRunParams (stepOutcomeSteps outcome)
+                                `shouldBe` [[]]
+                        other -> expectationFailure ("unexpected error: " <> show other)
+                    )
+                    [captureFirst, exactFirst]
+
+        it "keeps registration order between two matching templates of the same phase" $
+            do
+                let wider = whenDef "user \"name\" acts" (\_params -> bump "wider")
+                    narrower = whenDef "user \"alice\" acts" (\_params -> bump "narrower")
+                    steps = [st WhenKeyword 3 "user \"alice\" acts"]
+                (widerFirst, _) <- runSteps (mkRegistry [wider, narrower]) steps
+                (narrowerFirst, _) <- runSteps (mkRegistry [narrower, wider]) steps
+                case widerFirst of
+                    Right outcome -> stepOutcomeValues outcome `shouldBe` ["wider:1"]
                     other -> expectationFailure ("unexpected error: " <> show other)
-                case exactFirst of
-                    Right outcome -> do
-                        stepOutcomeValues outcome `shouldBe` ["exact:1"]
-                        map stepRunParams (stepOutcomeSteps outcome)
-                            `shouldBe` [[("name", "alice")]]
+                case narrowerFirst of
+                    Right outcome -> stepOutcomeValues outcome `shouldBe` ["narrower:1"]
                     other -> expectationFailure ("unexpected error: " <> show other)
+
+        it "passes the captured parameters into the step action (StepParams)" $
+            do
+                let registry =
+                        mkRegistry
+                            [ whenDef "user \"$x\" acts" $ \params s -> do
+                                let name = fromMaybe "" (lookupParam "$x" params)
+                                modify' (++ [name])
+                                pure (s + 1, Just (name <> ":1"))
+                            ]
+                    steps = [st WhenKeyword 3 "user \"mary\" acts"]
+                (result, dialogLog) <- runSteps registry steps
+                case result of
+                    Right outcome -> do
+                        stepOutcomeValues outcome `shouldBe` ["mary:1"]
+                        dialogLog `shouldBe` ["mary"]
+                    other -> expectationFailure ("unexpected error: " <> show other)
+
+        it "fails a step whose pattern binds a parameter twice, with the step's line, before running the action" $
+            do
+                let registry = mkRegistry [whenDef "\"$x\" then \"$x\"" (\_params -> bump "never")]
+                    steps = [st WhenKeyword 9 "\"a\" then \"a\""]
+                (result, dialogLog) <- runSteps registry steps
+                dialogLog `shouldBe` []
+                result
+                    `shouldBe` Left
+                        (StepError
+                            { stepErrorScenario = "test scenario"
+                            , stepErrorLine = 9
+                            , stepErrorStepText = "\"a\" then \"a\""
+                            , stepErrorReason = StepDuplicateParam "$x"
+                            })
 
         it "reports an unmatched step as a structural error with line and text" $
             do
-                let registry = mkRegistry [whenDef "user \"name\" acts" (bump "acts")]
+                let registry = mkRegistry [whenDef "user \"name\" acts" (\_params -> bump "acts")]
                     steps = [st WhenKeyword 7 "nobody registered this"]
                 (result, _) <- runSteps registry steps
                 result
@@ -171,9 +217,9 @@ bump tag s = do
 eimRegistry :: StepRegistry M Text Int Text
 eimRegistry =
     mkRegistry
-        [ givenDef "a user" (appendContext "A")
-        , whenDef "user \"name\" acts" (bump "acts")
-        , thenDef "role \"role\" assigned" (bump "assigned")
-        , whenDef "user \"name\" departs" (bump "departs")
-        , thenDef "role \"role\" revoked" (bump "revoked")
+        [ givenDef "a user" (\_params -> appendContext "A")
+        , whenDef "user \"name\" acts" (\_params -> bump "acts")
+        , thenDef "role \"role\" assigned" (\_params -> bump "assigned")
+        , whenDef "user \"name\" departs" (\_params -> bump "departs")
+        , thenDef "role \"role\" revoked" (\_params -> bump "revoked")
         ]

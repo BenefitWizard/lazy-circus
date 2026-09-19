@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to the
 [Haskell Package Versioning Policy](https://pvp.haskell.org/).
 
+## Unreleased
+
+### Added
+- `StepParams` and `lookupParam` in `LazyCircus.Testing.Bdd.Pattern`: the captured
+  parameters of a matched step (name/value pairs in pattern order), delivered to every
+  step action; `lookupParam` reads one capture by name.
+- The `Pattern` ADT in `LazyCircus.Testing.Bdd.Pattern`: `Template` (step text
+  interleaved with quoted parameter spans) vs `Literal` (exact match; quote characters
+  are ordinary characters), with an `IsString` instance so string-literal patterns keep
+  compiling; plus `patternSource` (renders a pattern back to its source text) and
+  `duplicateParamNames` (names bound more than once, in order of their second
+  occurrence).
+- `matchingDefs` in `LazyCircus.Testing.Bdd.Step`: deterministic registry selection —
+  `Literal` matches first, then `Template` matches, each class in registration order.
+- `StepDuplicateParam` in `LazyCircus.Testing.Bdd.Step`: a step whose matched pattern
+  binds a parameter name more than once fails at execution, before the action runs.
+- `tgTestWithMocks` in `LazyCircus.Testing.TgTest`: the mock-injection flavor of
+  `tgTest`, running the DSL over caller-owned `Mocks` so pre-run staging is visible to
+  the bot; `tgTest` now allocates fresh mocks and delegates there.
+- `tgTestBootstrap` in `LazyCircus.Testing.Bdd.Tg`: the canonical `tgTest`-shaped
+  `ScenarioBootstrap` — each `gherkinSpec` scenario runs as a `tgTestWithMocks` dialog
+  over the runner-owned mocks with the scenario's fresh journal wired via `tcJournal`.
+- Echo smoke (`testing/test/Bdd/EchoSmokeSpec.hs`): a Given-staged download scenario
+  (`replies with the staged file size`) and a static-registry regression scenario
+  (`echoes twice with different words`).
+
+### Changed
+- **(Breaking)** `StepDef` / `givenDef` / `whenDef` / `thenDef` take a `StepParams`
+  action slot — captured parameters are delivered to the action instead of being baked
+  into the definition at registration. Migrate `givenDef pat (pure . id)` to
+  `givenDef pat (\_params -> pure . id)` and read values with `lookupParam`.
+- **(Breaking)** the `LazyCircus.Testing.Bdd.Tg` dictionary constructors
+  (`botRepliesWithMessage`, `botReplyContains`, `botRepliesWithKeyboard`, `botReactsTo`,
+  `botDeletesMessage`, `botSendsDocument`) lost their value arguments: expected values
+  are read from the step text's own captured parameters.
+- **(Breaking)** matching is strict about quote boundaries: a capture requires the step
+  value to appear quoted in the step text with the SAME quote characters as the pattern
+  span (`"..."` or `«...»`; the value is the non-empty text strictly between the quotes,
+  and the first closer ends it), and `Literal` patterns match exactly. Unquoted step
+  values no longer match.
+- Duplicate parameter names in a matched pattern now fail the step at execution
+  (`StepDuplicateParam`) instead of being a registration-time concern.
+- Registration-order contracts were removed: deterministic `Literal`-first selection
+  (`matchingDefs`) replaces the "register narrower patterns before catch-alls"
+  discipline.
+
 ## 0.3.0.0
 
 ### Added

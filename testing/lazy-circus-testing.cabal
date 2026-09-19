@@ -81,6 +81,7 @@ test-suite test
       Bdd.StepSpec
       Bdd.TgSpec
       LazyCircus.Testing.SmokeSpec
+      LazyCircus.Testing.TgTestSpec
       TestSupport.DbFreeApp
       Paths_lazy_circus_testing
   hs-source-dirs:

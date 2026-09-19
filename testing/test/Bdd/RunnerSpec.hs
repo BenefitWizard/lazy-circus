@@ -18,9 +18,11 @@ passes; an undefined step fails the coverage meta-test with a single
 @feature \/ scenario \/ line \/ step text@ listing; a @\@blocked@ scenario
 is skipped visibly instead of failing; every @Scenario Outline:@ row
 becomes its own @it@ with the substituted name; a genuinely ambiguous
-registry (two same-phase patterns on one step text) keeps the tree green
-while the ambiguity probe's captured report names both colliding
-patterns; and the canonical
+registry (two same-phase templates competing for one step text) keeps the
+tree green while the ambiguity probe's captured report names both colliding
+patterns; a literal definition shadowing a matching template is both covered
+by the meta-test and selected by the run, in either registration order (the
+interpreter and the meta-test share one selector); and the canonical
 test-performer wiring ('LazyCircus.Testing.Performer.runWithConfig' with
 the fresh journal injected via @tcJournal@) records observations that the
 post-scenario verifier reads back from the journal snapshot.
@@ -42,6 +44,7 @@ import LazyCircus.Testing.Bdd.Journal
     , ScenarioState (..)
     , appendObservation
     )
+import LazyCircus.Testing.Bdd.Pattern (Pattern (..))
 import LazyCircus.Testing.Bdd.Runner
 import LazyCircus.Testing.Bdd.Step (StepRegistry, givenDef, mkRegistry, thenDef, whenDef)
 import LazyCircus.Testing.Performer
@@ -114,8 +117,17 @@ spec = describe "gherkinSpec (BDD runner)" $ do
             `shouldSatisfy` T.isInfixOf
                 ( "ambiguous feature / colliding replies / line 5 / the bot replies with \"hello\""
                     <> " is matched by 2 same-phase patterns"
-                    <> ": 'the bot replies with \"msg\"', 'the bot replies \"what\"'"
+                    <> ": 'the bot replies with \"msg\"', 'the bot replies with \"what\"'"
                 )
+
+    it "a literal shadowing a template is both covered and selected — meta-test and interpreter share the selector" $ do
+        forM_ shadowRegistries $ \registry -> do
+            (summary, _) <- runRunnerSpec (registryGherkinSpec registry greenFeature)
+            -- meta-test + probe + one scenario, all green in BOTH
+            -- registration orders: the literal-matched step is covered AND
+            -- the run deterministically selects it, never reporting ambiguity
+            summaryExamples summary `shouldBe` 3
+            summaryFailures summary `shouldBe` 0
 
     it "test-performer wiring records journal observations the verifier reads back" $ do
         (summary, report) <- runRunnerSpec performerSpec
@@ -129,10 +141,15 @@ spec = describe "gherkinSpec (BDD runner)" $ do
 -- | Binds the echo registry, the plain-IO bootstrap and the echo verifier
 -- into one runner spec for an inline feature.
 ioGherkinSpec :: Text -> Spec
-ioGherkinSpec source =
+ioGherkinSpec = registryGherkinSpec ioRegistry
+
+-- | Binds the given registry, the plain-IO bootstrap and the echo verifier
+-- into one runner spec for an inline feature.
+registryGherkinSpec :: ScenarioRegistry NoServiceLib () IO -> Text -> Spec
+registryGherkinSpec registry source =
     gherkinSpec
         (FeatureInline "inline feature" source)
-        (\_scenario -> pure ioRegistry)
+        (\_scenario -> pure registry)
         ioBootstrap
         echoVerifier
 
@@ -150,19 +167,41 @@ ambiguousGherkinSpec source =
 -- untouched; the captured parameter is never inspected.
 ioRegistry :: ScenarioRegistry NoServiceLib () IO
 ioRegistry = mkRegistry
-    [ givenDef "the echo bot is awake" (\ctx -> pure ctx)
-    , whenDef "the user sends \"msg\"" (\st -> pure (st, Nothing))
-    , thenDef "the bot replies with \"msg\"" (\st -> pure (st, Nothing))
+    [ givenDef "the echo bot is awake" (\_params ctx -> pure ctx)
+    , whenDef "the user sends \"msg\"" (\_params st -> pure (st, Nothing))
+    , thenDef "the bot replies with \"msg\"" (\_params st -> pure (st, Nothing))
     ]
 
--- | Ambiguous registry: two Then patterns that both match the same step
--- text (the ambiguity-probe fodder); first-match-wins keeps scenarios green.
+-- | Ambiguous registry: two same-phase Template Then patterns that both
+-- match the same step text — a genuine template-vs-template collision (the
+-- ambiguity-probe fodder); template-vs-template registration order keeps
+-- scenarios green.
 ambiguousRegistry :: ScenarioRegistry NoServiceLib () IO
 ambiguousRegistry = mkRegistry
-    [ givenDef "the echo bot is awake" (\ctx -> pure ctx)
-    , whenDef "the user sends \"msg\"" (\st -> pure (st, Nothing))
-    , thenDef "the bot replies with \"msg\"" (\st -> pure (st, Nothing))
-    , thenDef "the bot replies \"what\"" (\st -> pure (st, Nothing))
+    [ givenDef "the echo bot is awake" (\_params ctx -> pure ctx)
+    , whenDef "the user sends \"msg\"" (\_params st -> pure (st, Nothing))
+    , thenDef "the bot replies with \"msg\"" (\_params st -> pure (st, Nothing))
+    , thenDef "the bot replies with \"what\"" (\_params st -> pure (st, Nothing))
+    ]
+
+-- | Registries where a Literal When and a Template When both match the green
+-- feature's When step, in both registration orders: the literal must be
+-- covered by the meta-test AND selected by the run (both consumers go
+-- through the shared registry selector), and the probe must stay silent.
+shadowRegistries :: [ScenarioRegistry NoServiceLib () IO]
+shadowRegistries =
+    [ mkRegistry
+        [ givenDef "the echo bot is awake" (\_params ctx -> pure ctx)
+        , whenDef "the user sends \"msg\"" (\_params st -> pure (st, Nothing))
+        , whenDef (Literal "the user sends \"hello\"") (\_params st -> pure (st, Nothing))
+        , thenDef "the bot replies with \"msg\"" (\_params st -> pure (st, Nothing))
+        ]
+    , mkRegistry
+        [ givenDef "the echo bot is awake" (\_params ctx -> pure ctx)
+        , whenDef (Literal "the user sends \"hello\"") (\_params st -> pure (st, Nothing))
+        , whenDef "the user sends \"msg\"" (\_params st -> pure (st, Nothing))
+        , thenDef "the bot replies with \"msg\"" (\_params st -> pure (st, Nothing))
+        ]
     ]
 
 -- | Plain-IO executor: the prepared step program already is an 'IO' action.
@@ -263,11 +302,11 @@ performerSpec =
 -- the scenario's journal (read through 'ScenarioState').
 performerRegistry :: MonadIO m => StepRegistry m (AppContext ()) (ScenarioState ()) ()
 performerRegistry = mkRegistry
-    [ givenDef "the echo bot is awake" (\ctx -> pure ctx)
-    , whenDef "the user sends \"msg\"" (\st -> do
+    [ givenDef "the echo bot is awake" (\_params ctx -> pure ctx)
+    , whenDef "the user sends \"msg\"" (\_params st -> do
             liftIO (atomically (appendObservation (ssLog st) (ObsApp ())))
             pure (st, Nothing))
-    , thenDef "the bot replies with \"msg\"" (\st -> pure (st, Nothing))
+    , thenDef "the bot replies with \"msg\"" (\_params st -> pure (st, Nothing))
     ]
 
 -- | Canonical app wiring under the test performer (the documented

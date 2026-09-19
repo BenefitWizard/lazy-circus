@@ -12,6 +12,7 @@ Read this when:
 - Why this is different from `runScenarioProgram`
 - The Runner Contract
 - The `buildAction` Seam
+- Using `tgTest` Through The BDD Runner
 - The DSL
 - Example: green-path dialog
 - Example: inline-keyboard button press + reaction
@@ -60,14 +61,42 @@ tgTest ::
     (TestConfig app -> Mocks serviceLib -> IO (Update -> IO ())) ->
     TelegramTestScript a ->
     IO (Mailboxes, Either TgTestError a)
+
+tgTestWithMocks ::
+    TgTestConfig app ->
+    Mocks serviceLib ->
+    (TestConfig app -> Mocks serviceLib -> IO (Update -> IO ())) ->
+    TelegramTestScript a ->
+    IO (Mailboxes, Either TgTestError a)
 ```
 
-`tgTest` owns the observable state: it allocates a fresh `Mocks` (and thus a
-fresh mailbox), builds a `TgTestRuntime`, and hands the `TestConfig` (from
-`ttgPerformerConfig`) plus the `Mocks` to `buildAction` so your bot driver can
-run under the test performer against the **same** mocks. It then spawns
-`runHeadlessBot` in a background thread, feeds the DSL's `send*` updates into
-the bot, observes replies through the mailbox, and returns the final
+`tgTestWithMocks` is the core runner: it runs the DSL over CALLER-OWNED mocks.
+
+- **PRE-CONTRACT:** `mocks` must be freshly allocated for this run — stale or reused
+  mocks carry prior runs' traffic into the returned snapshot. `buildAction` must wire the
+  test performer against the SAME `Mocks`, and its returned action must be safe to run
+  concurrently (updates are dispatched fire-and-forget). `ttgPerformerConfig` MUST set
+  `tcTelegram` = `Mocked` (otherwise `TgTestConfigError` is thrown).
+- **POST-CONTRACT:** the DSL observes the passed mocks' outgoing mailbox, and
+  `buildAction` is wired to the same mocks — so anything staged into the mocks BEFORE
+  the run (queued AI answers, staged downloads) is visible to the bot during it. The
+  headless drain loop is cancelled; the returned `Mailboxes` reflect all side effects
+  once in-flight work has settled.
+
+Any `Mocks` built the ordinary way is acceptable: fresh mocks with AI answers appended
+afterwards (e.g. via the BDD Given helper `queuedAiAnswers`) are compatible with
+pre-seeded ones — both are the same record with the same FIFO AI response queue and
+staged-download store the run consumes.
+
+`tgTest` is the self-contained flavor: it allocates a fresh `Mocks` (and thus a fresh
+mailbox) and delegates to `tgTestWithMocks`, so the two entry points share the
+`buildAction` seam, the runtime guard, the quiescent teardown and the `Mailboxes`
+snapshot semantics.
+
+The core hands the `TestConfig` (from `ttgPerformerConfig`) plus the mocks to
+`buildAction` so your bot driver can run under the test performer against the **same**
+mocks. It then spawns `runHeadlessBot` in a background thread, feeds the DSL's `send*`
+updates into the bot, observes replies through the mailbox, and returns the final
 `Mailboxes` snapshot together with either the DSL result or a `TgTestError`.
 
 `buildAction` receives the performer `TestConfig` and the mocks, and returns
@@ -85,12 +114,13 @@ data TgTestConfig app = TgTestConfig
 defaultTgTestConfig :: TgTestConfig app   -- 2-second timeout, all-mocked performer config (polymorphic)
 ```
 
-**Runtime guard:** `tgTest` throws `TgTestConfigError` **before** starting the
-headless bot if `tcTelegram` (from `ttgPerformerConfig`) is `Real`. This is
-because `tgTest` observes bot replies through the STM outgoing mailbox, which a
-real Telegram API never populates — a real-Telegram `tgTest` would hang forever
-on the first `waitFor*`. AI and Mail may still be `Real` inside `tgTest` (they
-do not interfere with the mailbox mechanism).
+**Runtime guard:** the `tcTelegram` = `Mocked` check lives in the shared core
+(`tgTestWithMocks`), so BOTH entry points throw `TgTestConfigError` **before**
+starting the headless bot when `tcTelegram` (from `ttgPerformerConfig`) is `Real`.
+This is because the runner observes bot replies through the STM outgoing mailbox,
+which a real Telegram API never populates — a real-Telegram run would hang forever
+on the first `waitFor*`. AI and Mail may still be `Real` (they do not interfere
+with the mailbox mechanism).
 
 ## The `buildAction` Seam
 
@@ -120,6 +150,30 @@ runTgTest app = tgTest defaultTgTestConfig (buildAction app)
 
 See `test/TestHelpers/Bot.hs` for the canonical wiring against the demo bot's
 `BotHandler.runUpdate`.
+
+## Using `tgTest` Through The BDD Runner
+
+A `gherkinSpec` scenario IS a `tgTest` run. The BDD runner
+(`LazyCircus.Testing.Bdd.Runner`, see [bdd.md](bdd.md)) allocates a fresh
+`ObservationLog` and fresh `Mocks` per scenario and hands both to the bootstrap —
+the canonical one is `tgTestBootstrap` (`LazyCircus.Testing.Bdd.Tg`):
+
+```haskell
+gherkinSpec (FeatureInline "echo feature" doc)
+            (\_ -> pure echoRegistry)               -- static registry, shared per scenario
+            (tgTestBootstrap defaultTgTestConfig (buildEchoAction app))
+            echoVerifier
+```
+
+`tgTestBootstrap baseCfg buildAction journal mocks` builds the executor that runs the
+scenario's step program as a `tgTestWithMocks` dialog over the runner-owned mocks, with
+the scenario's fresh journal injected via `tcJournal = Just journal`. Because the DSL and
+the bot's `buildAction` share those very mocks, Given-phase staging performed on them
+(e.g. `stagedTgDownloads`) is visible to the bot during the dialog. The library Telegram
+`Then`-dictionary (`botRepliesWithMessage`, `botReplyContains`, ...) consumes the journal
+instead of raw `waitFor*` calls, and the runner discards the run's `Mailboxes` in favor
+of the journal snapshot its verifier receives. The runner satisfies the
+`tgTestWithMocks` freshness PRE-CONTRACT by construction: fresh mocks per scenario.
 
 ## The DSL
 
@@ -357,6 +411,10 @@ snapshot reflects all side effects once in-flight work has settled.
 - **Forgetting to share the mocks.** `buildAction` MUST wire the test performer
   against the *same* `Mocks` the runner handed it, or replies never reach the
   mailbox the DSL observes.
+- **Reusing mocks across `tgTestWithMocks` runs.** The mocks are the run's
+  observable state: pass a freshly allocated `Mocks` (as `tgTest` itself does), or
+  prior runs' traffic pollutes the dialog and the `Mailboxes` snapshot. The BDD
+  runner satisfies this by allocating fresh mocks per scenario.
 - **Asserting on side effects from `runAsync` in Mocked mode.** Test `runAsync` with
   `tcAsync = Mocked` (the default) only captures scheduled scenarios — assert via
   `mbScheduledScenarioCount` or `readScheduledScenarios`, never via observed Telegram traffic.

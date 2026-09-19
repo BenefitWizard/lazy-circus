@@ -11,8 +11,9 @@ self-contained hspec tree:
     On gaps it fails ONCE, listing every uncovered step as
     @feature \/ scenario \/ line \/ step text@ (see 'metaCoverageExampleName');
   * the ambiguity /probe/ example SECOND: non-blocking (always green), it
-    reports every pair of same-phase registry patterns that both match one
-    of the feature's step texts (see 'ambiguityProbeExampleName');
+    reports every feature step text that two or more same-phase 'Template'
+    patterns compete for — a 'Literal' match wins deterministically and is
+    never reported (see 'ambiguityProbeExampleName');
   * one @it@ per scenario, in document order. @Scenario Outline:@ rows are
     already expanded by 'LazyCircus.Testing.Bdd.Gherkin.parseFeature', so
     every row becomes its own @it@ carrying the substituted name;
@@ -23,10 +24,11 @@ self-contained hspec tree:
 Isolation mirrors the @tgTest@ pattern: EVERY executed scenario gets a fresh
 'LazyCircus.Testing.Bdd.Journal.ObservationLog' and a fresh
 'LazyCircus.Testing.Performer.Mocks' set — both handed to the
-'ScenarioBootstrap', which wires them into the executor (the canonical app
-wiring injects the fresh journal into
-'LazyCircus.Testing.Performer.TestConfig' via @tcJournal@; see
-'ScenarioBootstrap'). The scenario steps run in document order through
+'ScenarioBootstrap', which wires them into the executor. The canonical
+bootstrap is 'LazyCircus.Testing.Bdd.Tg.tgTestBootstrap': it injects the
+fresh journal into 'LazyCircus.Testing.Performer.TestConfig' via @tcJournal@
+and runs the dialog over the fresh mocks ('tgTestWithMocks'), so the scenario
+literally IS a @tgTest@ run. The scenario steps run in document order through
 'LazyCircus.Testing.Bdd.Step.runScenarioSteps' on the canonical stack —
 'LazyCircus.Testing.Bdd.Step.GivenDef' steps thread
 'LazyCircus.Testing.Bdd.Given.AppContext' (seeded with 'appContextFor' over
@@ -82,14 +84,14 @@ import LazyCircus.Testing.Bdd.Journal
     , newObservationLog
     , readObservations
     )
-import LazyCircus.Testing.Bdd.Pattern (Pattern, matchStep)
+import LazyCircus.Testing.Bdd.Pattern (Pattern (..), patternSource)
 import LazyCircus.Testing.Bdd.Step
     ( StepError
     , StepOutcome
-    , StepRegistry (..)
+    , StepRegistry
+    , matchingDefs
     , renderStepError
     , runScenarioSteps
-    , stepDefKeyword
     , stepDefPattern
     )
 import LazyCircus.Testing.Performer (Mocks, makeMocks)
@@ -150,20 +152,17 @@ type ScenarioExecutor app m = m (ScenarioOutcome app) -> IO (ScenarioOutcome app
 -- guaranteed by the fresh journal + fresh mocks the runner allocates, never
 -- by the bootstrap.
 --
--- CANONICAL APP WIRING (test performer under an existing app):
---
--- > appBootstrap :: DefaultApp serviceLib
--- >              -> ObservationLog app
--- >              -> Mocks serviceLib
--- >              -> IO (ScenarioExecutor app (TestInterpreter serviceLib app))
--- > appBootstrap app journal mocks =
--- >     pure $ runWithConfig app defaultTestConfig{tcJournal = Just journal} mocks
+-- CANONICAL APP WIRING: 'LazyCircus.Testing.Bdd.Tg.tgTestBootstrap' — it
+-- builds the executor as a 'LazyCircus.Testing.TgTest.tgTestWithMocks' run
+-- over the supplied mocks, with the fresh journal injected into
+-- 'LazyCircus.Testing.Performer.TestConfig' via @tcJournal@.
 --
 -- The fresh journal travels to the performer via @tcJournal@ (the runner
 -- OWNS journaling — every observation the performer intercepts lands in it);
 -- the mocks are the same fresh set the runner used to seed the
 -- 'LazyCircus.Testing.Bdd.Given.AppContext', so Given-phase staging and the
--- dialog share one mock state, exactly like a @tgTest@ run.
+-- dialog share one mock state — with the canonical bootstrap this @tgTest@
+-- identity is literal: the step program IS a @tgTest@ run.
 type ScenarioBootstrap serviceLib app m =
     ObservationLog app -> Mocks serviceLib -> IO (ScenarioExecutor app m)
 
@@ -194,7 +193,7 @@ metaCoverageExampleName = "coverage meta-test: every feature step matches a regi
 -- | hspec example name of the ambiguity probe (exported so callers can
 -- filter or document it).
 ambiguityProbeExampleName :: Text
-ambiguityProbeExampleName = "ambiguity probe: same-phase registry patterns matching the same step text"
+ambiguityProbeExampleName = "ambiguity probe: same-phase template patterns competing for the same step text"
 
 -- | Builds the hspec tree for one feature document.
 --
@@ -281,16 +280,12 @@ scenarioUndefinedSteps label scenario registry =
     ]
 
 -- | Whether some registry definition covers a step by resolved keyword +
--- pattern (the same discipline 'LazyCircus.Testing.Bdd.Step.runScenarioSteps'
--- applies when selecting a definition).
+-- pattern — the same 'matchingDefs' query
+-- 'LazyCircus.Testing.Bdd.Step.runScenarioSteps' selects a definition with,
+-- so a matched step can never drift apart from a covered one.
 stepCovered :: ScenarioRegistry serviceLib app m -> GherkinStep -> Bool
-stepCovered registry step = any matches (registryStepDefs registry)
-  where
-    -- | A definition covers the step when its phase keyword equals the step's
-    -- resolved keyword and its pattern matches the step text.
-    matches def =
-        stepDefKeyword def == gherkinStepKeyword step
-            && isJust (matchStep (stepDefPattern def) (gherkinStepText step))
+stepCovered registry step =
+    not (null (matchingDefs registry (gherkinStepKeyword step) (gherkinStepText step)))
 
 -- | Renders one uncovered step as @feature \/ scenario \/ line \/ step text@.
 renderUncoveredStep :: Text -> GherkinScenario -> GherkinStep -> Text
@@ -308,7 +303,8 @@ renderUncoveredStep label scenario step =
 --------------------------------------------------------------------------------
 
 -- | The ambiguity probe body: always green; prints a report line for every
--- feature step text matched by two or more same-phase registry patterns.
+-- feature step text that two or more same-phase 'Template' patterns compete
+-- for (a 'Literal' match wins deterministically and is never reported).
 ambiguityProbeExample :: Text -> [(GherkinScenario, ScenarioRegistry serviceLib app m)] -> IO ()
 ambiguityProbeExample label entries =
     case concatMap (uncurry (scenarioAmbiguities label)) entries of
@@ -324,24 +320,28 @@ scenarioAmbiguities label scenario registry =
     , length matches > 1
     ]
 
--- | Patterns of registry definitions in the step's own phase that match the
--- step text, in registration order.
+-- | Patterns competing for the selection of the step text in its own phase,
+-- in selection order: the 'Template' matches of 'matchingDefs', and empty
+-- when a 'Literal' match leads (it wins deterministically, so a step matched
+-- by a literal is never ambiguous no matter how many templates also match).
 samePhaseMatches :: ScenarioRegistry serviceLib app m -> GherkinStep -> [Pattern]
-samePhaseMatches registry step =
-    [ stepDefPattern def
-    | def <- registryStepDefs registry
-    , stepDefKeyword def == gherkinStepKeyword step
-    , isJust (matchStep (stepDefPattern def) (gherkinStepText step))
-    ]
+samePhaseMatches registry step = case matches of
+    ((def, _) : _) | Template{} <- stepDefPattern def -> map (stepDefPattern . fst) matches
+    _ -> []
+  where
+    -- | All same-phase matches in 'matchingDefs' order; when the head is a
+    -- 'Template', every element is one (literals always sort first).
+    matches = matchingDefs registry (gherkinStepKeyword step) (gherkinStepText step)
 
--- | Renders one ambiguity report for a step matched by several patterns.
+-- | Renders one ambiguity report for a step competed for by several
+-- same-phase patterns.
 renderAmbiguity :: Text -> GherkinScenario -> GherkinStep -> [Pattern] -> Text
 renderAmbiguity label scenario step patterns =
     renderUncoveredStep label scenario step
         <> " is matched by "
         <> tshow (length patterns)
         <> " same-phase patterns: "
-        <> T.intercalate ", " (map (\pattern -> "'" <> pattern <> "'") patterns)
+        <> T.intercalate ", " (map (\pattern -> "'" <> patternSource pattern <> "'") patterns)
 
 --------------------------------------------------------------------------------
 -- Failure rendering

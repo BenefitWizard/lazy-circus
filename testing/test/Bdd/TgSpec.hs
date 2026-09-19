@@ -28,6 +28,7 @@ import LazyCircus.Testing.Bdd.Journal
     , newScenarioState
     , readObservations
     )
+import LazyCircus.Testing.Bdd.Pattern (StepParams)
 import LazyCircus.Testing.Bdd.Step (StepDef (..))
 import LazyCircus.Testing.Bdd.Tg
     ( botDeletesMessage
@@ -60,7 +61,7 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
         atomically $ do
             appendObservation journal (tgMsg "first" (MessageId 0))
             appendObservation journal (tgMsg "second" (MessageId 1))
-        result <- runDialogScript (thenAction (botRepliesWithMessage "second") st0)
+        result <- runDialogScript (thenActionWithParams [("$text", "second")] botRepliesWithMessage st0)
         case result of
             Left err -> expectationFailure ("step aborted: " <> show err)
             Right (st1, emitted) -> do
@@ -76,16 +77,16 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
             appendObservation journal (tgMsg "first" (MessageId 0))
             appendObservation journal (tgMsg "second" (MessageId 1))
         -- before anything is consumed the continuation aborts instead of waiting
-        tooEarly <- runDialogScript (thenAction (botReplyContains "any") st0)
+        tooEarly <- runDialogScript (thenActionWithParams [("$frag", "any")] botReplyContains st0)
         case tooEarly of
             Left (TgTestGuardFailed reason) ->
                 reason `shouldSatisfy` ("nothing has been consumed" `T.isInfixOf`)
             Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
             Right _ -> expectationFailure "expected the continuation to refuse an empty dialog"
         -- a preceding reply step consumes the message...
-        st1 <- expectStepSuccess (runDialogScript (thenAction (botRepliesWithMessage "second") st0))
+        st1 <- expectStepSuccess (runDialogScript (thenActionWithParams [("$text", "second")] botRepliesWithMessage st0))
         -- ...and the And-continuation re-inspects it: NO wait, NO consumption
-        result <- runDialogScript (thenAction (botReplyContains "con") st1)
+        result <- runDialogScript (thenActionWithParams [("$frag", "con")] botReplyContains st1)
         case result of
             Left err -> expectationFailure ("continuation aborted: " <> show err)
             Right (st2, _) -> do
@@ -94,7 +95,7 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
                 readObservations journal
                     `shouldReturn` [tgMsg "first" (MessageId 0), tgMsg "second" (MessageId 1)]
                 -- a failed fragment check leaves everything untouched as well
-                mismatch <- runDialogScript (thenAction (botReplyContains "never-there") st2)
+                mismatch <- runDialogScript (thenActionWithParams [("$frag", "never-there")] botReplyContains st2)
                 case mismatch of
                     Left (TgTestGuardFailed reason) ->
                         reason `shouldSatisfy` ("does not contain" `T.isInfixOf`)
@@ -113,7 +114,7 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
                 isJust (dsLastKeyboard (ssDialog st1)) `shouldBe` True
                 -- a later plain-message reply clears the keyboard again
                 atomically (appendObservation journal (tgMsg "plain" (MessageId 1)))
-                result2 <- runDialogScript (thenAction (botRepliesWithMessage "plain") st1)
+                result2 <- runDialogScript (thenActionWithParams [("$text", "plain")] botRepliesWithMessage st1)
                 case result2 of
                     Left err -> expectationFailure ("step aborted: " <> show err)
                     Right (st2, _) -> do
@@ -127,7 +128,7 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
         atomically $ do
             appendObservation journal (ObsApp ())
             appendObservation journal (tgMsg "real" (MessageId 0))
-        result <- runDialogScript (thenAction (botRepliesWithMessage "real") st0)
+        result <- runDialogScript (thenActionWithParams [("$text", "real")] botRepliesWithMessage st0)
         case result of
             Left err -> expectationFailure ("step aborted: " <> show err)
             Right (st1, _) -> do
@@ -160,7 +161,7 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
         st0 <- newScenarioState :: IO (ScenarioState ())
         let journal = ssLog st0
         atomically (appendObservation journal (tgMsg "other" (MessageId 0)))
-        result <- runDialogScript (thenAction (botRepliesWithMessage "never-sent") st0)
+        result <- runDialogScript (thenActionWithParams [("$text", "never-sent")] botRepliesWithMessage st0)
         case result of
             Left (TgTestGuardFailed reason) -> do
                 reason `shouldSatisfy` ("timed out" `T.isInfixOf`)
@@ -169,7 +170,7 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
             Right _ -> expectationFailure "expected the step to time out"
         -- the failed wait consumed nothing and mutated nothing
         readObservations journal `shouldReturn` [tgMsg "other" (MessageId 0)]
-        retry <- runDialogScript (thenAction (botRepliesWithMessage "other") st0)
+        retry <- runDialogScript (thenActionWithParams [("$text", "other")] botRepliesWithMessage st0)
         case retry of
             Left err -> expectationFailure ("the timed-out wait consumed the message: " <> show err)
             Right (st1, _) -> ssConsumed st1 `shouldBe` Set.singleton 0
@@ -222,17 +223,34 @@ confirmButton =
         , inlineKeyboardButtonPay = Nothing
         }
 
--- | Extracts the dialog action of a library Then definition.
+-- | Extracts the dialog action of a library Then definition and applies it
+-- with synthetic pattern captures: the constructors of
+-- 'LazyCircus.Testing.Bdd.Tg' read their expected values from the captures
+-- ('LazyCircus.Testing.Bdd.Pattern.lookupParam'), so a unit test simulates
+-- the runner's match by injecting the captures the definition's pattern
+-- names.
+-- PRE-CONTRACT: The definition comes from 'LazyCircus.Testing.Bdd.Tg' (always
+-- a 'DialogDef'); @params@ carries a value for every capture the
+-- definition's pattern registers.
+thenActionWithParams ::
+    StepParams ->
+    StepDef TelegramTestScript () (ScenarioState app) () ->
+    ScenarioState app ->
+    TelegramTestScript (ScenarioState app, Maybe ())
+thenActionWithParams params (DialogDef _ _ act) = act params
+thenActionWithParams params (GivenDef _ _) = \st ->
+    guardWith "library Then definitions are DialogDefs, never GivenDefs" False
+        >> pure (st, Nothing)
+
+-- | 'thenActionWithParams' with empty captures — for definitions whose
+-- pattern carries no quoted span.
 -- PRE-CONTRACT: The definition comes from 'LazyCircus.Testing.Bdd.Tg' (always
 -- a 'DialogDef').
 thenAction ::
     StepDef TelegramTestScript () (ScenarioState app) () ->
     ScenarioState app ->
     TelegramTestScript (ScenarioState app, Maybe ())
-thenAction (DialogDef _ _ act) = act
-thenAction (GivenDef _ _) = \st ->
-    guardWith "library Then definitions are DialogDefs, never GivenDefs" False
-        >> pure (st, Nothing)
+thenAction = thenActionWithParams []
 
 -- | Runs a dialog script through the canonical @tgTest@ runner with a bot
 -- driver that ignores every update: no live handler runs and no database is

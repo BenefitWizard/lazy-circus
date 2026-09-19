@@ -7,18 +7,20 @@ the canonical stack of "LazyCircus.Testing.Bdd.Step" (@c@ = 'AppContext',
 threaded by 'GivenDef' actions).
 
 The combinators are GivenDef-action producers: each returns an
-@'AppContext' app -> IO ('AppContext' app)@ — exactly the action slot of
-'LazyCircus.Testing.Bdd.Step.GivenDef' — so an app registry composes them with
+@'AppContext' app -> IO ('AppContext' app)@ — the action slot of
+'LazyCircus.Testing.Bdd.Step.GivenDef' wrapped in @\\_params ->@ — so an app
+registry composes them with
 its own step patterns, e.g.
 
-> givenDef "file \"doc-1\" is downloadable"
->     (stagedTgDownloads [(FileId "doc-1", pdfBytes)])
-> givenDef "assistant answer \"4\" queued" (queuedAiAnswers [completion "4"])
-> givenDef "app seeded with user alice" (withAppSeed "alice")
+> givenDef "file \"doc-1\" is downloadable" $
+>     \_params -> stagedTgDownloads [(FileId "doc-1", pdfBytes])
+> givenDef "assistant answer \"4\" queued" $ \_params -> queuedAiAnswers [completion "4"]
+> givenDef "app seeded with user alice" $ \_params -> withAppSeed "alice"
 
-'LazyCircus.Testing.Bdd.Step.GivenDef' actions cannot see the parameters
-captured by the pattern, so the fixture values are baked in at registration
-time and the pattern is a plain literal.
+'LazyCircus.Testing.Bdd.Step.GivenDef' actions receive the parameters
+captured by the pattern; these producers ignore them (@\\_params@) — the
+fixture values are baked in at registration time and the pattern is a plain
+literal.
 
 Staging happens immediately inside the Given action — before any When\/Then
 step runs — by delegating to the test performer's mock APIs
