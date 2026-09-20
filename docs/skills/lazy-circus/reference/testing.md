@@ -99,6 +99,7 @@ capabilities at the edges.
 | `readAiRequests` | read captured AI chat-completion requests (Mocked mode only) |
 | `readScheduledScenarios` | read captured async scenario requests |
 | `readScheduledTimers` | read captured `runAsyncAfter` requests as `(delay, program)` pairs, in capture order (buffer not cleared) |
+| `readCastRequests` / `readCastRequestsOfType` | read captured `castService` service cast requests (delivered AND recorded; typed filter by request type) |
 | `fireScheduledTimers` | execute captured timer programs immediately, in capture order, through the same test interpreter and clear the buffer (idempotent) |
 
 Signatures (module `LazyCircus.Testing.Performer`; `sl` = `serviceLib`):
@@ -124,6 +125,8 @@ readSentMails             :: Mocks sl -> IO [Mail]
 readAiRequests            :: Mocks sl -> IO [Chat.CreateChatCompletion]
 readScheduledScenarios    :: Mocks sl -> IO [ScenarioProgram Script sl ()]
 readScheduledTimers       :: Mocks sl -> IO [(NominalDiffTime, ScenarioProgram Script sl ())]
+readCastRequests          :: Mocks sl -> IO [Dynamic]
+readCastRequestsOfType    :: Typeable req => Mocks sl -> IO [req]
 fireScheduledTimers       :: HasCallStack => TestInterpreter sl app ()
 ```
 

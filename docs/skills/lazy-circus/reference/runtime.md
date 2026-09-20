@@ -102,6 +102,9 @@ The production `ScenarioPerformer` instance:
   `runAI`, `runDB`, and `runHTTP`)
 - queues async work via `scheduleAsyncAction`
 - reads the real `extraContext` map from `DefaultApp`
+- resolves service operations through the service library: `callService'` via
+  `callViaServiceLib` (blocking round-trip) and `castService'` via `castViaServiceLib`
+  (fire-and-forget enqueue into the service mailbox)
 
 The default performer's `evalScriptDefault` is the production-specific dispatch. It:
 

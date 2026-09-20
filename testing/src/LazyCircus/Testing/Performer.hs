@@ -73,6 +73,8 @@ module LazyCircus.Testing.Performer (
     readScheduledScenarios,
     readScheduledTimers,
     fireScheduledTimers,
+    readCastRequests,
+    readCastRequestsOfType,
 )
 where
 
@@ -87,7 +89,7 @@ import LazyCircus.AI
     )
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
-import LazyCircus.App.Service (HasServiceLib (..), HasToolCallExec (..), HasToolDescriptions (..), callViaServiceLib)
+import LazyCircus.App.Service (HasServiceLib (..), HasToolCallExec (..), HasToolDescriptions (..), callViaServiceLib, castViaServiceLib)
 import LazyCircus.AsyncWorker.Types (HasScheduledActions (..))
 import LazyCircus.DB.Types (PgDB)
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
@@ -104,6 +106,7 @@ import LazyCircus.Scenario
     )
 
 import Control.Concurrent.STM (retry)
+import Data.Dynamic (Dynamic, fromDynamic, toDyn)
 import GHC.Stack (HasCallStack, callStack)
 import LazyCircus.Scene.AI.Class (AILangPerformer (..), runAI)
 import LazyCircus.Scene.DB.Class (runDB)
@@ -250,6 +253,10 @@ data Mocks serviceLib = Mocks
     -- 'runAsyncAfter' ('tcAsync = Mocked'), each paired with its requested
     -- delay; read via 'readScheduledTimers', drained and executed via
     -- 'fireScheduledTimers'
+    , castRequests :: SomeRef [Dynamic]
+    -- ^ captured service cast requests recorded through 'castService' (as
+    -- 'Dynamic'; filter with 'readCastRequestsOfType'); delivery to the real
+    -- service worker still happens, the buffer only mirrors what was sent
     , asyncInflight :: !(TVar Int)
     -- ^ count of 'tcAsync = Real' spawned async workers currently running; awaited at
     -- 'runWithConfigEngine' teardown so spawned work settles before the run returns
@@ -822,6 +829,13 @@ instance ScenarioPerformer Script serviceLib (TestPerformer (EnvWithMocks servic
     runAsyncAfter' = runAsyncAfterTest
     runArbitraryIO' = liftIO
     callService' = callViaServiceLib
+    -- Records the request into 'castRequests' (synchronously, so asserts right
+    -- after the scenario step are deterministic) and still delivers it to the
+    -- real service worker, mirroring production fire-and-forget behavior.
+    castService' req = do
+        casts <- asks (castRequests . mocks)
+        modifySomeRef casts (toDyn req :)
+        castViaServiceLib req
     withLogContext' values action =
         local (logContextL %~ (`putInLoggingContext` values)) (run action)
 
@@ -943,6 +957,7 @@ makeMocks = do
     aiMockTest <- createSimpleAiMock
     asyncLog <- newSomeRef []
     timerLog <- newSomeRef []
+    castLog <- newSomeRef []
     asyncCounter <- newTVarIO 0
     pure
         Mocks
@@ -954,6 +969,7 @@ makeMocks = do
             , aiMock = aiMockTest
             , scheduledScenarios = asyncLog
             , scheduledTimers = timerLog
+            , castRequests = castLog
             , asyncInflight = asyncCounter
             }
 
@@ -1132,6 +1148,20 @@ readScheduledScenarios testMocks = reverse <$> readSomeRef (scheduledScenarios t
 -- is NOT cleared — pending timers stay available to 'fireScheduledTimers'.
 readScheduledTimers :: Mocks serviceLib -> IO [(NominalDiffTime, ScenarioProgram Script serviceLib ())]
 readScheduledTimers testMocks = reverse <$> readSomeRef (scheduledTimers testMocks)
+
+-- | Read captured service cast requests (requested via 'LazyCircus.Scenario.castService')
+-- as 'Dynamic' values, in send order.
+-- POST-CONTRACT: Result is ordered earliest-first (send order); the buffer is
+-- NOT cleared; requests of all service types are interleaved in one list.
+readCastRequests :: Mocks serviceLib -> IO [Dynamic]
+readCastRequests testMocks = reverse <$> readSomeRef (castRequests testMocks)
+
+-- | Read captured service cast requests of one concrete request type, in send order.
+-- POST-CONTRACT: Result is ordered earliest-first (send order) and contains
+-- only casts whose request type matches the inferred type; the buffer is NOT
+-- cleared.
+readCastRequestsOfType :: (Typeable request) => Mocks serviceLib -> IO [request]
+readCastRequestsOfType testMocks = mapMaybe fromDynamic <$> readCastRequests testMocks
 
 -- | Drain the 'scheduledTimers' buffer and execute every captured control
 -- program synchronously and immediately (the requested delays are ignored),

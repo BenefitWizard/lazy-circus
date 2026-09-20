@@ -14,6 +14,7 @@ Read this when:
 - Database Service Instances
 - Service Registration (Manual)
 - Service Library via TemplateHaskell
+- Cast Semantics (call vs cast)
 - Adding A New Effect
 - Detailed Pitfalls
 - Review Checklist
@@ -127,16 +128,29 @@ evalScript $ dbScript myDb ReadOnly $ find key
 
 ## Service Registration
 
-Services are in-process workers that accept typed requests and return typed responses through
-serialized channels. They are useful when you need a long-lived background worker that handles
+Services are in-process workers that accept typed requests and return typed responses through a
+serialized mailbox. They are useful when you need a long-lived background worker that handles
 requests one at a time — for example, a rate-limited external API client or a single-threaded
 file writer.
 
 ### How It Works
 
-Each service is a pair of `MVar` channels (a `Pipe`) guarded by a `QSem` semaphore. The caller
-sends a request into the pipe and blocks until the worker posts a response. Because the
-semaphore is set to 1, at most one request is in flight at any time.
+Each service owns a mailbox — one unbounded `TQueue` of envelopes, in the style of an Erlang
+gen_server. A synchronous call (`callService`) enqueues the request together with a private
+reply channel and blocks until the worker posts the response; a fire-and-forget cast
+(`castService`) enqueues the request and returns immediately. A single worker drains the
+mailbox strictly FIFO, so messages are handled one at a time in arrival order: a call enqueued
+after a cast is served after that cast. The worker loop survives synchronous handler
+exceptions: a failed cast is swallowed silently, a failed call posts `failbackValue`.
+
+By default a cast runs the same handler as a call with the result discarded; use
+`createServiceWithCast` when the cast path needs its own handler:
+
+```haskell
+(handle, workerAction) <- createServiceWithCast
+    (\req -> logViaIO req)              -- cast handler
+    (\req -> handleSimpleRequest req)   -- call handler
+```
 
 ### Step 1. Define Request And Response Types
 
@@ -185,8 +199,8 @@ data AllServices = AllServices
 
 ### Step 5. Implement `IsInServiceLib` Instances
 
-For each request/response pair, implement `IsInServiceLib` so that `callService` can dispatch
-to the correct handler:
+For each request/response pair, implement `IsInServiceLib` so that `callService` and
+`castService` can dispatch to the correct handler:
 
 ```haskell
 instance IsInServiceLib AllServices SimpleRequest SimpleResponse where
@@ -194,10 +208,17 @@ instance IsInServiceLib AllServices SimpleRequest SimpleResponse where
         case request of
             Add x y      -> callService (addService allServices) (Add x y)
             Subtract x y -> callService (addService allServices) (Subtract x y)
+    castFromServiceLib allServices request =
+        castService (addService allServices) request
 
 instance IsInServiceLib AllServices AddExpressionRequest AddExpressionResponse where
     callFromServiceLib allServices = callService (addExpressionService allServices)
+    castFromServiceLib allServices = castService (addExpressionService allServices)
 ```
+
+`castFromServiceLib` has a default implementation that delegates to `callFromServiceLib` and
+therefore BLOCKS until the response arrives. Override it (as above) when casts must be truly
+fire-and-forget.
 
 ### Step 6. Create Handlers And Start Workers At Startup
 
@@ -253,10 +274,21 @@ myScenario = do
     logInfo $ "Got: " <> displayShow result
 ```
 
-Alternatively, from any monad with `HasServiceLib` in scope, use `callViaServiceLib`:
+For fire-and-forget requests use `castService` — it returns before the worker handles the
+request, and handler errors are invisible to the scenario:
+
+```haskell
+myScenario = do
+    castService (Add 3 4)  -- processed FIFO, result discarded
+    logInfo "Returned immediately"
+```
+
+Alternatively, from any monad with `HasServiceLib` in scope, use `callViaServiceLib` or
+`castViaServiceLib`:
 
 ```haskell
 result <- callViaServiceLib (Add 3 4)
+castViaServiceLib (Add 3 4)
 ```
 
 ### Checklist For Service Registration (Manual)
@@ -266,9 +298,10 @@ result <- callViaServiceLib (Add 3 4)
 - handler function `request -> IO response`
 - service library record holding `ServiceHandler` fields
 - `IsInServiceLib` instance for each request/response pair
-- `createService` called at startup; workers forked
+- `castFromServiceLib` overridden (not just the blocking default) when async casts are needed
+- `createService` (or `createServiceWithCast`) called at startup; workers forked
 - library record passed to `cfgServiceLib` in `DefaultAppConfig`
-- `callService` used from scenarios or `callViaServiceLib` from reader context
+- `callService`/`castService` used from scenarios or `callViaServiceLib`/`castViaServiceLib` from reader context
 
 ## Service Library via TemplateHaskell
 
@@ -336,6 +369,8 @@ This generates up to fifteen things:
 1. **Service library type** — `data AllServices = AllServices { simpleRequestService :: ServiceHandler SimpleRequest SimpleResponse, ... }`
 2. **Config type** — `data AllServicesConfig m = AllServicesConfig { simpleRequest :: SimpleRequest -> m SimpleResponse, ... }`
 3. **`IsInServiceLib` instances** — one per pair, implementing `callFromServiceLib`
+   (blocking) and `castFromServiceLib` (true fire-and-forget via `castService`, not the
+   blocking default)
 4. **Builder function** — `mkAllServices :: (MonadUnliftIO m, ...) => AllServicesConfig m -> m (AllServices, [m ()])`
 5. **Tool enumeration type** — `data AllServicesTool = AddTool | SubtractTool | ... deriving (Enum, Bounded, ...)` (empty type when no specs)
 6. **`toolInfo` function** — maps enum values to `ToolDescription` (parameter schemas have the spec's hidden fields removed via `hideSchemaParams`)
@@ -438,6 +473,22 @@ evalScript $ aiScriptWith [AddTool, SubtractTool] $ ask myRequest
 - `runAllWorkers` called to start all workers
 - library record passed to `cfgServiceLib` in `DefaultAppConfig`
 - tool specs use unique constructor names and unique tool-name strings
+
+## Cast Semantics (call vs cast)
+
+- `callService` blocks until the worker posts the response; a handler exception is reported
+  to the caller as `failbackValue`.
+- `castService` returns immediately; the request is handled FIFO after all earlier messages
+  of that service; a handler exception is swallowed and never reported; delivery is
+  best-effort (a dead worker silently drops casts).
+- The mailbox is unbounded — casting faster than the worker drains it grows the queue without
+  backpressure. Reach for bounded queues (`TBQueue`) only when a real overload story exists.
+- Scenario-level `castService` requires `Typeable request` (the test performer records casts
+  as `Dynamic`); this holds automatically for concrete request types.
+- In tests, casts are both delivered and recorded: assert sent casts via
+  `readCastRequests` / `readCastRequestsOfType` on the returned `Mocks`.
+- TH-generated instances override `castFromServiceLib` with true fire-and-forget dispatch;
+  manual instances get a blocking default and must override it explicitly.
 
 ## Adding A New Effect
 
@@ -774,6 +825,20 @@ Fix:
 - place the `makeServiceLib` splice in a separate module that imports only type names (no constructors) from the request/response module
 - see `SimpleServiceLib.hs` for the canonical pattern
 
+### 17. Relying On The Blocking `castFromServiceLib` Default
+
+Problem:
+
+- a manually written `IsInServiceLib` instance does not override `castFromServiceLib`, so
+  scenario `castService` calls actually block until the worker responds
+
+Fix:
+
+- override `castFromServiceLib` with `castService (theService serviceLib)` in every manual
+  instance (TH-generated instances already do this)
+- verify with a stuck-handler test: a true cast must return while the handler never responds
+  (see `ServiceCastSpec.hs`)
+
 ## Review Checklist
 
 1. Is code placed in the right layer: scene vs scenario vs performer?
@@ -789,3 +854,5 @@ Fix:
 11. If using `makeServiceLib` with tool specs, are `FromJSON`/`ToJSON` instances provided?
 12. If using `makeServiceLib` with tool specs, are constructor names and tool-name strings unique?
 13. Is the TH splice in a separate module to avoid constructor name clashes?
+14. Are manual `IsInServiceLib` instances overriding the blocking `castFromServiceLib` default?
+15. Is `castService` used only where fire-and-forget semantics are acceptable (no delivery/error guarantees)?

@@ -63,6 +63,7 @@ instance ScenarioPerformer TimerTaskScript () (RIO TimerEnv) where
     runAsyncAfter' = scheduleTimedAction
     runArbitraryIO' = liftIO
     callService' = error "TimerServiceSpec tasks never call services"
+    castService' = error "TimerServiceSpec tasks never cast to services"
 
 -- | Allocate a fresh environment with an empty registry, an empty queue, a discarding log function,
 -- plus the shared journal the scheduled tasks append to.

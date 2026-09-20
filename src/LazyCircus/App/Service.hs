@@ -4,25 +4,28 @@
 
 -- | Generic in-process service primitives shared by backend service runtimes.
 --
--- PURPOSE: Provide request/response-channel based concurrency primitives
---   for building isolated in-process services with serialized access.
--- SCOPE: Pipe creation, worker loops, service handler lifecycle,
+-- PURPOSE: Provide mailbox-based concurrency primitives for building isolated
+--   in-process services with serialized access in the style of Erlang gen_server:
+--   synchronous calls ('callService') and fire-and-forget casts ('castService')
+--   share one FIFO mailbox served by a single worker loop.
+-- SCOPE: Mailbox creation, worker loops, service handler lifecycle,
 --   service-lib environment integration, and tool description types.
 module LazyCircus.App.Service (
-    Request,
-    Response,
-    Pipe,
+    Envelope (..),
     ServiceHandler (..),
     Service,
     HasFailbackValue (..),
-    createPipe,
+    createMailbox,
     worker,
     createService,
+    createServiceWithCast,
     callService,
+    castService,
     IsInServiceLib (..),
     HasServiceLib (..),
     NoServiceLib (..),
     callViaServiceLib,
+    castViaServiceLib,
     runAllWorkers,
     -- IsResponseFor (..),
     -- * Tool descriptions
@@ -41,19 +44,15 @@ import qualified Data.Aeson.KeyMap as KM
 import RIO
 import qualified RIO.Vector as V
 
--- | Request channel used to deliver one service input to the worker.
-type Request a = MVar a
+-- | One message in a service mailbox, in the style of an Erlang gen_server: a
+--   synchronous call carrying its reply channel, or a fire-and-forget cast.
+data Envelope request response
+    = CallMsg request (TMVar response) -- ^ synchronous call; the worker posts the handler result or the failback value into the channel
+    | CastMsg request -- ^ fire-and-forget; the worker discards the result and swallows handler exceptions
 
--- | Response channel used to deliver one worker result back to the caller.
-type Response b = MVar b
-
--- | Pair of request and response channels owned by one service worker.
-type Pipe a b = (Request a, Response b)
-
--- | Runtime handle that stores the channels and semaphore for a service worker.
+-- | Runtime handle that stores the mailbox consumed by a service worker.
 data ServiceHandler a b = ServiceHandler
-    { serviceHandlerPipe :: Pipe a b  -- ^ request and response channels for this worker
-    , serviceHandlerSem  :: QSem      -- ^ binary semaphore serialising concurrent callers
+    { serviceHandlerMailbox :: TQueue (Envelope a b)  -- ^ mailbox shared by all callers; messages are served FIFO by one worker
     }
 
 -- | Service constructor result that returns a handler together with its worker action.
@@ -63,56 +62,93 @@ type Service a b m = m (ServiceHandler a b, m ())
 class HasFailbackValue a where
     failbackValue :: a
 
--- | Allocate a fresh request and response channel pair for one service worker.
--- POST-CONTRACT: Both channels in the returned Pipe are empty and ready for use.
-createPipe :: (MonadIO m) => m (Pipe a b)
-createPipe = do
-    request <- newEmptyMVar
-    response <- newEmptyMVar
-    pure (request, response)
+-- | Allocate a fresh empty mailbox for one service worker.
+-- POST-CONTRACT: The returned mailbox is empty and ready for use.
+createMailbox :: (MonadIO m) => m (TQueue (Envelope a b))
+createMailbox = newTQueueIO
 
--- | Run the service loop by consuming requests, executing the handler, and posting either its result or a fallback response.
--- POST-CONTRACT: On handler exception the failback value is placed in the
---   response channel and the loop continues without crashing.
-worker :: (MonadUnliftIO m, HasFailbackValue b) => (a -> m b) -> Pipe a b -> m ()
-worker f pipe@(request, response) = do
-    a <- takeMVar request
-    result <- tryAny $ f a
-    case result of
-        Left _ -> do
-            putMVar response $ failbackValue
-        Right result ->
-            putMVar response $ result
-    worker f pipe
+-- | Run the service loop by consuming envelopes from the mailbox: casts go to
+--   the cast handler, calls go to the call handler whose result is posted into
+--   the caller's reply channel.
+-- PRE-CONTRACT: The loop must be forked in its own thread (e.g. via 'runAllWorkers').
+-- POST-CONTRACT: The loop survives any synchronous handler exception: a failed
+--   cast is swallowed silently, a failed call posts 'failbackValue'; messages
+--   are processed FIFO in arrival order.
+worker ::
+    (MonadUnliftIO m, HasFailbackValue b) =>
+    (a -> m ()) ->
+    (a -> m b) ->
+    TQueue (Envelope a b) ->
+    m ()
+worker castF callF mailbox = do
+    envelope <- atomically $ readTQueue mailbox
+    case envelope of
+        CastMsg a -> do
+            _ <- tryAny $ castF a
+            pure ()
+        CallMsg a reply -> do
+            result <- tryAny $ callF a
+            case result of
+                Left _ -> atomically $ putTMVar reply failbackValue
+                Right b -> atomically $ putTMVar reply b
+    worker castF callF mailbox
 
--- | Build a service handler together with the worker action that serves its request loop.
+-- | Build a service handler whose casts run the same handler as calls, with the
+--   result discarded. Use 'createServiceWithCast' when casts need distinct logic.
 -- POST-CONTRACT: The returned worker action must be forked separately for the
---   service to become active; until then calls to 'callService' will block.
+--   service to become active; until then 'callService' blocks and 'castService'
+--   silently accumulates messages in the mailbox.
 createService :: (MonadUnliftIO m, HasFailbackValue b) => (a -> m b) -> Service a b m
-createService f = do
-    pipe <- createPipe
-    sem <- newQSem 1
-    pure (ServiceHandler pipe sem, worker f pipe)
+createService f = createServiceWithCast (void . f) f
+
+-- | Build a service handler with separate handlers for casts and calls.
+-- POST-CONTRACT: The returned worker action must be forked separately for the
+--   service to become active; until then 'callService' blocks and 'castService'
+--   silently accumulates messages in the mailbox.
+createServiceWithCast ::
+    (MonadUnliftIO m, HasFailbackValue b) =>
+    (a -> m ()) ->
+    (a -> m b) ->
+    Service a b m
+createServiceWithCast castF callF = do
+    mailbox <- createMailbox
+    pure (ServiceHandler mailbox, worker castF callF mailbox)
 
 -- | Send one request through the handler and wait for the serialized response.
 -- PRE-CONTRACT: The handler must be associated with a running worker thread.
--- POST-CONTRACT: The binary semaphore ensures at most one concurrent caller
---   per handler; the response corresponds to the request.
-callService :: (MonadUnliftIO m) => ServiceHandler a b -> a -> m b
+-- POST-CONTRACT: The response corresponds to this request; the call blocks
+--   behind earlier mailbox messages (calls and casts) in FIFO order.
+callService :: (MonadIO m) => ServiceHandler a b -> a -> m b
 callService h a = do
-    let (request, response) = serviceHandlerPipe h
-        sem' = serviceHandlerSem h
-    bracket_ (waitQSem sem') (signalQSem sem') $ do
-        putMVar request a
-        takeMVar response
+    reply <- newEmptyTMVarIO
+    atomically $ writeTQueue (serviceHandlerMailbox h) (CallMsg a reply)
+    atomically $ readTMVar reply
+
+-- | Send one fire-and-forget request to the worker and return immediately.
+-- PRE-CONTRACT: The handler must be associated with a running worker thread.
+-- POST-CONTRACT: Returns before the handler runs; the request is processed FIFO
+--   after all earlier mailbox messages; a handler exception is swallowed and
+--   never reported to the caller; delivery is not guaranteed (e.g. if the
+--   worker thread died, the message is silently dropped).
+castService :: (MonadIO m) => ServiceHandler a b -> a -> m ()
+castService h a = atomically $ writeTQueue (serviceHandlerMailbox h) (CastMsg a)
 
 -- class IsServiceLib serviceLib
 
 -- type ServiceResponse serviceLib
 
 -- | Dispatch a typed request through a service-lib environment to obtain a response.
-class IsInServiceLib serviceLib request response where
+-- The functional dependency states that a request type maps to exactly one
+-- response type per service library — the request determines the reply, as in
+-- an Erlang gen_server.
+class IsInServiceLib serviceLib request response | serviceLib request -> response where
     callFromServiceLib :: (MonadUnliftIO m) => serviceLib -> request -> m response
+
+    -- | Fire-and-forget dispatch of a typed request through a service-lib environment.
+    -- Default delegates to 'callFromServiceLib' and blocks until the response
+    -- arrives — override it with 'castService' when true async behavior is needed.
+    castFromServiceLib :: (MonadUnliftIO m) => serviceLib -> request -> m ()
+    castFromServiceLib serviceLib request = void $ callFromServiceLib serviceLib request
 
 -- class IsResponseFor request response | response -> request
 
@@ -141,6 +177,24 @@ callViaServiceLib ::
 callViaServiceLib req = do
     serviceLib <- view serviceLibL
     callFromServiceLib serviceLib req
+
+-- | Retrieve the service-lib from the reader environment and fire-and-forget
+--   the request through it.
+-- PRE-CONTRACT: The environment must satisfy 'HasServiceLib' for the inferred
+--   serviceLib type, and that serviceLib must satisfy 'IsInServiceLib' for
+--   the given request and response types.
+-- POST-CONTRACT: Returns before the request is handled, unless the instance
+--   relies on the blocking default of 'castFromServiceLib'.
+castViaServiceLib ::
+    ( MonadUnliftIO m
+    , IsInServiceLib serviceLib request response
+    , HasServiceLib env serviceLib
+    , MonadReader env m
+    ) =>
+    request -> m ()
+castViaServiceLib req = do
+    serviceLib <- view serviceLibL
+    castFromServiceLib serviceLib req
 
 -- | Fork all worker actions as concurrent threads and return their handles.
 -- PRE-CONTRACT: None.

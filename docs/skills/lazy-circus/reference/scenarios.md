@@ -98,7 +98,8 @@ multiple effects and control concerns.
 | `runAsync` | schedule async work |
 | `runAsyncAfter` | schedule deferred async work (one-shot timer: fires once, not before the delay, on an async worker; `delay <= 0` = immediate) |
 | `runArbitraryIO` | **fallback** escape hatch — run an arbitrary `IO` when no structured effect fits (see below) |
-| `callService` | call a registered service via the service library |
+| `callService` | call a registered service via the service library (blocks until the response) |
+| `castService` | fire-and-forget call to a registered service (gen_server cast: returns immediately, handler errors invisible) |
 
 Signatures (`sl` = `serviceLib`; module `LazyCircus.Scenario`):
 
@@ -120,6 +121,7 @@ runAsync              :: ScenarioProgram script sl () -> ScenarioProgram script 
 runAsyncAfter         :: NominalDiffTime -> ScenarioProgram script sl () -> ScenarioProgram script sl ()
 runArbitraryIO        :: IO a -> ScenarioProgram script sl a
 callService           :: IsInServiceLib sl req resp => req -> ScenarioProgram script sl resp
+castService           :: (IsInServiceLib sl req resp, Typeable req) => req -> ScenarioProgram script sl ()
 
 run                   :: ScenarioPerformer script sl m => ScenarioProgram script sl a -> m a
 ```
@@ -300,7 +302,7 @@ scenario and is intended only for one-off side effects that fit nowhere else.
 Reach for it ONLY after ruling out:
 
 - a scene language (`DB`, `Telegram`, `AI`, `Mail`, `HTTP`)
-- a registered service (`callService`)
+- a registered service (`callService` / `castService`)
 - a new scene language / service if the operation is worth keeping
 
 Caveats:

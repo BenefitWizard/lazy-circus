@@ -36,6 +36,7 @@ import LazyCircus.App.Service (
     ToolCallExec (..),
     ToolDescription (..),
     callService,
+    castService,
     createService,
     hideSchemaParams,
  )
@@ -255,7 +256,8 @@ genConfigType libName pairs = do
 
 {- | Generates 'IsInServiceLib' instances for each request/response pair.
 PRE-CONTRACT: libName is the 'Name' of the service lib type; pairs are non-empty.
-POST-CONTRACT: Returns one 'InstanceD' per pair, each implementing 'callFromServiceLib'.
+POST-CONTRACT: Returns one 'InstanceD' per pair, each implementing
+  'callFromServiceLib' (blocking) and 'castFromServiceLib' (fire-and-forget).
 -}
 genIsInServiceLibInstances :: Name -> [FieldPair] -> [Q Dec]
 genIsInServiceLibInstances libName pairs =
@@ -264,12 +266,12 @@ genIsInServiceLibInstances libName pairs =
     mkInstance (fieldName, reqName, resName, _) = do
         let selName = mkName $ fieldName <> "Service"
             argName = mkName "x"
-            body =
+            mkBody fun =
                 NormalB $
                     LamE
                         [VarP argName]
                         ( AppE
-                            (VarE 'callService)
+                            (VarE fun)
                             (AppE (VarE selName) (VarE argName))
                         )
         pure $
@@ -281,7 +283,9 @@ genIsInServiceLibInstances libName pairs =
                     `AppT` ConT reqName
                     `AppT` ConT resName
                 )
-                [FunD 'callFromServiceLib [Clause [] body []]]
+                [ FunD 'callFromServiceLib [Clause [] (mkBody 'callService) []]
+                , FunD 'castFromServiceLib [Clause [] (mkBody 'castService) []]
+                ]
 
 {- | Generates the @mk@ builder function for the service library.
 PRE-CONTRACT: libName is a valid Haskell constructor name; configConName is the

@@ -14,3 +14,5 @@ docs/runbooks/
 docs/internal/
 AllServices_Generated.hs
 opencode.json
+.hie/
+.hie-db

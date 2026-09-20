@@ -70,6 +70,9 @@ ghc-options:
   - -Wmissing-home-modules
   - -Wpartial-fields
   - -Wredundant-constraints
+  # .hie files for hiedb symbol navigation (see AGENTS.md «Навигация»)
+  - -fwrite-ide-info
+  - -hiedir .hie
 
 library:
   source-dirs: src

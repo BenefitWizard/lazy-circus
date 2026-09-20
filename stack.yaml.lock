@@ -89,31 +89,26 @@ packages:
     subdir: telegram-bot-simple
     url: https://github.com/BenefitWizard/telegram-bot-simple/archive/4183793bbfd077d1bb87f78ef43d25bbdce242cb.tar.gz
 - completed:
-    name: beam-core
+    hackage: beam-core-0.11.1.0@sha256:438ee4fb3082ffb6893b9fd8153c05ae77976e39333785cd060f257b0894c6e5,5591
     pantry-tree:
-      sha256: 13f1e3e45608d604272b0dc2a4426495c7d8805e0cf262dd3e8bd0fd0da56dc3
-      size: 2705
-    sha256: c388e71710ca0a28ee5f10c0d15a0589ae46b74713e6e2a9d66d5a37167e4b70
-    size: 1214103
-    subdir: beam-core
-    url: https://github.com/haskell-beam/beam/archive/eafea7b9f7972853671c286d62f0c6e1bfc2a565.tar.gz
-    version: 0.10.4.0
+      sha256: e184dbd13d740dc82296b433e22f4f31c68b4e2cbf549a7414caddc156a1d700
+      size: 2897
   original:
-    subdir: beam-core
-    url: https://github.com/haskell-beam/beam/archive/eafea7b9f7972853671c286d62f0c6e1bfc2a565.tar.gz
+    hackage: beam-core-0.11.1.0
 - completed:
-    name: beam-postgres
+    hackage: beam-migrate-0.6.0.0@sha256:82d4d1cb5db07285f9d5bcd72caa8569dec44bb414002aca63aae70fce42ab9e,4758
     pantry-tree:
-      sha256: eb8b3b991bad20e52cc81d44840d1746192898fe0e61a087a5a5863155a4a082
-      size: 2605
-    sha256: c388e71710ca0a28ee5f10c0d15a0589ae46b74713e6e2a9d66d5a37167e4b70
-    size: 1214103
-    subdir: beam-postgres
-    url: https://github.com/haskell-beam/beam/archive/eafea7b9f7972853671c286d62f0c6e1bfc2a565.tar.gz
-    version: 0.5.4.4
+      sha256: 6982c50ccdd1c19167fbb531441a9b44ef847546648bfa67ccb8ee8c8f8cba9c
+      size: 1798
   original:
-    subdir: beam-postgres
-    url: https://github.com/haskell-beam/beam/archive/eafea7b9f7972853671c286d62f0c6e1bfc2a565.tar.gz
+    hackage: beam-migrate-0.6.0.0
+- completed:
+    hackage: beam-postgres-0.6.3.0@sha256:00c6ea85dab90ca1a4136d376a9606d50d784d65c140131cc7c85f4209ad81eb,4995
+    pantry-tree:
+      sha256: ff977d32ee9e5b12aae8acc9778b87c470baf957507235785834f5c28dcc4c32
+      size: 2378
+  original:
+    hackage: beam-postgres-0.6.3.0
 - completed:
     name: telegram-bot-extra
     pantry-tree:

@@ -4,7 +4,18 @@
 
 
 # Codebase navigation
-* Use LSP tools (`goToDefinition`, `findReferences`, `hover`) to navigate code. They are more accurate and faster than grep/glob search. LSP is available for Haskell files.
+* Use LSP tools (`goToDefinition`, `findReferences`, `hover`) from the main checkout. In worktree pools and subagents LSP is unavailable — navigate via `hiedb` instead: a millisecond query beats a build wave per guess.
+* **hiedb** — precise symbol navigation from GHC `.hie` files. `package.yaml` already builds with `-fwrite-ide-info -hiedir .hie` (both flags required: `-hiedir` alone writes nothing; re-run `hpack` after any `package.yaml` change). Run from the repo root; commands verified:
+  ```
+  hiedb -D .hie-db index .hie                         # after a build; <1 s
+  hiedb -D .hie-db ls                                 # indexed modules
+  hiedb -D .hie-db name-def <name> [Module]           # value definition → Module:line:col
+  hiedb -D .hie-db name-refs <name> [Module]          # ALL references (call-site/ripple enumeration)
+  hiedb -D .hie-db type-def <Name> <Module>           # type definition, full declaration span
+  hiedb -D .hie-db point-info <Module> <line> <col>   # symbol at point + real source path
+  ```
+  Examples (verified on a fresh index): `name-def runSafely` → `LazyCircus.Scenario:156:1`; `ls` shows both `lazy-circus` and `lazy-circus-testing` modules.
+* Caveats: the index reflects the last *indexed* build — re-run `index` after your own build; only local packages are indexed (dependency APIs — `stack exec ghci` `:i`/`:browse` probes); disambiguate overloaded names by module.
 
 # Technical details
 * Before building or running tests always run `hpack`. It updates the `cabal` file needed for project management.

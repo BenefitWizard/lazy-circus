@@ -1,6 +1,6 @@
 services:
   db:
-    image: "postgres"
+    image: "postgres:17"
     container_name: "lazy_postgres"
     environment:
       POSTGRES_PASSWORD: "my_password"

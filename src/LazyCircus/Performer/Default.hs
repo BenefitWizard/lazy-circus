@@ -22,7 +22,7 @@ import Data.Pool (withResource)
 import LazyCircus.AI (askAIContinuing, solveWithAgentLoopContinuing)
 import LazyCircus.App.Default
 import LazyCircus.App.Log
-import LazyCircus.App.Service (HasToolDescriptions (..), callViaServiceLib)
+import LazyCircus.App.Service (HasToolDescriptions (..), callViaServiceLib, castViaServiceLib)
 import LazyCircus.AsyncWorker (scheduleAsyncAction, scheduleTimedAction)
 import LazyCircus.AsyncWorker.Types (HasScheduledActions, HasTimedActions)
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
@@ -159,6 +159,8 @@ instance
     getExtraContext' = view extraContextL
 
     callService' = callViaServiceLib
+
+    castService' = castViaServiceLib
 
     withLogContext' values act =
         local (logContextL %~ (`putInLoggingContext` values)) (run act)

@@ -56,11 +56,10 @@ extra-deps:
     subdirs:
       - telegram-bot-api
       - telegram-bot-simple
-  - github: haskell-beam/beam
-    commit: eafea7b9f7972853671c286d62f0c6e1bfc2a565
-    subdirs:
-      - beam-core
-      - beam-postgres
+  # С Hackage (в снапшоте beam отсутствует)
+  - beam-core-0.11.1.0
+  - beam-migrate-0.6.0.0
+  - beam-postgres-0.6.3.0
   - github: BenefitWizard/telegram-bot-extra
     commit: c1620279d1f4f57fd6df9d2e6ad60532df8cb76b
 # - acme-missiles-0.3
