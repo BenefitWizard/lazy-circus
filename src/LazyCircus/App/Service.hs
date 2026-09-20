@@ -24,8 +24,10 @@ module LazyCircus.App.Service (
     IsInServiceLib (..),
     HasServiceLib (..),
     NoServiceLib (..),
+    SomeServiceCast (..),
     callViaServiceLib,
     castViaServiceLib,
+    castSomeService,
     runAllWorkers,
     -- IsResponseFor (..),
     -- * Tool descriptions
@@ -195,6 +197,28 @@ castViaServiceLib ::
 castViaServiceLib req = do
     serviceLib <- view serviceLibL
     castFromServiceLib serviceLib req
+
+-- | A typed cast request wrapped existentially, hiding its request and response
+--   types so heterogeneous casts can be stored together (e.g. in the timer
+--   registry). The wrapped request keeps its 'Typeable' evidence so tests can
+--   recover it.
+-- POST-CONTRACT: Delivering the wrapper dispatches through 'castFromServiceLib',
+--   so delivery follows 'castService' semantics — the handler result is
+--   discarded and handler exceptions are swallowed by the service worker.
+data SomeServiceCast serviceLib
+    = forall request response.
+      (IsInServiceLib serviceLib request response, Typeable request) =>
+      SomeServiceCast request
+
+-- | Deliver a wrapped cast to its service through 'castFromServiceLib'.
+-- PRE-CONTRACT: The service's worker must be running for the cast to be handled;
+--   otherwise it silently accumulates in the mailbox.
+-- POST-CONTRACT: Returns without waiting for the handler when the instance
+--   overrides 'castFromServiceLib' with 'castService' (as TH-generated instances
+--   do); instances relying on the blocking default block until the handler
+--   responds.
+castSomeService :: (MonadUnliftIO m) => serviceLib -> SomeServiceCast serviceLib -> m ()
+castSomeService serviceLib (SomeServiceCast request) = castFromServiceLib serviceLib request
 
 -- | Fork all worker actions as concurrent threads and return their handles.
 -- PRE-CONTRACT: None.

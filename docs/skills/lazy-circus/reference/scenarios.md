@@ -100,6 +100,7 @@ multiple effects and control concerns.
 | `runArbitraryIO` | **fallback** escape hatch — run an arbitrary `IO` when no structured effect fits (see below) |
 | `callService` | call a registered service via the service library (blocks until the response) |
 | `castService` | fire-and-forget call to a registered service (gen_server cast: returns immediately, handler errors invisible) |
+| `castServiceAfter` | fire-and-forget call deferred by a one-shot timer: delivered straight to the service after the delay, bypassing the async worker pool |
 
 Signatures (`sl` = `serviceLib`; module `LazyCircus.Scenario`):
 
@@ -122,6 +123,7 @@ runAsyncAfter         :: NominalDiffTime -> ScenarioProgram script sl () -> Scen
 runArbitraryIO        :: IO a -> ScenarioProgram script sl a
 callService           :: IsInServiceLib sl req resp => req -> ScenarioProgram script sl resp
 castService           :: (IsInServiceLib sl req resp, Typeable req) => req -> ScenarioProgram script sl ()
+castServiceAfter      :: (IsInServiceLib sl req resp, Typeable req) => NominalDiffTime -> req -> ScenarioProgram script sl ()
 
 run                   :: ScenarioPerformer script sl m => ScenarioProgram script sl a -> m a
 ```
@@ -255,6 +257,17 @@ tick = do
         doWork
         runAsyncAfter interval tick
 ```
+
+`castServiceAfter delay req` defers a fire-and-forget service cast with the same one-shot
+timer semantics, but the request never goes through the async worker pool: when the
+deadline fires, `runTimerService` delivers it straight to the service (result discarded).
+Use it for delayed nudges to a long-lived service worker (rate limiter, single-threaded
+writer); use `runAsyncAfter` when the deferred work is a whole scenario. The same delivery
+caveats as `castService` apply (best-effort, handler errors invisible), plus the timer
+service and the target service worker must be running. In tests the same `tcAsync` knob
+controls it: `Mocked` captures `(delay, request)` in the `scheduledTimers` buffer
+(`readScheduledCastTimersOfType` to inspect, `fireScheduledTimers` to deliver), `Real`
+delivers after the delay.
 
 ### When To Use `runSafely`
 

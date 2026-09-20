@@ -23,6 +23,10 @@ Verifies the branching contract of 'LazyCircus.Testing.Performer':
   executes them synchronously in capture order (idempotently), and 'Real'
   spawns the delayed worker so its side effects land in the usual capture
   buffers while 'readScheduledTimers' stays empty.
+* 'LazyCircus.Scenario.castServiceAfter' obeys the same knob too:
+  'Mocked' captures @(delay, request)@ pairs in 'readScheduledCastTimersOfType'
+  (not in the scenario buffers), and 'Real' delivers the cast after the delay
+  without capturing it.
 -}
 module ConfigurablePerformerSpec (spec) where
 
@@ -35,7 +39,7 @@ import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.Scene.AI qualified as Scene (ask)
 import LazyCircus.Scene.Mail.Lang qualified as Mail (makeMail, sendMail)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg (sendMessage)
-import LazyCircus.Scenario (ScenarioProgram, evalScript, runAsync, runAsyncAfter)
+import LazyCircus.Scenario (ScenarioProgram, castServiceAfter, evalScript, runAsync, runAsyncAfter)
 import LazyCircus.Script (Script (..))
 import LazyCircus.Testing.Performer
     ( Mocks (asyncInflight)
@@ -47,6 +51,7 @@ import LazyCircus.Testing.Performer
     , makeMocks
     , readAiRequests
     , readOutgoingMailbox
+    , readScheduledCastTimersOfType
     , readScheduledScenarios
     , readScheduledTimers
     , readSentMails
@@ -63,6 +68,7 @@ import LazyCircus.Testing.TgTest
     )
 import Network.Mail.Mime (Address (..))
 import RIO
+import SimpleService (SimpleRequest (..))
 import SimpleServiceLib (AllServices)
 import Test.Hspec
 import Telegram.Bot.API (ChatId (..), SomeChatId (..), defSendMessage)
@@ -216,6 +222,44 @@ spec = do
                 -- which published to the mailbox (engine awaited the worker).
                 outgoing <- readOutgoingMailbox mocks
                 map omText outgoing `shouldBe` [Just "delayed"]
+
+        describe "castServiceAfter timers (Mocked capture, fire, Real execution)" $ do
+            it "Cast Mocked captures the delayed request in readScheduledCastTimersOfType" $ \app -> do
+                (mocks, _) <-
+                    runWithDefaultConfig app defaultTestConfig $
+                        runScenarioProgram (castServiceAfter 0.05 (Add 1 2))
+                casts <- readScheduledCastTimersOfType mocks
+                casts `shouldBe` [(0.05, Add 1 2)]
+                -- Delayed casts must not leak into the scenario buffers or spawn workers.
+                scheduled <- readScheduledScenarios mocks
+                length scheduled `shouldBe` 0
+                inflight <- atomically (readTVar (asyncInflight mocks))
+                inflight `shouldBe` 0
+
+            it "fireScheduledTimers delivers captured casts to the real service worker" $ \app -> do
+                (mocks, _) <-
+                    runWithDefaultConfig app defaultTestConfig $
+                        runScenarioProgram (castServiceAfter 9 (Add 2 3))
+                -- Firing delivers the cast to the real AllServices worker; its
+                -- cast handler is a pure computation, so a clean drain is the
+                -- observable assertion here (delivery to a recording handler
+                -- is proven DB-free in TimerServiceSpec).
+                runWithConfig app defaultTestConfig mocks fireScheduledTimers
+                remaining <- readScheduledTimers mocks
+                length remaining `shouldBe` 0
+
+            it "Cast Real delivers via the delayed worker and captures nothing" $ \app -> do
+                let cfg = defaultTestConfig{tcAsync = Real}
+                (mocks, _) <-
+                    runWithDefaultConfig app cfg $
+                        runScenarioProgram (castServiceAfter 0.05 (Add 3 4))
+                -- Real mode delivers after the delay instead of capturing; the
+                -- engine awaited the spawned worker (its cast handler is pure,
+                -- so there is no mailbox effect to observe).
+                timers <- readScheduledCastTimersOfType @SimpleRequest mocks
+                length timers `shouldBe` 0
+                scheduled <- readScheduledScenarios mocks
+                length scheduled `shouldBe` 0
 
         describe "Real non-capture (exception + empty capture)" $ do
             it "AI Real does not capture requests (readAiRequests is empty)" $ \app -> do

@@ -22,8 +22,8 @@ import Data.Pool (withResource)
 import LazyCircus.AI (askAIContinuing, solveWithAgentLoopContinuing)
 import LazyCircus.App.Default
 import LazyCircus.App.Log
-import LazyCircus.App.Service (HasToolDescriptions (..), callViaServiceLib, castViaServiceLib)
-import LazyCircus.AsyncWorker (scheduleAsyncAction, scheduleTimedAction)
+import LazyCircus.App.Service (HasToolDescriptions (..), SomeServiceCast (..), callViaServiceLib, castViaServiceLib)
+import LazyCircus.AsyncWorker (scheduleAsyncAction, scheduleTimedAction, scheduleTimedServiceCast)
 import LazyCircus.AsyncWorker.Types (HasScheduledActions, HasTimedActions)
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
@@ -161,6 +161,11 @@ instance
     callService' = callViaServiceLib
 
     castService' = castViaServiceLib
+
+    -- @script is applied explicitly: it is phantom in 'SomeServiceCast', so
+    -- inference cannot otherwise connect the call to the instance's
+    -- 'HasTimedActions' constraint.
+    castServiceAfter' delay req = scheduleTimedServiceCast @script @serviceLib delay (SomeServiceCast req)
 
     withLogContext' values act =
         local (logContextL %~ (`putInLoggingContext` values)) (run act)

@@ -29,6 +29,7 @@ module LazyCircus.Scenario (
   runArbitraryIO,
   callService,
   castService,
+  castServiceAfter,
   KnownHowToEval (..),
 ) where
 
@@ -65,6 +66,9 @@ data Scenario script serviceLib a where
   CastService ::
     (S.IsInServiceLib serviceLib request response, Typeable request) =>
     request -> a -> Scenario script serviceLib a
+  RunCastServiceAfter ::
+    (S.IsInServiceLib serviceLib request response, Typeable request) =>
+    NominalDiffTime -> request -> a -> Scenario script serviceLib a
 
 instance Functor (Scenario script serviceLib) where
   fmap f (EvalScript scr g) = EvalScript scr (f . g)
@@ -79,13 +83,14 @@ instance Functor (Scenario script serviceLib) where
   fmap f (RunArbitraryIO io g) = RunArbitraryIO io (f . g)
   fmap f (CallService req g) = CallService req (f . g)
   fmap f (CastService req g) = CastService req (f g)
+  fmap f (RunCastServiceAfter d req g) = RunCastServiceAfter d req (f g)
 
 -- | Church-encoded free program over the Scenario instruction set.
 type ScenarioProgram script serviceLib = FC.F (Scenario script serviceLib)
 
 -- | Performer contract for executing ScenarioProgram instructions in a concrete monad.
--- BREAKING: 'castService'' has no default implementation — every custom
--- 'ScenarioPerformer' instance must implement it.
+-- BREAKING: 'castService'' and 'castServiceAfter'' have no default implementation —
+-- every custom 'ScenarioPerformer' instance must implement them.
 class (Monad m) => ScenarioPerformer script serviceLib m where
   onEvalScript :: script b -> m b
   throw' :: (Exception e) => e -> m b
@@ -99,6 +104,7 @@ class (Monad m) => ScenarioPerformer script serviceLib m where
   runArbitraryIO' :: IO a -> m a
   callService' :: (S.IsInServiceLib serviceLib request response) => request -> m response
   castService' :: (S.IsInServiceLib serviceLib request response, Typeable request) => request -> m ()
+  castServiceAfter' :: (S.IsInServiceLib serviceLib request response, Typeable request) => NominalDiffTime -> request -> m ()
 
 {- | Fold a ScenarioProgram into any monad that implements ScenarioPerformer.
 PRE-CONTRACT: None
@@ -143,6 +149,9 @@ run = FC.iterM go
     next res
   go (CastService req next) = do
     castService' @script @serviceLib req
+    next
+  go (RunCastServiceAfter d req next) = do
+    castServiceAfter' @script @serviceLib d req
     next
 
 {- | Lift an embedded Script instruction into the ScenarioProgram layer.
@@ -362,6 +371,26 @@ handled FIFO after all earlier messages of that service.
 -}
 castService :: (S.IsInServiceLib serviceLib request response, Typeable request) => request -> ScenarioProgram script serviceLib ()
 castService req = FC.liftF $ CastService req ()
+
+{- | Fire-and-forget call to a registered service, deferred until the delay
+elapses: the request goes straight to its service worker (not through the
+async worker pool) and the result is discarded.
+
+WARNING: the same best-effort semantics as 'castService' — a handler
+exception is swallowed by the service worker and there is no response to
+inspect.
+
+PRE-CONTRACT: In production both 'LazyCircus.AsyncWorker.runTimerService' and
+the target service worker (started via 'LazyCircus.App.Service.runAllWorkers')
+must be running; without the timer service the cast is never delivered,
+without the service worker it silently accumulates in the mailbox.
+POST-CONTRACT: Returns immediately after the request is registered; the cast
+is delivered exactly once, no earlier than the deadline; equal deadlines are
+delivered FIFO in registration order; @delay <= 0@ is picked up immediately
+(equivalent to 'castService').
+-}
+castServiceAfter :: (S.IsInServiceLib serviceLib request response, Typeable request) => NominalDiffTime -> request -> ScenarioProgram script serviceLib ()
+castServiceAfter delay req = FC.liftF $ RunCastServiceAfter delay req ()
 
 instance HasLogLang (Scenario script serviceLib) (ScenarioProgram script serviceLib) where
   embedLog (LogMsg cs msg next) = ScenarioLogMsg cs msg next

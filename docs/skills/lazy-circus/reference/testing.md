@@ -98,9 +98,11 @@ capabilities at the edges.
 | `readSentMails` | read outgoing mails |
 | `readAiRequests` | read captured AI chat-completion requests (Mocked mode only) |
 | `readScheduledScenarios` | read captured async scenario requests |
-| `readScheduledTimers` | read captured `runAsyncAfter` requests as `(delay, program)` pairs, in capture order (buffer not cleared) |
+| `readScheduledTimers` | read captured `runAsyncAfter` and `castServiceAfter` requests as `(delay, DeferredAction …)` pairs, in capture order (buffer not cleared) |
+| `readScheduledScenarioTimers` | read captured `runAsyncAfter` requests as `(delay, program)` pairs, in capture order (cast entries filtered out) |
+| `readScheduledCastTimersOfType` | read captured `castServiceAfter` requests of one request type as `(delay, request)` pairs, in capture order (scenario entries filtered out) |
 | `readCastRequests` / `readCastRequestsOfType` | read captured `castService` service cast requests (delivered AND recorded; typed filter by request type) |
-| `fireScheduledTimers` | execute captured timer programs immediately, in capture order, through the same test interpreter and clear the buffer (idempotent) |
+| `fireScheduledTimers` | execute captured timer entries immediately, in capture order, through the same test interpreter (programs run; casts are delivered to their service) and clear the buffer (idempotent) |
 
 Signatures (module `LazyCircus.Testing.Performer`; `sl` = `serviceLib`):
 
@@ -124,7 +126,9 @@ readLogWithContext        :: Mocks sl -> IO [AppLogMsgWithContext]
 readSentMails             :: Mocks sl -> IO [Mail]
 readAiRequests            :: Mocks sl -> IO [Chat.CreateChatCompletion]
 readScheduledScenarios    :: Mocks sl -> IO [ScenarioProgram Script sl ()]
-readScheduledTimers       :: Mocks sl -> IO [(NominalDiffTime, ScenarioProgram Script sl ())]
+readScheduledTimers       :: Mocks sl -> IO [(NominalDiffTime, DeferredAction Script sl)]
+readScheduledScenarioTimers :: Mocks sl -> IO [(NominalDiffTime, ScenarioProgram Script sl ())]
+readScheduledCastTimersOfType :: Typeable req => Mocks sl -> IO [(NominalDiffTime, req)]
 readCastRequests          :: Mocks sl -> IO [Dynamic]
 readCastRequestsOfType    :: Typeable req => Mocks sl -> IO [req]
 fireScheduledTimers       :: HasCallStack => TestInterpreter sl app ()
@@ -293,7 +297,7 @@ captures side effects; `Real` delegates to production implementations without ca
 | HTTP `runClient` | — (always real) | real execution via servant-client against target base URL | same |
 | DB | — (always real) | runs against a real DB (one pooled connection per script) | same |
 | Logging | — (always captured) | captured in refs, not pushed to shared queue | same |
-| `runAsync` / `runAsyncAfter` | `tcAsync` | one knob for both primitives: `runAsync` captures the scenario without executing it (`readScheduledScenarios`); `runAsyncAfter` captures the `(delay, scenario)` pair in the `scheduledTimers` buffer (`readScheduledTimers`, executed via `fireScheduledTimers`) | spawns the scenario on a background thread through the same test interpreter (for `runAsyncAfter` once the requested delay elapses); side effects land in the usual capture buffers / mailbox (no capture in `readScheduledScenarios` / `scheduledTimers`) |
+| `runAsync` / `runAsyncAfter` / `castServiceAfter` | `tcAsync` | one knob for all three primitives: `runAsync` captures the scenario without executing it (`readScheduledScenarios`); `runAsyncAfter` captures the `(delay, scenario)` pair and `castServiceAfter` the `(delay, request)` pair in the `scheduledTimers` buffer (`readScheduledTimers` and the filtered readers, executed via `fireScheduledTimers`) | spawns the work on a background thread through the same test interpreter (for the delayed variants once the requested delay elapses); side effects land in the usual capture buffers / mailbox (no capture in `readScheduledScenarios` / `scheduledTimers`) |
 
 ## Typical Test Pattern
 

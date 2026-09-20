@@ -4,11 +4,13 @@
 module LazyCircus.AsyncWorker.Types (
     ScheduledActions,
     HasScheduledActions (..),
+    DeferredAction (..),
     TimedAction (..),
     TimedActions (..),
     HasTimedActions (..),
 ) where
 
+import LazyCircus.App.Service (SomeServiceCast)
 import LazyCircus.Scenario
 import RIO
 import RIO.Time (UTCTime)
@@ -22,11 +24,17 @@ type ScheduledActions sc sl = TQueue (ScenarioProgram sc sl ())
 class HasScheduledActions script sl env | env -> sl where
     scheduledActionsL :: Lens' env (ScheduledActions script sl)
 
--- | One deferred action: a program plus its absolute deadline and registration order.
+-- | Work carried by one deferred timer entry: a control program to run on the
+--   async worker pool, or a typed service cast to deliver directly.
+data DeferredAction script sl
+    = DeferredScenario (ScenarioProgram script sl ()) -- ^ enqueue the program into the scheduled queue for the async worker pool
+    | DeferredCast (SomeServiceCast sl)               -- ^ cast the wrapped request to its service, discarding the result
+
+-- | One deferred action: its payload plus the absolute deadline and registration order.
 data TimedAction script sl = TimedAction
     { taDeadline :: UTCTime                        -- ^ absolute deadline (now + delay at registration)
     , taSeq      :: Word                           -- ^ monotonic counter giving FIFO order for equal deadlines
-    , taProgram  :: ScenarioProgram script sl ()   -- ^ the deferred program to run when the deadline fires
+    , taAction   :: DeferredAction script sl       -- ^ the deferred work to perform when the deadline fires
     }
 
 -- | Registry of deferred actions: a sorted list of entries plus a sequence counter.

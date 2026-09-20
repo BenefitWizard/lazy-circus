@@ -16,3 +16,4 @@ AllServices_Generated.hs
 opencode.json
 .hie/
 .hie-db
+.zcode/

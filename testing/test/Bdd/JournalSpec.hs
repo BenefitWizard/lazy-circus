@@ -30,8 +30,8 @@ import LazyCircus.App.Default
     , DefaultAppConfig (..)
     , MailCreds (..)
     )
-import LazyCircus.App.Service (NoServiceLib (..))
-import LazyCircus.Scenario (ScenarioProgram, evalScript, runAsync, runAsyncAfter)
+import LazyCircus.App.Service (IsInServiceLib (..), NoServiceLib (..))
+import LazyCircus.Scenario (ScenarioProgram, castServiceAfter, evalScript, runAsync, runAsyncAfter)
 import LazyCircus.Scene.AI qualified as Scene (ask, solveWithAgent)
 import LazyCircus.Scene.Mail.Lang qualified as Mail (sendMail)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg
@@ -172,6 +172,19 @@ isTextReply txt obs = case obs of
 tinyBudgetUs :: Int
 tinyBudgetUs = 20_000
 
+-- | Test-local request type exercising the deferred-cast journal entry.
+data JournalCastRequest = JournalCastRequest
+    deriving (Eq, Show)
+
+-- | Response paired with 'JournalCastRequest' to satisfy the service-lib fundep.
+data JournalCastResponse = JournalCastOk
+    deriving (Eq, Show)
+
+-- | The DB-free app has no real services; a no-op instance is enough because
+-- this spec only observes the Mocked-mode capture, never delivery.
+instance IsInServiceLib NoServiceLib JournalCastRequest JournalCastResponse where
+    callFromServiceLib _ _ = pure JournalCastOk
+
 -- | A fixed Stars-invoice observation used as the Eq\/Show baseline.
 starsInvoice :: Observation ()
 starsInvoice =
@@ -260,6 +273,17 @@ spec = aroundAll withJournalApp $ do
 
             observed <- readObservations journal
             observed `shouldBe` [ObsTimerScheduled{obsScenarioDesc = "runAsyncAfter scenario"}]
+
+        it "journals ObsTimerScheduled for a castServiceAfter capture in Mocked mode" $ \app -> do
+            journal <- newObservationLog :: IO (ObservationLog ())
+            let cfg = defaultTestConfig{tcJournal = Just journal}
+            _ <-
+                runWithDefaultConfig app cfg $
+                    runScenarioProgram $
+                        castServiceAfter 0.1 JournalCastRequest
+
+            observed <- readObservations journal
+            observed `shouldBe` [ObsTimerScheduled{obsScenarioDesc = "castServiceAfter request"}]
 
         it "applies tcMailHook and journals the resulting ObsApp" $ \app -> do
             journal <- newObservationLog

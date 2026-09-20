@@ -72,6 +72,8 @@ module LazyCircus.Testing.Performer (
     readAiRequests,
     readScheduledScenarios,
     readScheduledTimers,
+    readScheduledScenarioTimers,
+    readScheduledCastTimersOfType,
     fireScheduledTimers,
     readCastRequests,
     readCastRequestsOfType,
@@ -89,8 +91,8 @@ import LazyCircus.AI
     )
 import LazyCircus.App.Default qualified as App
 import LazyCircus.App.Log
-import LazyCircus.App.Service (HasServiceLib (..), HasToolCallExec (..), HasToolDescriptions (..), callViaServiceLib, castViaServiceLib)
-import LazyCircus.AsyncWorker.Types (HasScheduledActions (..))
+import LazyCircus.App.Service (HasServiceLib (..), HasToolCallExec (..), HasToolDescriptions (..), IsInServiceLib, SomeServiceCast (..), callViaServiceLib, castSomeService, castViaServiceLib)
+import LazyCircus.AsyncWorker.Types (DeferredAction (..), HasScheduledActions (..))
 import LazyCircus.DB.Types (PgDB)
 import LazyCircus.DB.WithConnection (AppWithConnection (..))
 import LazyCircus.Mail qualified as Mail
@@ -248,11 +250,12 @@ data Mocks serviceLib = Mocks
     -- ^ AI request capture and canned-response queue
     , scheduledScenarios :: SomeRef [ScenarioProgram Script serviceLib ()]
     -- ^ captured async control programs requested through 'runAsync' ('tcAsync = Mocked')
-    , scheduledTimers :: SomeRef [(NominalDiffTime, ScenarioProgram Script serviceLib ())]
-    -- ^ captured delayed async control programs requested through
-    -- 'runAsyncAfter' ('tcAsync = Mocked'), each paired with its requested
-    -- delay; read via 'readScheduledTimers', drained and executed via
-    -- 'fireScheduledTimers'
+    , scheduledTimers :: SomeRef [(NominalDiffTime, DeferredAction Script serviceLib)]
+    -- ^ captured delayed async work requested through 'runAsyncAfter'
+    -- ('DeferredScenario') or 'castServiceAfter' ('DeferredCast') with
+    -- 'tcAsync = Mocked', each paired with its requested delay; read via
+    -- 'readScheduledTimers' (or the scenario/cast-filtered readers), drained
+    -- and executed via 'fireScheduledTimers'
     , castRequests :: SomeRef [Dynamic]
     -- ^ captured service cast requests recorded through 'castService' (as
     -- 'Dynamic'; filter with 'readCastRequestsOfType'); delivery to the real
@@ -278,13 +281,13 @@ data TestConfig app = TestConfig
     , tcMailSend :: !Mode
     -- ^ Mail send mode: Mocked = capture in sentMails ref, Real = SMTP via Mail.sendMail
     , tcAsync :: !Mode
-    -- ^ 'LazyCircus.Scenario.runAsync' / 'LazyCircus.Scenario.runAsyncAfter'
-    -- mode: Mocked = capture in 'scheduledScenarios' (assert via
-    -- 'readScheduledScenarios') or in 'scheduledTimers' (read via
-    -- 'readScheduledTimers', execute via 'fireScheduledTimers'); Real = spawn
-    -- the scenario on a background thread so its side effects genuinely run and
-    -- land in the usual capture buffers / outgoing mailbox (no capture in
-    -- 'scheduledScenarios' or 'scheduledTimers')
+    -- ^ 'LazyCircus.Scenario.runAsync' / 'LazyCircus.Scenario.runAsyncAfter' /
+    -- 'LazyCircus.Scenario.castServiceAfter' mode: Mocked = capture in
+    -- 'scheduledScenarios' (assert via 'readScheduledScenarios') or in
+    -- 'scheduledTimers' (read via 'readScheduledTimers', execute via
+    -- 'fireScheduledTimers'); Real = spawn the work on a background thread so
+    -- its side effects genuinely run and land in the usual capture buffers /
+    -- outgoing mailbox (no capture in 'scheduledScenarios' or 'scheduledTimers')
     , tcJournal :: !(Maybe (ObservationLog app))
     -- ^ optional observation journal ('LazyCircus.Testing.Bdd.Journal.ObservationLog').
     -- When set, the performer records one 'Observation' per intercepted side
@@ -836,6 +839,10 @@ instance ScenarioPerformer Script serviceLib (TestPerformer (EnvWithMocks servic
         casts <- asks (castRequests . mocks)
         modifySomeRef casts (toDyn req :)
         castViaServiceLib req
+    -- Records the delayed cast into 'scheduledTimers' (synchronously, so
+    -- asserts right after the scenario step are deterministic); real delivery
+    -- is delegated to 'runCastServiceAfterTest' below.
+    castServiceAfter' = runCastServiceAfterTest
     withLogContext' values action =
         local (logContextL %~ (`putInLoggingContext` values)) (run action)
 
@@ -1141,13 +1148,43 @@ readAiRequests testMocks = reverse <$> readSomeRef (aiRequests $ aiMock testMock
 readScheduledScenarios :: Mocks serviceLib -> IO [ScenarioProgram Script serviceLib ()]
 readScheduledScenarios testMocks = reverse <$> readSomeRef (scheduledScenarios testMocks)
 
--- | Read captured delayed async control programs (requested via
--- 'LazyCircus.Scenario.runAsyncAfter') together with their requested delays,
--- in request order.
+-- | Read captured delayed async work (requested via
+-- 'LazyCircus.Scenario.runAsyncAfter' or 'LazyCircus.Scenario.castServiceAfter')
+-- together with their requested delays, in request order.
 -- POST-CONTRACT: Result is ordered earliest-first (request order); the buffer
 -- is NOT cleared — pending timers stay available to 'fireScheduledTimers'.
-readScheduledTimers :: Mocks serviceLib -> IO [(NominalDiffTime, ScenarioProgram Script serviceLib ())]
+readScheduledTimers :: Mocks serviceLib -> IO [(NominalDiffTime, DeferredAction Script serviceLib)]
 readScheduledTimers testMocks = reverse <$> readSomeRef (scheduledTimers testMocks)
+
+-- | Read captured delayed control programs (requested via
+-- 'LazyCircus.Scenario.runAsyncAfter') together with their requested delays,
+-- in request order; delayed casts are filtered out.
+-- POST-CONTRACT: Result is ordered earliest-first (request order); the buffer
+-- is NOT cleared.
+readScheduledScenarioTimers :: Mocks serviceLib -> IO [(NominalDiffTime, ScenarioProgram Script serviceLib ())]
+readScheduledScenarioTimers testMocks =
+    filterScenario <$> readScheduledTimers testMocks
+  where
+    -- | Keeps only scenario entries, unwrapping the payload.
+    filterScenario timers = [(delay, program) | (delay, DeferredScenario program) <- timers]
+
+-- | Read captured delayed service casts (requested via
+-- 'LazyCircus.Scenario.castServiceAfter') of one concrete request type,
+-- paired with their requested delays, in request order.
+-- POST-CONTRACT: Result is ordered earliest-first (request order) and contains
+-- only casts whose request type matches the inferred type; delayed control
+-- programs are filtered out; the buffer is NOT cleared.
+readScheduledCastTimersOfType :: (Typeable request) => Mocks serviceLib -> IO [(NominalDiffTime, request)]
+readScheduledCastTimersOfType testMocks =
+    filterCast <$> readScheduledTimers testMocks
+  where
+    -- | Keeps only cast entries whose request type matches, recovering the typed request.
+    filterCast timers = [(delay, req) | (delay, DeferredCast castAction) <- timers, Just req <- [recoverCast castAction]]
+
+-- | Recover the typed request from a wrapped cast when its type matches;
+-- 'Nothing' for a different request type.
+recoverCast :: (Typeable request) => SomeServiceCast serviceLib -> Maybe request
+recoverCast (SomeServiceCast req) = fromDynamic (toDyn req)
 
 -- | Read captured service cast requests (requested via 'LazyCircus.Scenario.castService')
 -- as 'Dynamic' values, in send order.
@@ -1163,13 +1200,14 @@ readCastRequests testMocks = reverse <$> readSomeRef (castRequests testMocks)
 readCastRequestsOfType :: (Typeable request) => Mocks serviceLib -> IO [request]
 readCastRequestsOfType testMocks = mapMaybe fromDynamic <$> readCastRequests testMocks
 
--- | Drain the 'scheduledTimers' buffer and execute every captured control
--- program synchronously and immediately (the requested delays are ignored),
--- in capture order, through the same test interpreter — mirroring how a spec
--- re-runs captured 'ScenarioProgram's via 'runScenarioProgram' under
+-- | Drain the 'scheduledTimers' buffer and execute every captured entry
+-- synchronously and immediately (the requested delays are ignored), in capture
+-- order, through the same test interpreter: captured control programs run via
+-- 'run', captured service casts are delivered via 'castSomeService' — mirroring
+-- how a spec re-runs captured 'ScenarioProgram's via 'runScenarioProgram' under
 -- 'runWithConfig' / 'runWithDefaultConfig'.
 --
--- Per-program exceptions are caught with 'tryAny' and logged via 'sublangLog'
+-- Per-entry exceptions are caught with 'tryAny' and logged via 'sublangLog'
 -- (mirroring 'spawnAsyncScenario'); one failing timer does not prevent the
 -- remaining timers from firing.
 -- PRE-CONTRACT: Call after the scenario under test has finished scheduling
@@ -1189,12 +1227,18 @@ fireScheduledTimers = do
         writeSomeRef (scheduledTimers testMocks) []
         pure (reverse timers)
 
-    -- | Run one captured timer program immediately, logging any failure.
-    fireTimer (_, timerAction) = do
-        result <- tryAny (run timerAction)
+    -- | Run one captured timer entry immediately, logging any failure.
+    fireTimer (_, DeferredScenario timerAction) = fireLogged "Scheduled timer action failed" (run timerAction)
+    fireTimer (_, DeferredCast castAction) = do
+        serviceLib <- view serviceLibL
+        fireLogged "Scheduled timer cast failed" (castSomeService serviceLib castAction)
+
+    -- | Runs the action, logging any exception through the scenario log path.
+    fireLogged label action = do
+        result <- tryAny action
         case result of
             Left e ->
-                sublangLog callStack "Scenario" (ErrorLogMsg ("Scheduled timer action failed: " <> tshow e))
+                sublangLog callStack "Scenario" (ErrorLogMsg (label <> ": " <> tshow e))
             Right _ -> pure ()
 
 -- | Build a mail value using the SMTP credentials from the current test environment.
@@ -1377,7 +1421,17 @@ captureAsyncScenario action = do
 captureScheduledTimer :: NominalDiffTime -> ScenarioProgram Script serviceLib () -> TestInterpreter serviceLib app ()
 captureScheduledTimer delay action = do
     timerLog <- asks (scheduledTimers . mocks)
-    modifySomeRef timerLog ((delay, action) :)
+    modifySomeRef timerLog ((delay, DeferredScenario action) :)
+
+-- | Record a delayed service cast request without delivering it
+-- ('tcAsync = Mocked'). Touches ONLY the 'scheduledTimers' buffer — never
+-- 'castRequests' or 'asyncInflight'.
+captureScheduledCast ::
+    (IsInServiceLib serviceLib request response, Typeable request) =>
+    NominalDiffTime -> request -> TestInterpreter serviceLib app ()
+captureScheduledCast delay request = do
+    timerLog <- asks (scheduledTimers . mocks)
+    modifySomeRef timerLog ((delay, DeferredCast (SomeServiceCast request)) :)
 
 -- | Dispatch a 'LazyCircus.Scenario.runAsync' control program according to 'tcAsync'.
 -- 'Mocked' captures the scenario (no execution) and journals an
@@ -1411,6 +1465,24 @@ runAsyncAfterTest delay action = do
             captureScheduledTimer delay action
             liftIO $ journalObservation cfg ObsTimerScheduled{obsScenarioDesc = "runAsyncAfter scenario"}
         Real -> spawnTimedScenario delay action
+
+-- | Dispatch a 'LazyCircus.Scenario.castServiceAfter' request according to
+-- 'tcAsync'. 'Mocked' captures the cast together with its delay (no delivery)
+-- and journals an 'ObsTimerScheduled' entry; 'Real' spawns it on a background
+-- thread so the requested delay elapses there — the calling (interpreter)
+-- thread never blocks — and the cast is genuinely delivered to its service.
+runCastServiceAfterTest ::
+    (IsInServiceLib serviceLib request response, Typeable request) =>
+    NominalDiffTime ->
+    request ->
+    TestInterpreter serviceLib app ()
+runCastServiceAfterTest delay request = do
+    cfg <- asks testConfig
+    case tcAsync cfg of
+        Mocked -> do
+            captureScheduledCast delay request
+            liftIO $ journalObservation cfg ObsTimerScheduled{obsScenarioDesc = "castServiceAfter request"}
+        Real -> spawnTimedCast delay request
 
 -- | Spawn an async control program on a background thread ('tcAsync = Real').
 --
@@ -1474,6 +1546,39 @@ spawnTimedScenario delay action = do
             case result of
                 Left e ->
                     sublangLog callStack "Scenario" (ErrorLogMsg ("Timed worker action failed: " <> tshow e))
+                Right _ -> pure ()
+    void $ async $ finally runWorker dec
+
+-- | Spawn a delayed service cast on a background thread ('tcAsync = Real').
+--
+-- Mirrors 'spawnTimedScenario': the worker waits out the requested delay
+-- ('threadDelay' inside the spawned thread, so the calling interpreter thread
+-- never blocks) and then delivers the cast through 'castViaServiceLib', with
+-- the 'asyncInflight' counter incremented synchronously (before the spawn
+-- returns) and decremented when the worker finishes, so 'runWithConfigEngine'
+-- can await the worker.
+--
+-- Delivery exceptions are caught and logged via 'sublangLog'; they never crash
+-- the test harness.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: 'asyncInflight' is incremented synchronously (before this
+-- returns) and decremented once the worker finishes (or throws).
+spawnTimedCast ::
+    (IsInServiceLib serviceLib request response, Typeable request) =>
+    HasCallStack => NominalDiffTime -> request -> TestInterpreter serviceLib app ()
+spawnTimedCast delay request = do
+    counter <- asks (asyncInflight . mocks)
+    -- Increment BEFORE spawning so 'waitForAsyncInflight' cannot observe a false
+    -- zero between this function returning and the worker thread starting.
+    atomically $ modifyTVar' counter (+ 1)
+    let dec = atomically $ modifyTVar' counter (subtract 1)
+        μs = max 0 (floor (realToFrac delay * 1_000_000 :: Double))
+        runWorker = do
+            threadDelay μs
+            result <- tryAny (castViaServiceLib request)
+            case result of
+                Left e ->
+                    sublangLog callStack "Scenario" (ErrorLogMsg ("Timed cast delivery failed: " <> tshow e))
                 Right _ -> pure ()
     void $ async $ finally runWorker dec
 

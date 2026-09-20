@@ -291,6 +291,18 @@ result <- callViaServiceLib (Add 3 4)
 castViaServiceLib (Add 3 4)
 ```
 
+### Deferred Casts Through The Timer
+
+`castServiceAfter delay req` (scenario layer) registers the request for delivery by
+`runTimerService` after the delay: when the deadline fires, the timer thread delivers the
+cast straight to its service — bypassing the async worker pool — and discards the result.
+Internally the request is wrapped into `SomeServiceCast` (an existential wrapper that hides
+the request/response pair) and registered via `scheduleTimedServiceCast`; delivery happens
+through `castSomeService`, which calls the service's `IsInServiceLib` instance. Two
+preconditions: `runTimerService` must be running, and the service's instance must override
+`castFromServiceLib` with `castService` (as TH-generated instances do) — an instance
+relying on the blocking default stalls the timer loop until the handler replies.
+
 ### Checklist For Service Registration (Manual)
 
 - request and response types defined
@@ -577,8 +589,9 @@ instance (...) => ScenarioPerformer script serviceLib m where
 ```
 
 Note: the `ScenarioPerformer` class carries `runAsyncAfter'` (the dispatch method behind
-`runAsyncAfter`). It has **no default** implementation — it is mandatory to implement, which is
-a breaking change for custom performers: every existing custom instance must add the method.
+`runAsyncAfter`) and `castServiceAfter'` (the dispatch method behind `castServiceAfter`).
+They have **no default** implementation — they are mandatory to implement, which is
+a breaking change for custom performers: every existing custom instance must add the methods.
 
 Update the default performer if the new effect needs a special environment projection.
 
@@ -621,6 +634,7 @@ genuinely benefits from it.
 - `Script` constructor added
 - `ScenarioPerformer script serviceLib` dispatch updated
 - `runAsyncAfter'` implemented in custom `ScenarioPerformer` instances (no default — mandatory to implement; a breaking change for custom performers)
+- `castServiceAfter'` implemented in custom `ScenarioPerformer` instances (no default — mandatory to implement; a breaking change for custom performers)
 - stable `LazyCircus.Scene.MyEffect` facade added when the effect is public
 - optional top-level smart constructor added only when the effect should mirror `tgScript`, `mailScript`, `aiScript`, or `httpScript`
 - default and test runtimes updated as needed

@@ -105,6 +105,9 @@ The production `ScenarioPerformer` instance:
 - resolves service operations through the service library: `callService'` via
   `callViaServiceLib` (blocking round-trip) and `castService'` via `castViaServiceLib`
   (fire-and-forget enqueue into the service mailbox)
+- registers deferred service casts via `castServiceAfter'` → `scheduleTimedServiceCast`
+  (the request is wrapped into `SomeServiceCast` and delivered straight to its service
+  when the timer deadline fires)
 
 The default performer's `evalScriptDefault` is the production-specific dispatch. It:
 
@@ -140,12 +143,17 @@ teardown. The demo app wires this in `withDemoApp`, with the pool size read from
 
 ## Timer Service
 
-`runAsyncAfter delay program` defers a program instead of running it now. Production
-registration goes through `scheduleTimedAction` into the `TimedActions` registry — a
-`TVar` list of entries kept sorted by `(deadline, seq)` plus a separate `TVar` sequence
-counter. `seq` is strictly increasing, so equal deadlines keep FIFO (registration) order.
-Deferred actions are one-shot and fire exactly once, never before their deadline
-(`delay <= 0` is picked up immediately); there is no cancel handle.
+`runAsyncAfter delay program` defers a program instead of running it now, and
+`castServiceAfter delay request` defers a typed service cast the same way. Production
+registration goes through `scheduleTimedAction` / `scheduleTimedServiceCast` into the
+`TimedActions` registry — a `TVar` list of entries kept sorted by `(deadline, seq)` plus a
+separate `TVar` sequence counter. `seq` is strictly increasing, so equal deadlines keep FIFO
+(registration) order. Deferred actions are one-shot and fire exactly once, never before
+their deadline (`delay <= 0` is picked up immediately); there is no cancel handle.
+
+Each entry's payload is a `DeferredAction`: `DeferredScenario program` (routed through the
+worker pool) or `DeferredCast (SomeServiceCast request)` (routed directly to the service,
+bypassing the pool; the result is discarded — casts are fire-and-forget by definition).
 
 `runTimerService` must run in a dedicated thread — it blocks forever. Its arm/wait/drain
 cycle:
@@ -154,18 +162,30 @@ cycle:
 2. **Wait** — compute the delay to that deadline and block on `registerDelay`. There are
    no time reads inside STM — deadlines are absolute `UTCTime` stamps taken at registration.
 3. **Drain** — when the timer fires, one STM transaction pops the expired prefix (drain
-   criterion: `deadline <= armed deadline`) and enqueues its programs into the shared
-   `ScheduledActions` queue. Pop+enqueue is atomic, so actions are neither lost nor
-   duplicated.
-4. **Re-arm** — if the wait is interrupted early, the head is rechecked: an inserted entry
+   criterion: `deadline <= armed deadline`), enqueues its programs into the shared
+   `ScheduledActions` queue, and collects its casts. Pop+enqueue is atomic, so actions are
+   neither lost nor duplicated.
+4. **Deliver** — right after the drain commits, collected casts are delivered inline via
+   `castSomeService`: with TH-generated instances this is a single non-blocking mailbox
+   write (`castService`), so the timer loop is immediately free for the next deadline and
+   the loop cannot be stalled by a slow service handler.
+5. **Re-arm** — if the wait is interrupted early, the head is rechecked: an inserted entry
    with an earlier deadline re-arms the timer (the comparison is by `seq`, so equal
    deadlines never falsely re-arm); otherwise the loop retries until the armed deadline
    elapses.
 
 Drained programs are executed by the ordinary async worker pool, not by the timer thread.
-On shutdown the service thread is simply cancelled — unfired actions are dropped silently.
+On shutdown the service thread is simply cancelled — unfired actions are dropped silently
+(in-flight casts sit in their service mailbox and are handled or dropped by that worker's
+own lifecycle).
 
-Both threads must be started:
+One caveat: delivery goes through the service's `IsInServiceLib` instance. TH-generated
+instances override `castFromServiceLib` with the non-blocking `castService`, but a
+hand-written instance relying on the blocking default (`void . callFromServiceLib`) blocks
+the timer loop until the handler replies — always override with `castService` for deferred
+casts.
+
+Both threads must be started (plus the target service workers for deferred casts):
 
 ```haskell
 asyncThread <- async $ runRIO app $
@@ -173,11 +193,14 @@ asyncThread <- async $ runRIO app $
 timerThread <- async $ runRIO app runTimerService
 ```
 
-The timer service only moves due programs into the queue — without the pool nothing
-executes; forgot to start the timer service → deferred actions never fire.
+The timer service only moves due programs into the queue and delivers due casts to their
+services — without the pool nothing of the scenario kind executes; forgot to start the
+timer service → deferred actions and casts never fire; forgot to start a service worker →
+its deferred casts silently accumulate in the mailbox.
 
 ## Review Checklist
 
 - Are worker threads cancelled before `destroyAllResources` is called on the pools?
 - Does the worker-pool size go through `runAsyncWorkerPool` (so the 0 / >1024 clamps apply)?
-- Are the async worker pool AND the timer service both running (pool + timer service: without `runTimerService`, deferred `runAsyncAfter` actions never fire)?
+- Are the async worker pool AND the timer service both running (pool + timer service: without `runTimerService`, deferred `runAsyncAfter` actions and `castServiceAfter` casts never fire)?
+- Do the services receiving deferred casts have workers running (`runAllWorkers`), and do their `IsInServiceLib` instances override `castFromServiceLib` with `castService` (the blocking default stalls the timer loop)?
