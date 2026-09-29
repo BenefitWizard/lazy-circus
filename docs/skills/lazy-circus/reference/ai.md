@@ -88,6 +88,7 @@ data AgentRequest a = AgentRequest
     { agentPrompt :: [POML]         -- user-facing prompt fragments
     , agentSystemPrompt :: [POML]   -- system-level instruction fragments
     , agentMaxIterations :: Natural -- maximum ReAct iterations
+    , agentForcedFinalJson :: Bool  -- force the last round into JSON object mode (default True)
     , thinkingEnabled :: Bool       -- enable DeepSeek thinking mode
     , agentParams :: AIParams       -- OpenAI parameters overlay; mempty keeps defaults
     , agentToolEnrichment :: ToolEnrichment -- programmatic fields merged into tool arguments; mempty leaves model arguments untouched
@@ -96,7 +97,10 @@ data AgentRequest a = AgentRequest
 
 with its smart constructor
 `mkAgentRequest :: [POML] -> [POML] -> Natural -> AgentRequest a` (prompt,
-system prompt, iteration budget). `agentToolEnrichment` defaults to `mempty`;
+system prompt, iteration budget). `agentForcedFinalJson` defaults to `True`
+(ask-level JSON guarantee on the last round — see below); set it to `False`
+via record update when a structured final answer is not needed and the last
+round should keep tools available. `agentToolEnrichment` defaults to `mempty`;
 add enrichment with `withToolEnrichment` (see [Tool Enrichment](#tool-enrichment)).
 
 ## Request Parameters (`AIParams`)
@@ -181,6 +185,17 @@ Production AI behavior:
 - `solveWithAgent` runs a ReAct loop: it sends the transcript, executes any tool calls via the
   registered `ToolCallExec`, appends results, and repeats until the model returns a final answer
   or `agentMaxIterations` is exhausted
+- the LAST allowed agent round is a forced final answer when `agentForcedFinalJson` is
+  `True` (the `mkAgentRequest` default): the request carries no tools and pins
+  `response_format` to JSON object mode (the same mechanism `ask` uses; with `tools` absent
+  DeepSeek treats `tool_choice` as `none`, so the model must answer instead of calling tools),
+  and a final-answer user instruction is appended — DeepSeek requires instructing the model to
+  produce JSON in a system/user message (otherwise it may stream whitespace until the token
+  limit), and the instruction satisfies this regardless of the caller's system prompt.
+  Decoding that object into `b` can still fail (truncation at `finish_reason=length`, empty
+  content — both documented DeepSeek JSON-mode caveats), yielding `Nothing`.
+  Set `agentForcedFinalJson = False` to skip this extra round shaping: tools stay available
+  on every round and no instruction turn is injected
 - merges the request's `agentToolEnrichment` into model-supplied tool arguments before executing
   tool calls; programmatic fields override model-supplied ones (see [Tool Enrichment](#tool-enrichment))
 - logs decode failures and agent tool calls/results as sensitive log messages with the current

@@ -288,21 +288,23 @@ data AgentRequest a = AgentRequest
     { agentPrompt        :: [POML]    -- ^ user-facing prompt fragments
     , agentSystemPrompt  :: [POML]    -- ^ system-level instruction fragments
     , agentMaxIterations :: Natural   -- ^ maximum ReAct iterations before giving up (must be >= 0, guaranteed by 'Natural')
+    , agentForcedFinalJson :: Bool -- ^ force the last allowed round into JSON object mode (tools dropped, final-answer instruction injected) — the 'ask'-level JSON guarantee; 'False' keeps tools on every round
     , thinkingEnabled :: Bool  -- ^ enable DeepSeek thinking mode
     , agentParams :: AIParams -- ^ OpenAI parameters overlay; 'mempty' keeps defaults
     , agentToolEnrichment :: ToolEnrichment -- ^ programmatic fields injected into tool arguments; 'mempty' leaves model arguments untouched
     }
 
 -- | Smart constructor for 'AgentRequest' with default behaviour.
--- POST-CONTRACT: @thinkingEnabled = False@, @agentParams = mempty@ and
---   @agentToolEnrichment = mempty@; override via record update or
---   'withToolEnrichment'.
+-- POST-CONTRACT: @agentForcedFinalJson = True@, @thinkingEnabled = False@,
+--   @agentParams = mempty@ and @agentToolEnrichment = mempty@; override via
+--   record update or 'withToolEnrichment'.
 mkAgentRequest :: [POML] -> [POML] -> Natural -> AgentRequest a
 mkAgentRequest agentPrompt agentSystemPrompt agentMaxIterations =
     AgentRequest
         { agentPrompt
         , agentSystemPrompt
         , agentMaxIterations
+        , agentForcedFinalJson = True
         , thinkingEnabled = False
         , agentParams = mempty
         , agentToolEnrichment = mempty
@@ -474,11 +476,23 @@ ensureObjectType (Object m)
     | otherwise = Object $ KM.insert "type" "object" m
 ensureObjectType v = v
 
+-- | User-turn instruction injected on the forced final agent round.
+-- POST-CONTRACT: The text contains the word \"JSON\" — OpenAI-compatible APIs
+--   reject @response_format: json_object@ requests whose messages never
+--   mention JSON.
+finalAnswerInstruction :: Text
+finalAnswerInstruction =
+    "The tool-use budget is exhausted. Give your final answer now as a single \
+    \JSON object. Do not attempt to call any tools."
+
 -- | Run a multi-turn agent loop with tool use.
 -- The loop sends the conversation history to the model, processes any
 -- tool calls in the response by executing them via 'ToolCallExec', appends
 -- the results, and repeats until the model returns a final answer or the
--- iteration budget is exhausted.
+-- iteration budget is exhausted. When 'agentForcedFinalJson' is 'True' (the
+-- 'mkAgentRequest' default), the last allowed round is a forced final answer:
+-- the request carries no tools and pins @response_format@ to JSON object mode,
+-- giving the same JSON guarantee as 'askAI'.
 --
 -- PRE-CONTRACT: The environment provides AI methods, tool descriptions, and
 --   tool execution through the respective lenses. 'agentMaxIterations' uses
@@ -502,7 +516,7 @@ solveWithAgentLoop req = fst <$> solveWithAgentLoopContinuing req emptyConversat
 
 {- | Run a multi-turn agent loop with tool use, threading and returning a 'Conversation'.
 PRE-CONTRACT: The input 'Conversation' does NOT begin with a 'Chat.System' message. The single leading System message injected on entry is stripped from the returned 'Conversation' via 'V.drop 1'.
-POST-CONTRACT: Returns the decoded final response and a 'Conversation' containing all durable turns (replayed + new). When the loop is exhausted or the API returns no choice, the returned 'Conversation' still reflects the turns exchanged so far (minus the leading System). Tool arguments returned by the model are enriched with the request's 'agentToolEnrichment' before execution — programmatic fields override model-supplied ones — and the tool-call log records the enriched arguments.
+POST-CONTRACT: Returns the decoded final response and a 'Conversation' containing all durable turns (replayed + new). When 'agentForcedFinalJson' is 'True' (the 'mkAgentRequest' default) and the loop reaches its last allowed round, that round is a forced final answer: tools are dropped, @response_format@ is pinned to JSON object mode, and a 'finalAnswerInstruction' user turn is appended before the call (both stay in the returned 'Conversation'). When the loop is exhausted or the API returns no choice, the returned 'Conversation' still reflects the turns exchanged so far (minus the leading System). Tool arguments returned by the model are enriched with the request's 'agentToolEnrichment' before execution — programmatic fields override model-supplied ones — and the tool-call log records the enriched arguments.
 -}
 solveWithAgentLoopContinuing ::
     ( HasAIMethods env
@@ -515,7 +529,7 @@ solveWithAgentLoopContinuing ::
     , MonadUnliftIO m
     , FromJSON b
     ) => AgentRequest b -> Conversation -> m (Maybe b, Conversation)
-solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations, thinkingEnabled, agentParams, agentToolEnrichment} conv = do
+solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentMaxIterations, agentForcedFinalJson, thinkingEnabled, agentParams, agentToolEnrichment} conv = do
     (result, finalHistory) <- go agentMaxIterations initialMessages
     pure (result, conversationFromTurns (V.drop 1 finalHistory))
   where
@@ -537,18 +551,29 @@ solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentM
         toolDescs <- view toolDescriptionsL
         ToolCallExec exec <- view toolCallExecL
 
-        let tools = if null toolDescs then Nothing
+        -- The last allowed round is the forced final answer (when enabled by
+        -- 'agentForcedFinalJson', the default): tools are dropped and response_format
+        -- is pinned to JSON_Object exactly like 'ask', so the model cannot emit another
+        -- tool_calls round and must answer with a JSON object.
+        -- Intermediate rounds leave response_format unset because the model must be
+        -- free to return tool_calls while the budget lasts.
+        let forcedFinal = agentForcedFinalJson && remaining == 1
+            forcedMsg = Chat.User
+                { content = [Chat.Text finalAnswerInstruction]
+                , name = Nothing
+                , extra = Nothing
+                }
+            sentHistory = if forcedFinal then history <> V.singleton forcedMsg else history
+            tools = if forcedFinal || null toolDescs then Nothing
                     else Just $ V.fromList $ map toOpenAITool toolDescs
             req = applyParams agentParams $ Chat._CreateChatCompletion
                 { Chat.model = defaultModel
-                , Chat.messages = history
+                , Chat.messages = sentHistory
                 , Chat.tools = tools
-                , Chat.tool_choice = guard (not (null toolDescs)) >> Just Tool.ToolChoiceAuto
+                , Chat.tool_choice = guard (not forcedFinal && not (null toolDescs)) >> Just Tool.ToolChoiceAuto
+                , Chat.response_format = guard forcedFinal >> Just Chat.JSON_Object
                 , Chat.extra = thinkingExtra thinkingEnabled
                 }
-                -- NOTE: response_format is NOT set for agent-loop requests because the model
-                -- must be free to return tool_calls during intermediate rounds. The system prompt
-                -- must instruct the model to return JSON when it has a final answer.
 
         Chat.ChatCompletionObject{choices} <- liftIO $ createChatCompletion req
 
@@ -593,14 +618,14 @@ solveWithAgentLoopContinuing AgentRequest{agentPrompt, agentSystemPrompt, agentM
                                 toolMsgs = map (\(tid, result) ->
                                     Chat.Tool { content = [Chat.Text result], tool_call_id = tid, extra = Nothing }
                                     ) toolResults
-                            go (remaining - 1) (history <> V.fromList (assistantMsg : toolMsgs))
+                            go (remaining - 1) (sentHistory <> V.fromList (assistantMsg : toolMsgs))
                     _ -> do
                         logReasoningContent message
                         r <- decodeContent (Chat.messageToContent message)
                         -- Append the final assistant turn so the transcript stays
                         -- complete for continuity: the model's reply is itself a
                         -- durable turn that the next operation must replay.
-                        pure (r, history <> V.singleton (toDurableMessage message))
+                        pure (r, sentHistory <> V.singleton (toDurableMessage message))
 
     decodeContent content
         | content == "" = pure Nothing

@@ -11,8 +11,9 @@ module AIAgentSpec (spec) where
 
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson.KeyMap qualified as KM
+import Data.Text qualified as T
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
-import LazyCircus.AI (AIParams (..), AIRequest, AgentRequest (agentParams, thinkingEnabled), HasAIMethods (..), askAIContinuing, conversationFromTurns, emptyConversation, enrichTool, mkAgentRequest, mkAIRequest, solveWithAgentLoop, solveWithAgentLoopContinuing, unConversation, withMaxCompletionTokens, withModel, withReasoningEffort, withStop, withTemperature, withToolEnrichment)
+import LazyCircus.AI (AIParams (..), AIRequest, AgentRequest (agentForcedFinalJson, agentParams, thinkingEnabled), HasAIMethods (..), askAIContinuing, conversationFromTurns, emptyConversation, enrichTool, mkAgentRequest, mkAIRequest, solveWithAgentLoop, solveWithAgentLoopContinuing, unConversation, withMaxCompletionTokens, withModel, withReasoningEffort, withStop, withTemperature, withToolEnrichment)
 import LazyCircus.App.Default (DefaultApp)
 import LazyCircus.App.Service (HasToolCallExec(..), ToolCallExec(..), ToolDescription(..))
 import SimpleService (SecureCtx (..))
@@ -384,6 +385,133 @@ spec = do
                     [_, _, assistantMsg, _] ->
                         Chat.messageExtra assistantMsg `shouldBe` Just extraObj
                     _ -> expectationFailure $ "Expected 4 messages in second request, got " ++ show (V.length (Chat.messages secondReq))
+
+            it "forces a JSON-only final round when the budget runs out" $ \app -> do
+                let toolCall1 = TC.ToolCall_Function
+                        { TC.id = "call_1"
+                        , TC.function = TC.Function
+                            { TC.name = "get_status"
+                            , TC.arguments = "{}"
+                            }
+                        }
+                    firstResponse = mockCompletion "Checking." (Just (V.fromList [toolCall1])) "tool_calls"
+                    secondResponse = mockCompletion "{\"status\": \"ok\"}" Nothing "stop"
+                responsesRef <- newIORef [firstResponse, secondResponse]
+                requestsRef <- newIORef ([] :: [Chat.CreateChatCompletion])
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \sentReq -> do
+                        atomicModifyIORef' requestsRef (\rs -> (rs ++ [sentReq], ()))
+                        atomicModifyIORef' responsesRef $ \case
+                            [] -> error "No more mock responses"
+                            (r : rest) -> (rest, r)
+                    }
+                    mockExec = ToolCallExec $ \_ _ -> pure $ object ["status" .= ("ok" :: Text)]
+                    req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 2
+                result <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoop req)
+                result `shouldBe` Just (object ["status" .= ("ok" :: Text)])
+                sentReqs <- readIORef requestsRef
+                length sentReqs `shouldBe` 2
+                let [intermediate, forced] = sentReqs
+                -- Intermediate round: tools offered, response_format left unset.
+                case intermediate of
+                    Chat.CreateChatCompletion
+                        { Chat.tools = Just offeredTools
+                        , Chat.response_format = Nothing
+                        } -> V.length offeredTools `shouldSatisfy` (> 0)
+                    _ -> expectationFailure "intermediate round should offer tools without response_format"
+                -- Forced round carries the ask-level JSON guarantee: no tools,
+                -- no tool_choice, JSON object mode.
+                case forced of
+                    Chat.CreateChatCompletion
+                        { Chat.tools = Nothing
+                        , Chat.tool_choice = Nothing
+                        , Chat.response_format = Just Chat.JSON_Object
+                        } -> pure ()
+                    _ -> expectationFailure "forced round must drop tools and pin response_format to JSON_Object"
+                -- The forced round ends with a final-answer user instruction
+                -- mentioning JSON (required by OpenAI-compatible json_object mode).
+                case reverse (V.toList (Chat.messages forced)) of
+                    (Chat.User{content = cs} : _) -> case V.toList cs of
+                        [Chat.Text t] -> T.isInfixOf "JSON" t `shouldBe` True
+                        _ -> expectationFailure "forcing turn should carry single text content"
+                    _ -> expectationFailure "forcing instruction should be the last message"
+
+            it "sends a single forced JSON round when maxIterations = 1" $ \app -> do
+                requestsRef <- newIORef ([] :: [Chat.CreateChatCompletion])
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \sentReq -> do
+                        atomicModifyIORef' requestsRef (\rs -> (rs ++ [sentReq], ()))
+                        pure $ mockCompletion "{\"ok\": true}" Nothing "stop"
+                    }
+                    req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 1
+                result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
+                result `shouldBe` Just (object ["ok" .= True])
+                sentReqs <- readIORef requestsRef
+                case sentReqs of
+                    [Chat.CreateChatCompletion
+                        { Chat.tools = Nothing
+                        , Chat.response_format = Just Chat.JSON_Object
+                        }] -> pure ()
+                    _ -> expectationFailure $ "expected one JSON-forced request, got " <> show (length sentReqs)
+
+            it "keeps the forcing turn and final answer in the returned Conversation" $ \app -> do
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \_ ->
+                        pure $ mockCompletion "{\"v\": 1}" Nothing "stop"
+                    }
+                    req :: AgentRequest Value = mkAgentRequest ["test"] ["test"] 1
+                (r, conv) <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoopContinuing req emptyConversation)
+                r `shouldBe` Just (object ["v" .= (1 :: Int)])
+                -- [original user turn, forcing turn, final assistant turn]
+                V.length (unConversation conv) `shouldBe` 3
+
+            it "keeps tools on every round and injects no instruction when agentForcedFinalJson = False" $ \app -> do
+                callCountRef <- newIORef (0 :: Int)
+                requestsRef <- newIORef ([] :: [Chat.CreateChatCompletion])
+                let toolCall = TC.ToolCall_Function
+                        { TC.id = "call_1"
+                        , TC.function = TC.Function
+                            { TC.name = "loop_tool"
+                            , TC.arguments = "{}"
+                            }
+                        }
+                    mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \sentReq -> do
+                            atomicModifyIORef' requestsRef (\rs -> (rs ++ [sentReq], ()))
+                            atomicModifyIORef' callCountRef (\c -> (c + 1, ()))
+                            pure $ mockCompletion "keep going" (Just (V.fromList [toolCall])) "tool_calls"
+                        }
+                    mockExec = ToolCallExec $ \_ _ -> pure $ object ["result" .= ("ok" :: Text)]
+                    req :: AgentRequest Value =
+                        (mkAgentRequest ["test"] ["test"] 2){ agentForcedFinalJson = False }
+                result <- runRIO (app & aiMethodsL .~ mockMethods & toolCallExecL .~ mockExec) (solveWithAgentLoop req)
+                result `shouldBe` Nothing
+                readIORef callCountRef >>= (`shouldBe` 2)
+                sentReqs <- readIORef requestsRef
+                length sentReqs `shouldBe` 2
+                -- Both rounds carry tools and no response_format pin.
+                forM_ sentReqs $ \case
+                    Chat.CreateChatCompletion
+                        { Chat.tools = Just _
+                        , Chat.response_format = Nothing
+                        } -> pure ()
+                    _ -> expectationFailure "every round should offer tools without response_format"
+                -- The second request is [System, User, Assistant(tool_calls), Tool]
+                -- with no injected final-answer instruction.
+                case sentReqs of
+                    [_, second] -> V.length (Chat.messages second) `shouldBe` 4
+                    _ -> expectationFailure "expected exactly two requests"
+
+            it "answers without a forcing round when agentForcedFinalJson = False and the model stops early" $ \app -> do
+                requestsRef <- newIORef ([] :: [Chat.CreateChatCompletion])
+                let mockMethods = (app ^. aiMethodsL) { V1.createChatCompletion = \sentReq -> do
+                        atomicModifyIORef' requestsRef (\rs -> (rs ++ [sentReq], ()))
+                        pure $ mockCompletion "{\"status\": \"ok\"}" Nothing "stop"
+                    }
+                    req :: AgentRequest Value =
+                        (mkAgentRequest ["test"] ["test"] 5){ agentForcedFinalJson = False }
+                result <- runRIO (app & aiMethodsL .~ mockMethods) (solveWithAgentLoop req)
+                result `shouldBe` Just (object ["status" .= ("ok" :: Text)])
+                sentReqs <- readIORef requestsRef
+                case sentReqs of
+                    [Chat.CreateChatCompletion{Chat.tools = Just _, Chat.response_format = Nothing}] -> pure ()
+                    _ -> expectationFailure $ "expected one tools-bearing request without response_format, got " <> show (length sentReqs)
 
         describe "solveWithAgentLoop (tool enrichment)" $ do
             it "merges programmatic fields into tool args before exec" $ \app -> do
