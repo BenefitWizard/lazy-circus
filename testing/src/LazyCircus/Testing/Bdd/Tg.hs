@@ -9,7 +9,8 @@ dialog monad is 'TelegramTestScript' (the @tgTest@ DSL — a parameter-free
 reader over the test runtime with an IO escape), and the threaded state is
 'ScenarioState' (the observation journal's consumed set plus the derived
 dialog view). @Then@ constructors build 'thenDef' entries, @When@
-constructors ('userVotesFor', 'userVotesIn') build 'whenDef' entries, so
+constructors ('userVotesFor', 'userVotesIn', 'memberVotesFor',
+'memberVotesIn') build 'whenDef' entries, so
 document steps — including @And@\/@But@ continuations, which inherit the
 previous step's keyword during parsing — select them. The expected values are
 read from the step text's captured parameters themselves (via
@@ -22,8 +23,11 @@ except 'botReplyContains' performs ONE 'awaitObservation' whose predicate
 matches ONLY the core @ObsTg*@ constructors — app-specific 'ObsApp' entries
 are skipped over and never consumed. A matched 'ObsTgMessage' folds into
 'ssDialog' ('dsLastReply' from the text, 'dsLastKeyboard' from its markup),
-and a matched 'ObsTgPoll' folds its 'PollDigest' into 'dsLastPoll' (what
-'userVotesFor'\/'userVotesIn' vote against). 'botReplyContains' is the
+and a matched 'ObsTgPoll' folds its 'PollDigest' into 'dsLastPoll' (what the vote
+steps 'userVotesFor'\/'userVotesIn'\/'memberVotesFor'\/'memberVotesIn' vote
+against — the @user@ pair always as the default test user, the @member@ pair
+as the cast member named in the step's @«@login@»@ capture, resolved through
+'LazyCircus.Testing.Updates.userIdForLogin'). 'botReplyContains' is the
 And-continuation: it re-inspects the last consumed entry via
 'peekLastConsumed' — NO wait and NO consumption — asserting on @dsLastReply@
 without moving the cursor.
@@ -44,6 +48,8 @@ module LazyCircus.Testing.Bdd.Tg
     , botSendsDocument
     , userVotesFor
     , userVotesIn
+    , memberVotesFor
+    , memberVotesIn
     , tgTestBootstrap
     ) where
 
@@ -69,11 +75,12 @@ import LazyCircus.Testing.TgTest
     ( TelegramTestScript
     , TgTestConfig (..)
     , guardWith
-    , sendPollAnswer
+    , sendPollAnswerByUser
     , tgeDescription
     , tgTestWithMocks
     )
-import Telegram.Bot.API (Update)
+import LazyCircus.Testing.Updates (defaultTestUserId, userIdForLogin)
+import Telegram.Bot.API (Update, UserId)
 import Test.Hspec (expectationFailure)
 
 -- | @the bot replies with "$text"@ — the bot's reply equals the step's quoted
@@ -147,8 +154,9 @@ botRepliesWithKeyboard =
 -- POST-CONTRACT: On success exactly one 'ObsTgPoll' with the expected
 -- question (and, when the table pinned the options, exactly those option
 -- texts in order) has been consumed and folded into 'ssDialog' as
--- 'dsLastPoll' — a subsequent 'userVotesFor'\/'userVotesIn' resolves against
--- it. When no unconsumed matching poll appears within 'defaultAwaitBudgetUs',
+-- 'dsLastPoll' — a subsequent vote step ('userVotesFor', 'userVotesIn',
+-- 'memberVotesFor', 'memberVotesIn') resolves against it. When no unconsumed
+-- matching poll appears within 'defaultAwaitBudgetUs',
 -- the step aborts with a timeout reason and nothing is consumed.
 botSendsPoll :: StepDef TelegramTestScript c (ScenarioState app) a
 botSendsPoll =
@@ -215,6 +223,76 @@ userVotesIn =
                 guardWith noPollYetReason False
                     >> pure (st, Nothing)
             (Just digest, Right (Just options)) -> voteIn digest options st
+
+-- | @the member "$login" votes for "$option" in the poll@ — a named cast
+-- member (NOT the default test user) votes for exactly the step's quoted
+-- capture in the last consumed poll. The multi-actor form of 'userVotesFor':
+-- the member vote arrives at the bot as its own @poll_answer@ update carrying
+-- the member's user id, so scenarios covering several participants are
+-- distinguishable bot-side.
+--
+-- PRE-CONTRACT: The login (verbatim, typically with its leading @@@) and the
+-- option text appear inside double quotes in the step text (the pattern's
+-- @"$login"@ and @"$option"@ spans) — the runner matched the step, so the
+-- captures are present. A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise. A table attached to this step is a misuse
+-- ('memberVotesIn' owns the table form) and aborts likewise.
+-- POST-CONTRACT: On success one chat-less @poll_answer@ update has been fed
+-- to the bot against the consumed poll's id ('pdPollId') from user id
+-- 'LazyCircus.Testing.Updates.userIdForLogin' of the captured login, carrying
+-- the single option index the capture resolves to in 'pdOptions'; the
+-- scenario state passes through unchanged. On an unknown option text the DSL
+-- aborts with a guard failure and nothing is fed.
+memberVotesFor :: StepDef TelegramTestScript c (ScenarioState app) a
+memberVotesFor =
+    whenDef "the member \"$login\" votes for \"$option\" in the poll" $ \params st ->
+        case (stepParamsTable params, dsLastPoll (ssDialog st)) of
+            (Just _, _) ->
+                guardWith "a table is attached to the member vote step; use 'the member \"$login\" votes in the poll' with the options table instead" False
+                    >> pure (st, Nothing)
+            (Nothing, Nothing) ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            (Nothing, Just digest) -> do
+                let login = fromMaybe "" (lookupParam "$login" params)
+                    option = fromMaybe "" (lookupParam "$option" params)
+                voteInAs (userIdForLogin login) digest [option] st
+
+-- | @the member "$login" votes in the poll@ — a named cast member (NOT the
+-- default test user) votes for the option texts of the @| ... |@ table
+-- attached to the step (one single-cell row per option), in the last consumed
+-- poll. The multi-actor, multi-vote form of 'userVotesIn' (a multi-answer
+-- poll votes with all the rows' indexes at once).
+--
+-- PRE-CONTRACT: The login (verbatim, typically with its leading @@@) appears
+-- inside double quotes in the step text (the pattern's @"$login"@ span), a
+-- table with one single-cell row per voted option is attached to the step,
+-- and a poll has been consumed by a previous step (e.g. 'botSendsPoll'), so
+-- 'dsLastPoll' holds its digest — the step aborts with an explanatory reason
+-- otherwise.
+-- POST-CONTRACT: On success one chat-less @poll_answer@ update has been fed
+-- to the bot against the consumed poll's id ('pdPollId') from user id
+-- 'LazyCircus.Testing.Updates.userIdForLogin' of the captured login, carrying
+-- the option indexes the table rows resolve to in 'pdOptions', in table
+-- order; the scenario state passes through unchanged. On an unknown option
+-- text the DSL aborts with a guard failure and nothing is fed.
+memberVotesIn :: StepDef TelegramTestScript c (ScenarioState app) a
+memberVotesIn =
+    whenDef "the member \"$login\" votes in the poll" $ \params st ->
+        case (dsLastPoll (ssDialog st), tableOptions (stepParamsTable params)) of
+            (_, Left problem) ->
+                guardWith problem False
+                    >> pure (st, Nothing)
+            (_, Right Nothing) ->
+                guardWith "attach the options table (one single-cell row per option) to 'the member \"$login\" votes in the poll'" False
+                    >> pure (st, Nothing)
+            (Nothing, Right (Just _)) ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            (Just digest, Right (Just options)) -> do
+                let login = fromMaybe "" (lookupParam "$login" params)
+                voteInAs (userIdForLogin login) digest options st
 
 -- | @the bot reacts to a message@ — the bot set a reaction (on any message).
 --
@@ -389,17 +467,23 @@ noPollYetReason :: Text
 noPollYetReason =
     "no poll has been consumed yet; a poll-consuming step (e.g. 'the bot sends a poll ...') must run first"
 
--- | Feeds one @poll_answer@ update for the consumed poll's digest: resolves
--- each voted option text to its index in the digest's options (guard failure
--- listing the poll's actual options on an unknown text) and sends the ids
--- from the default test user.
+-- | Feeds one @poll_answer@ update for the consumed poll's digest from the
+-- default test user: resolves each voted option text to its index in the
+-- digest's options (guard failure listing the poll's actual options on an
+-- unknown text) and sends the ids.
 voteIn :: PollDigest -> [Text] -> ScenarioState app -> TelegramTestScript (ScenarioState app, Maybe a)
-voteIn digest voted st = case mapM (optionIndex (pdOptions digest)) voted of
+voteIn = voteInAs defaultTestUserId
+
+-- | 'voteIn' from a specific user — the engine behind every vote step
+-- ('userVotesFor'\/'userVotesIn' pass 'defaultTestUserId', the member pair
+-- passes the login's resolved id).
+voteInAs :: UserId -> PollDigest -> [Text] -> ScenarioState app -> TelegramTestScript (ScenarioState app, Maybe a)
+voteInAs userId digest voted st = case mapM (optionIndex (pdOptions digest)) voted of
     Nothing ->
         guardWith (unknownOptions digest voted) False
             >> pure (st, Nothing)
     Just optionIds -> do
-        _ <- sendPollAnswer (pdPollId digest) optionIds
+        _ <- sendPollAnswerByUser userId (pdPollId digest) optionIds
         pure (st, Nothing)
 
 -- | 0-based index of a text's first occurrence in the option list ('Nothing'
@@ -411,6 +495,6 @@ optionIndex options option = lookup option (zip options [0 ..])
 -- poll's options.
 unknownOptions :: PollDigest -> [Text] -> Text
 unknownOptions digest voted =
-    "the user votes for an option the poll \"" <> pdQuestion digest
+    "a vote step votes for an option the poll \"" <> pdQuestion digest
         <> "\" does not offer; poll options: " <> tshow (pdOptions digest)
         <> ", voted for: " <> tshow voted

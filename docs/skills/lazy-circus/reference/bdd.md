@@ -32,7 +32,7 @@ library dependency of this subpackage only; the core stays hspec-free.
 | `LazyCircus.Testing.Bdd.Pattern` | the `Pattern` ADT (`Template` / `Literal`, `IsString`), `matchStep :: Pattern -> Text -> Maybe [(ParamName, ParamValue)]`; quoted spans `"..."` and `«...»` capture strictly quoted values; `StepParams` (captures + the step's argument table), `lookupParam`, `patternSource`, `duplicateParamNames`, `matchAll` (every matching name, input order) |
 | `LazyCircus.Testing.Bdd.Step` | `StepDef m c s a` (actions receive the matched captures plus the step's table, as one `StepParams`), `StepRegistry` with deterministic `matchingDefs` selection (`Literal` first, then `Template` in registration order), `runScenarioSteps`, structural `StepError` values |
 | `LazyCircus.Testing.Bdd.Journal` | `Observation app`, append-only `ObservationLog`, `awaitObservation`, `peekLastConsumed`, `ScenarioState` with the `dsLastPoll` digest |
-| `LazyCircus.Testing.Bdd.Tg` | ready-made Telegram `When`/`Then` dictionary over the journal (expected values read from captures and step tables via `lookupParam` / `stepParamsTable`; includes the poll steps) and the canonical `tgTestBootstrap` |
+| `LazyCircus.Testing.Bdd.Tg` | ready-made Telegram `When`/`Then` dictionary over the journal (expected values read from captures and step tables via `lookupParam` / `stepParamsTable`; includes the poll and vote steps — the default-user pair and the per-member pair) and the canonical `tgTestBootstrap` |
 | `LazyCircus.Testing.Bdd.Given` | `AppContext app` and Given-phase staging combinators |
 | `LazyCircus.Testing.Bdd.Runner` | `gherkinSpec`: hspec tree, coverage meta-test, ambiguity probe, `@blocked` |
 
@@ -190,7 +190,9 @@ Then the bot sends a poll "Кого позвать в шапито?"
     | Акробаты    |    # one single-cell row per option, in order
     | Дрессировщик |
 When the user votes for "Акробаты" in the poll      # single vote via the quoted capture
-Then the bot replies with "🗳 голос учтён: [1]"
+Then the bot replies with "🗳 голос учтён: [1] от 1001"
+When the member "@alice" votes for "Акробаты" in the poll   # a named cast member,
+Then the bot replies with "🗳 голос учтён: [1] от 2000000123"   # NOT the default user
 ```
 
 - `botSendsPoll` (`Then`) consumes exactly one `ObsTgPoll` with the expected question;
@@ -202,13 +204,21 @@ Then the bot replies with "🗳 голос учтён: [1]"
   a misuse (use `userVotesIn`).
 - `userVotesIn` (`When`, `the user votes in the poll`) votes the TABLE rows — the
   multi-answer form (all rows' indexes in one `poll_answer`).
-- Both vote steps require a poll to have been CONSUMED first (`botSendsPoll` or any
+- `memberVotesFor` (`When`, `the member "$login" votes for "$option" in the poll`) and
+  `memberVotesIn` (`When`, `the member "$login" votes in the poll` + options table) are
+  the multi-actor siblings: the vote update arrives from
+  `userIdForLogin login` (`LazyCircus.Testing.Updates` — a pure FNV-1a derivation into an
+  id band disjoint from `defaultTestUserId`), so scenarios with several participants are
+  distinguishable bot-side via `poll_answer.user`. The function is exported so apps can
+  seed users whose ids the member steps produce for the same logins.
+- All four vote steps require a poll to have been CONSUMED first (`botSendsPoll` or any
   await over an `ObsTgPoll`), since they vote against `dsLastPoll`; an option text not
   among the poll's options fails the step with the actual option list.
 
 A working end-to-end example (bot sends a non-anonymous poll on `/poll`, registers the
-poll id in a poll→chat registry, acknowledges votes with the voted indexes) lives in
-`testing/test/Bdd/PollSpec.hs` — mirror it for your own poll flows.
+poll id in a poll→chat registry, acknowledges votes with the voted indexes AND the
+voter's user id — the voter-aware ack is what makes the member-vote scenarios
+meaningful) lives in `testing/test/Bdd/PollSpec.hs` — mirror it for your own poll flows.
 
 ## The Runner (`gherkinSpec`)
 

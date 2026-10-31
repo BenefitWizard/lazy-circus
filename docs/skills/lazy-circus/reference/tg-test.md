@@ -183,10 +183,10 @@ failing `guard` or `waitFor*` short-circuits to `Left`.
 **Sending fake user input.** The message-sending ops (`sendMessage`, `sendMessageIn`,
 `sendMessageByUser`, `sendFile`, `sendFileByUser`) return `(UpdateId, MessageId)` — the
 `MessageId` is the sent user message's id, suitable for passing to `waitForReaction` or
-`sendKeypress`. The `sendKeypress*` ops return just `UpdateId`. The Stars payment ops
-split the same way: `sendSuccessfulPaymentByUser` (a chat message) returns
-`(UpdateId, MessageId)`, while `sendPreCheckoutQueryByUser` is chat-less (like
-`sendKeypress*`) and returns just `UpdateId`.
+`sendKeypress`. The `sendKeypress*` and `sendPollAnswer*` ops return just `UpdateId`. The
+Stars payment ops split the same way: `sendSuccessfulPaymentByUser` (a chat message)
+returns `(UpdateId, MessageId)`, while `sendPreCheckoutQueryByUser` is chat-less (like
+`sendKeypress*`/`sendPollAnswer*`) and returns just `UpdateId`.
 
 | Operation | Input produced |
 |---|---|
@@ -196,6 +196,7 @@ split the same way: `sendSuccessfulPaymentByUser` (a chat message) returns
 | `sendFile fileId` / `sendFileByUser ...` | a document upload (metadata-free) |
 | `sendDocumentByUser userId chatId doc` / `sendDocumentAs fileId name mime size` | a document upload carrying the client-declared `file_name` / `mime_type` / `file_size` (for metadata pre-check tests) |
 | `sendKeypress msgId cbData` / `sendKeypressByUser ...` | a `callback_query` on an inline keyboard |
+| `sendPollAnswer pollId optionIds` / `sendPollAnswerByUser userId pollId optionIds` | a chat-less `poll_answer` (the voter rides in the update's `user`) — the update Telegram delivers when a poll participant picks option(s); `optionIds` are 0-based indexes |
 | `sendPreCheckoutQueryByUser userId queryId payload amount` | a chat-less `pre_checkout_query` (currency fixed to `XTR`) — the Telegram Stars confirmation step |
 | `sendSuccessfulPaymentByUser userId chatId chargeId payload amount` | a `successful_payment` service message in a specific chat (currency fixed to `XTR`) — the after-payment notification |
 
@@ -242,6 +243,9 @@ sendDocumentAs     :: FileId -> Maybe Text -> Maybe Text -> Maybe Integer
                    -> TelegramTestScript (UpdateId, MessageId)          -- fileId, name, mime, size
 sendKeypress       :: MessageId -> Text -> TelegramTestScript UpdateId
 sendKeypressByUser :: UserId -> ChatId -> MessageId -> Text -> TelegramTestScript UpdateId
+sendPollAnswer     :: PollId -> [Int] -> TelegramTestScript UpdateId
+sendPollAnswerByUser :: UserId -> PollId -> [Int] -> TelegramTestScript UpdateId
+                     -- chat-less poll_answer; optionIds are 0-based
 sendPreCheckoutQueryByUser  :: UserId -> Text -> Text -> Integer -> TelegramTestScript UpdateId
                             -- userId, queryId, payload, amount (Stars; chat-less)
 sendSuccessfulPaymentByUser :: UserId -> ChatId -> Text -> Text -> Integer

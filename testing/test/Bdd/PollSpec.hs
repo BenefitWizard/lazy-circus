@@ -14,8 +14,12 @@ dictionary — 'LazyCircus.Testing.Bdd.Tg.botSendsPoll' (with the poll options
 attached as a @| ... |@ step table) for the @Then@ phase and
 'LazyCircus.Testing.Bdd.Tg.userVotesFor' \/
 'LazyCircus.Testing.Bdd.Tg.userVotesIn' (single option via the quoted capture,
-multi-vote via the options table) for the @When@ phase; the @When@ "the user
-sends" step feeds the user's words through the canonical @tgTest@ driver.
+multi-vote via the options table) plus their multi-actor siblings
+'LazyCircus.Testing.Bdd.Tg.memberVotesFor' \/
+'LazyCircus.Testing.Bdd.Tg.memberVotesIn' (voting as the named cast member,
+resolved through 'LazyCircus.Testing.Updates.userIdForLogin') for the @When@
+phase; the @When@ "the user sends" step feeds the user's words through the
+canonical @tgTest@ driver.
 
 The bot's buildAction mirrors the demo's poll flow
 ('BotHandler.dispatch'): a @\/poll@ command sends a NON-anonymous poll
@@ -23,7 +27,10 @@ The bot's buildAction mirrors the demo's poll flow
 assigned poll id in a spec-local poll registry (the 'SpecPollRegistry' shape
 of the demo library's private @PollRegistry@); the chat-less @poll_answer@
 update is dispatched BEFORE the chat-id gate — the registry recovers the
-chat — and is answered with the voted option ids.
+chat — and is answered with the voted option ids AND the voter's user id
+(read from the update's @user@). The voter-aware ack is what makes the
+member-vote scenarios meaningful: without it the round trip would pass even
+if every vote arrived as the default test user.
 
 This spec is also the blessing ground for the extended 'ObsTgPoll'
 observation shape (id, poll id and options in the shared journal): the full
@@ -31,9 +38,12 @@ shape survives three different scenarios below, satisfying the journal's
 blessing rule.
 
 Coverage: (1) a poll send observed with question AND options from the step
-table; (2) a single vote resolved through the consumed poll's 'PollDigest'
-and acknowledged with the voted option index; (3) a table-driven multi-vote
-acknowledged with both indexes.
+table; (2) a single default-user vote resolved through the consumed poll's
+'PollDigest' and acknowledged with the voted option index and the voter's
+id; (3) a table-driven default-user multi-vote acknowledged with both
+indexes and the voter's id; (4) two cast members voting as themselves
+(single-option and table forms of the member vote steps) acknowledged with
+THEIR user ids — proving per-voter identity survives the round trip.
 -}
 module Bdd.PollSpec (spec) where
 
@@ -56,6 +66,8 @@ import LazyCircus.Testing.Bdd.Step (givenDef, mkRegistry, whenDef)
 import LazyCircus.Testing.Bdd.Tg
     ( botRepliesWithMessage
     , botSendsPoll
+    , memberVotesFor
+    , memberVotesIn
     , tgTestBootstrap
     , userVotesFor
     , userVotesIn
@@ -71,6 +83,7 @@ import LazyCircus.Testing.TgTest
     , defaultTgTestConfig
     , sendMessage
     )
+import LazyCircus.Testing.Updates (defaultTestUserId, userIdForLogin)
 import RIO
 import RIO.HashMap qualified as HM
 import RIO.Text qualified as T
@@ -80,13 +93,16 @@ import Telegram.Bot.API
     , PollAnswer
     , SomeChatId (..)
     , Update
+    , UserId (..)
     , defSendMessage
     , defSendPoll
     , messageText
     , pollAnswerOptionIds
     , pollAnswerPollId
+    , pollAnswerUser
     , sendPollIsAnonymous
     , updateMessage
+    , userId
     )
 import Telegram.Bot.API.Types (PollId (..))
 import Telegram.Bot.API.GettingUpdates (updateChatId, updatePollAnswer)
@@ -132,17 +148,28 @@ pollOptionTexts = ["Жонглёры", "Акробаты", "Дрессирова
 pollOptionRequests :: [InputPollOption]
 pollOptionRequests = map (\txt -> InputPollOption txt Nothing Nothing) pollOptionTexts
 
--- | Prefix of the bot's vote acknowledgement; the voted option indexes
--- follow in @tshow@ form (e.g. @\"🗳 голос учтён: [1]\"@).
+-- | Prefix of the bot's vote acknowledgement; the voted option indexes and
+-- the voter's numeric id follow in @tshow@ form
+-- (e.g. @\"🗳 голос учтён: [1] от 2000000123\"@).
 ackPrefix :: Text
 ackPrefix = "🗳 голос учтён: "
 
--- | The acknowledgement text for the given voted option texts: their indexes
--- resolved against 'pollOptionTexts' — the same projection the mocked
--- performer journals, so the feature's @Then@ texts stay in sync with the
--- bot's reply by construction.
-voteAckText :: [Text] -> Text
-voteAckText voted = ackPrefix <> tshow (map optionIndexOf voted)
+-- | Renders the vote acknowledgement for the given voter id and voted option
+-- indexes — the single projection the bot's reply and the feature's expected
+-- texts both go through, so they stay in sync by construction.
+voteAckBody :: UserId -> [Int] -> Text
+voteAckBody voterId optionIds =
+    ackPrefix <> tshow optionIds <> " от " <> tshow voterNumber
+  where
+    -- | The voter's numeric id (the 'UserId' newtype's 'Show' would render
+    -- the constructor).
+    UserId voterNumber = voterId
+
+-- | The expected acknowledgement text for the given voter and voted option
+-- texts: their indexes resolved against 'pollOptionTexts' fed through
+-- 'voteAckBody'.
+voteAckText :: UserId -> [Text] -> Text
+voteAckText voterId voted = voteAckBody voterId (map optionIndexOf voted)
   where
     -- | 0-based index of an option text in 'pollOptionTexts' (a total lookup:
     -- the feature only votes for options it declares).
@@ -155,9 +182,19 @@ voteAckText voted = ackPrefix <> tshow (map optionIndexOf voted)
 optionRow :: Text -> Text
 optionRow opt = "        | " <> opt <> " |"
 
+-- | The @alice@ cast member of the members-vote scenario.
+memberAlice :: Text
+memberAlice = "@alice"
+
+-- | The @bob@ cast member of the members-vote scenario.
+memberBob :: Text
+memberBob = "@bob"
+
 -- | The smoke's feature document: a poll send observed with its option
--- table, a single vote acknowledged by index, and a table-driven multi-vote
--- acknowledged by both indexes.
+-- table, a single vote acknowledged by index and voter, a table-driven
+-- multi-vote acknowledged by both indexes and the voter, and two cast
+-- members voting as themselves (single-option and table member-vote forms)
+-- acknowledged with THEIR voter ids.
 pollFeature :: Text
 pollFeature =
     T.unlines $
@@ -178,7 +215,7 @@ pollFeature =
             ++ map optionRow pollOptionTexts
             ++
             [ "    When the user votes for \"" <> (pollOptionTexts !! 1) <> "\" in the poll"
-            , "    Then the bot replies with \"" <> voteAckText [pollOptionTexts !! 1] <> "\""
+            , "    Then the bot replies with \"" <> voteAckText defaultTestUserId [pollOptionTexts !! 1] <> "\""
             , ""
             , "  Scenario: votes for two options at once"
             , "    Given the poll bot is awake"
@@ -190,7 +227,21 @@ pollFeature =
             [ "    When the user votes in the poll"
             , optionRow (pollOptionTexts !! 0)
             , optionRow (pollOptionTexts !! 2)
-            , "    Then the bot replies with \"" <> voteAckText [pollOptionTexts !! 0, pollOptionTexts !! 2] <> "\""
+            , "    Then the bot replies with \"" <> voteAckText defaultTestUserId [pollOptionTexts !! 0, pollOptionTexts !! 2] <> "\""
+            , ""
+            , "  Scenario: members vote as themselves"
+            , "    Given the poll bot is awake"
+            , "    When the user sends \"/poll\""
+            , "    Then the bot sends a poll \"" <> pollQuestion <> "\""
+            ]
+            ++ map optionRow pollOptionTexts
+            ++
+            [ "    When the member \"" <> memberAlice <> "\" votes for \"" <> (pollOptionTexts !! 1) <> "\" in the poll"
+            , "    Then the bot replies with \"" <> voteAckText (userIdForLogin memberAlice) [pollOptionTexts !! 1] <> "\""
+            , "    When the member \"" <> memberBob <> "\" votes in the poll"
+            , optionRow (pollOptionTexts !! 0)
+            , optionRow (pollOptionTexts !! 2)
+            , "    Then the bot replies with \"" <> voteAckText (userIdForLogin memberBob) [pollOptionTexts !! 0, pollOptionTexts !! 2] <> "\""
             ]
 
 -- | The @When@ pattern of the user-message step: the quoted span is the
@@ -212,6 +263,8 @@ pollStepRegistry = mkRegistry
     , botSendsPoll
     , userVotesFor
     , userVotesIn
+    , memberVotesFor
+    , memberVotesIn
     , botRepliesWithMessage
     ]
 
@@ -285,11 +338,16 @@ buildPollAction app cfg mocks = do
         case updatePollAnswer update of
             Just pa -> do
                 mChatId <- lookupSpecPollChat polls (pollAnswerPollId pa)
-                case mChatId of
-                    Nothing -> pure ()
-                    Just chatId ->
+                -- The vote ack is VOTER-AWARE: the voter's id rides in the
+                -- update's @user@ (the fake @poll_answer@ builder always sets
+                -- it), so the member-vote scenarios can prove per-voter
+                -- identity survives the round trip. A vote without a user is
+                -- ignored (unreachable with the fake builder).
+                case (mChatId, pollAnswerUser pa) of
+                    (Just chatId, Just voter) ->
                         runWithConfig app cfg mocks $
-                            runScenarioProgram (voteAckScenario chatId (pollAnswerOptionIds pa))
+                            runScenarioProgram (voteAckScenario chatId (userId voter) (pollAnswerOptionIds pa))
+                    _ -> pure ()
             Nothing -> case (updateChatId update, updateMessage update >>= messageText) of
                 (Just chatId, Just "/poll") ->
                     runWithConfig app cfg mocks $
@@ -312,10 +370,11 @@ sendPollScenario polls chatId = do
     runArbitraryIO $ atomically $ registerSpecPoll polls pollId chatId
 
 -- | The vote-acknowledgement scenario: replies to the poll's chat with the
--- voted option indexes (the text the feature's @Then@ asserts).
-voteAckScenario :: ChatId -> [Int] -> ScenarioProgram Script NoServiceLib ()
-voteAckScenario chatId optionIds =
+-- voted option indexes and the voter's id (the text the feature's @Then@
+-- asserts, through the shared 'voteAckBody' projection).
+voteAckScenario :: ChatId -> UserId -> [Int] -> ScenarioProgram Script NoServiceLib ()
+voteAckScenario chatId voterId optionIds =
     void $
         evalScript $
             tgScript pollBotName $
-                Tg.sendMessage (defSendMessage (SomeChatId chatId) (ackPrefix <> tshow optionIds))
+                Tg.sendMessage (defSendMessage (SomeChatId chatId) (voteAckBody voterId optionIds))

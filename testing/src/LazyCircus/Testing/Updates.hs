@@ -50,11 +50,14 @@ module LazyCircus.Testing.Updates (
     -- * Defaults
     defaultTestUserId,
     defaultTestChatId,
+    userIdForLogin,
     ) where
 
 import Data.Aeson (Value (Object), fromJSON, object, (.=))
 import Data.Aeson.Types (Result (..))
+import Data.Bits qualified as Bits
 import RIO
+import RIO.Text qualified as T
 import Telegram.Bot.API (ChatId (..), Update, UserId (..))
 import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..), PollId (..))
 
@@ -140,6 +143,38 @@ defaultTestUserId = UserId 1001
 -- in this chat and are filtered back to the same 'ChatId' by the mailbox.
 defaultTestChatId :: ChatId
 defaultTestChatId = ChatId 1
+
+-- | Stable test id for a login (a BDD cast member): a 32-bit FNV-1a digest of
+-- the login's code points, offset into an id band disjoint from
+-- 'defaultTestUserId'. The BDD member-vote steps
+-- ('LazyCircus.Testing.Bdd.Tg.memberVotesFor',
+-- 'LazyCircus.Testing.Bdd.Tg.memberVotesIn') resolve their @«@login@»@ capture
+-- through this function; it is exported so consumer applications can seed
+-- users whose ids the steps will produce for the same logins.
+-- POST-CONTRACT: The same login maps to the same id across processes and runs
+-- (pure FNV-1a arithmetic — no salted 'Hashable'); the result never equals
+-- 'defaultTestUserId'; distinct logins map to distinct ids barring an
+-- astronomically unlikely 32-bit collision.
+userIdForLogin :: Text -> UserId
+userIdForLogin login =
+    UserId (2_000_000_000 + fromIntegral (fnv1a login `rem` loginIdBand))
+  where
+    -- | 32-bit FNV-1a over the login's code points.
+    fnv1a :: Text -> Word32
+    fnv1a = T.foldl' step fnv1aOffset
+    -- | One FNV-1a round: XOR the code point in, multiply by the prime
+    -- ('Word32' arithmetic wraps at 2^32, which FNV-1a relies on).
+    step :: Word32 -> Char -> Word32
+    step acc c = (acc `Bits.xor` fromIntegral (fromEnum c)) * fnv1aPrime
+    -- | FNV-1a 32-bit offset basis.
+    fnv1aOffset :: Word32
+    fnv1aOffset = 0x811c9dc5
+    -- | FNV-1a 32-bit prime.
+    fnv1aPrime :: Word32
+    fnv1aPrime = 0x01000193
+    -- | Width of the login-id band: ids land in [2000000000, 2001000000).
+    loginIdBand :: Word32
+    loginIdBand = 1_000_000
 
 -- | Stateful builder that hands out monotonically increasing @update_id@ values.
 --

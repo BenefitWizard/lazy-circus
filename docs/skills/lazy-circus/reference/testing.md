@@ -548,6 +548,11 @@ or any loop that needs distinct ids):
 
 Defaults: `defaultTestUserId = UserId 1001`, `defaultTestChatId = ChatId 1`.
 
+`userIdForLogin :: Text -> UserId` derives a stable id for a login (pure 32-bit FNV-1a
+over the code points, into the band [2000000000, 2001000000) — disjoint from
+`defaultTestUserId`): the BDD member-vote steps resolve their `"$login"` capture through
+it, and apps can use the same function to seed users whose ids the steps will produce.
+
 ### Example: synchronous handler test (mirrors `test/BotHandlerSpec.hs`)
 
 ```haskell
