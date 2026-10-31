@@ -35,9 +35,9 @@ member-vote scenarios meaningful: without it the round trip would pass even
 if every vote arrived as the default test user.
 
 This spec is also the blessing ground for the extended 'ObsTgPoll'
-observation shape (id, poll id and options in the shared journal): the full
-shape survives three different scenarios below, satisfying the journal's
-blessing rule.
+observation shape (id, poll id, options plus the thread id, anonymity flag
+and close date of the send request in the shared journal): the full shape
+survives the scenarios below, satisfying the journal's blessing rule.
 
 Coverage: (1) a poll send observed with question AND options from the step
 table; (2) a single default-user vote resolved through the consumed poll's
@@ -49,7 +49,11 @@ THEIR user ids — proving per-voter identity survives the round trip; (5)
 the acting-user mechanism: 'memberTakesStage' redirects every subsequent
 user-named step (the @the user votes ...@ form here) to the member and
 'defaultUserTakesStage' hands the stage back — the voter-aware ack proves
-both hops end-to-end.
+both hops end-to-end; (6) the observability fields — the @\/poll@ scenario
+pins @Just@-values via the publicness step plus digest pins, the
+@\/anonpoll@ scenario pins the explicit @Just True@ and the honest
+@Nothing@s; (7) the publicness steps' refusal before a poll is consumed
+(the poll IS journaled, just not consumed).
 -}
 module Bdd.PollSpec (spec) where
 
@@ -59,15 +63,23 @@ import LazyCircus.App.Service (NoServiceLib)
 import LazyCircus.Scenario (ScenarioProgram, evalScript, runArbitraryIO)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg (sendMessage, sendPoll)
 import LazyCircus.Script (Script)
-import LazyCircus.Testing.Bdd.Journal (Observation (..))
+import LazyCircus.Testing.Bdd.Given (appContextFor)
+import LazyCircus.Testing.Bdd.Journal
+    ( DialogState (..)
+    , Observation (..)
+    , PollDigest (..)
+    , ScenarioState (..)
+    , freshScenarioState
+    )
 import LazyCircus.Testing.Bdd.Runner
     ( FeatureSource (..)
+    , ScenarioBootstrap
     , ScenarioRegistry
     , ScenarioVerifier
     , expectScenarioSuccess
     , gherkinSpec
     )
-import LazyCircus.Testing.Bdd.Step (givenDef, mkRegistry)
+import LazyCircus.Testing.Bdd.Step (StepDef, StepOutcome (..), givenDef, mkRegistry, thenDef)
 import LazyCircus.Testing.Bdd.Tg
     ( botRepliesWithMessage
     , botSendsPoll
@@ -75,6 +87,8 @@ import LazyCircus.Testing.Bdd.Tg
     , memberTakesStage
     , memberVotesFor
     , memberVotesIn
+    , pollIsAnonymous
+    , pollIsPublic
     , tgTestBootstrap
     , userSends
     , userVotesFor
@@ -82,13 +96,17 @@ import LazyCircus.Testing.Bdd.Tg
     )
 import LazyCircus.Testing.Performer
     ( Mocks
-    , TestConfig
+    , TestConfig (..)
     , runScenarioProgram
     , runWithConfig
     )
 import LazyCircus.Testing.TgTest
     ( TelegramTestScript
+    , TgTestConfig (..)
     , defaultTgTestConfig
+    , guardWith
+    , tgeDescription
+    , tgTestWithMocks
     )
 import LazyCircus.Testing.Updates (defaultTestUserId, userIdForLogin)
 import RIO
@@ -107,11 +125,13 @@ import Telegram.Bot.API
     , pollAnswerOptionIds
     , pollAnswerPollId
     , pollAnswerUser
+    , sendPollCloseDate
     , sendPollIsAnonymous
+    , sendPollMessageThreadId
     , updateMessage
     , userId
     )
-import Telegram.Bot.API.Types (PollId (..))
+import Telegram.Bot.API.Types (MessageThreadId (..), PollId (..))
 import Telegram.Bot.API.GettingUpdates (updateChatId, updatePollAnswer)
 import Test.Hspec
 import TestSupport.DbFreeApp (mkDbFreeApp)
@@ -131,6 +151,13 @@ spec = do
             (\_ -> pure pollStepRegistry)
             (tgTestBootstrap defaultTgTestConfig (buildPollAction app))
             pollVerifier
+    describe "Poll publicness refusal (feature -> gherkinSpec -> guard failure, no PostgreSQL)" $ do
+        refusalReason <- runIO (newIORef (Nothing :: Maybe Text))
+        gherkinSpec
+            (FeatureInline "poll publicness refusal feature" refusalFeature)
+            (\_ -> pure pollStepRegistry)
+            (refusalBootstrap defaultTgTestConfig (buildPollAction app) refusalReason)
+            (refusalVerifier refusalReason)
 
 --------------------------------------------------------------------------------
 -- The poll feature and its registry
@@ -154,6 +181,19 @@ pollOptionTexts = ["Жонглёры", "Акробаты", "Дрессирова
 -- no entities), built positionally as the API requires.
 pollOptionRequests :: [InputPollOption]
 pollOptionRequests = map (\txt -> InputPollOption txt Nothing Nothing) pollOptionTexts
+
+-- | The close date the @\/poll@ request pins ('sendPollCloseDate', raw Unix
+-- seconds; 2026-11-30T12:00:00Z — the library stores it raw, interpretation
+-- stays with the consumer). Named so the request and the digest pins stay in
+-- sync by construction.
+pollCloseDate :: Int
+pollCloseDate = 1796040000
+
+-- | The target forum topic of the @\/poll@ request
+-- ('sendPollMessageThreadId') — the announcement topic stand-in. Named so the
+-- request and the digest pins stay in sync by construction.
+pollThreadId :: MessageThreadId
+pollThreadId = MessageThreadId 42
 
 -- | Prefix of the bot's vote acknowledgement; the voted option indexes and
 -- the voter's numeric id follow in @tshow@ form
@@ -205,9 +245,11 @@ memberCarol = "@carol"
 -- table, a single vote acknowledged by index and voter, a table-driven
 -- multi-vote acknowledged by both indexes and the voter, two cast members
 -- voting as themselves (single-option and table member-vote forms)
--- acknowledged with THEIR voter ids, and the acting-user switch proven
+-- acknowledged with THEIR voter ids, the acting-user switch proven
 -- end-to-end (a member takes the stage — @the user ...@ steps act as them;
--- the default user takes it back).
+-- the default user takes it back), and the two observability scenarios (a
+-- public poll pinned to the announcement topic; an anonymous poll leaving
+-- thread and close date unset).
 pollFeature :: Text
 pollFeature =
     T.unlines $
@@ -270,6 +312,95 @@ pollFeature =
             , "    And the user votes for \"" <> (pollOptionTexts !! 1) <> "\" in the poll"
             , "    Then the bot replies with \"" <> voteAckText defaultTestUserId [pollOptionTexts !! 1] <> "\""
             ]
+            ++ [ ""
+               , "  Scenario: sends a public poll pinned to the announcement topic"
+               , "    Given the poll bot is awake"
+               , "    When the user sends \"/poll\""
+               , "    Then the bot sends a poll \"" <> pollQuestion <> "\""
+               ]
+            ++ map optionRow pollOptionTexts
+            ++
+            [ "    And the poll is public"
+            , "    And the poll digest carries the announcement settings"
+            , ""
+            , "  Scenario: sends an anonymous poll leaving thread and close date unset"
+            , "    Given the poll bot is awake"
+            , "    When the user sends \"/anonpoll\""
+               , "    Then the bot sends a poll \"" <> pollQuestion <> "\""
+            ]
+            ++ map optionRow pollOptionTexts
+            ++
+            [ "    And the poll is anonymous"
+            , "    And the poll digest leaves thread and close date unset"
+            ]
+
+-- | @the poll digest carries the announcement settings@ — And-continuation
+-- pinning the three observability fields of the last consumed poll's digest
+-- against the spec's named fixtures ('pollThreadId', 'pollCloseDate' and the
+-- explicit public flag) — the same constants the @\/poll@ request is built
+-- from, so the pin and the send stay in sync by construction.
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. Each field has its own guard reason rendering expected vs actual.
+digestCarriesAnnouncementSettings :: StepDef TelegramTestScript c (ScenarioState app) a
+digestCarriesAnnouncementSettings =
+    thenDef "the poll digest carries the announcement settings" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noConsumedPollReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith
+                    ("expected the poll's thread id to be " <> tshow (Just pollThreadId) <> ", got: " <> tshow (pdThreadId digest))
+                    (pdThreadId digest == Just pollThreadId)
+                guardWith
+                    ("expected the poll's anonymity flag to be Just False, got: " <> tshow (pdIsAnonymous digest))
+                    (pdIsAnonymous digest == Just False)
+                guardWith
+                    ("expected the poll's close date to be " <> tshow (Just pollCloseDate) <> ", got: " <> tshow (pdCloseDate digest))
+                    (pdCloseDate digest == Just pollCloseDate)
+                pure (st, Nothing)
+
+-- | @the poll digest leaves thread and close date unset@ — the anonymous
+-- sibling pin: 'pdIsAnonymous' is @Just True@ (explicit) while 'pdThreadId'
+-- and 'pdCloseDate' are 'Nothing' (the @\/anonpoll@ request leaves them
+-- unset), proving the digest's 'Maybe' projection observes the ABSENCE
+-- honestly.
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. Each field has its own guard reason rendering expected vs actual.
+digestLeavesAnnouncementSettingsUnset :: StepDef TelegramTestScript c (ScenarioState app) a
+digestLeavesAnnouncementSettingsUnset =
+    thenDef "the poll digest leaves thread and close date unset" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noConsumedPollReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith
+                    ("expected the poll's thread id to be Nothing, got: " <> tshow (pdThreadId digest))
+                    (pdThreadId digest == Nothing)
+                guardWith
+                    ("expected the poll's anonymity flag to be Just True, got: " <> tshow (pdIsAnonymous digest))
+                    (pdIsAnonymous digest == Just True)
+                guardWith
+                    ("expected the poll's close date to be Nothing, got: " <> tshow (pdCloseDate digest))
+                    (pdCloseDate digest == Nothing)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the digest-pin steps run before any poll was
+-- consumed.
+noConsumedPollReason :: Text
+noConsumedPollReason =
+    "no poll has been consumed yet; a poll-consuming step (e.g. 'the bot sends a poll ...') must run first"
 
 -- | The STATIC poll registry, shared by every scenario of the feature: the
 -- Given is a no-op marker and EVERY When step comes from the library
@@ -282,6 +413,10 @@ pollStepRegistry = mkRegistry
     , memberTakesStage
     , defaultUserTakesStage
     , botSendsPoll
+    , pollIsPublic
+    , pollIsAnonymous
+    , digestCarriesAnnouncementSettings
+    , digestLeavesAnnouncementSettingsUnset
     , userVotesFor
     , userVotesIn
     , memberVotesFor
@@ -304,6 +439,85 @@ pollVerifier scenario outcome observations = do
     unless (length (filter isPoll observations) == 1 && all isKnownKind observations) $
         expectationFailure $
             "expected exactly one journaled poll (plus reply messages only), got: " <> show observations
+
+--------------------------------------------------------------------------------
+-- The publicness refusal feature (green example for a refusing scenario)
+--------------------------------------------------------------------------------
+
+-- | The refusal feature: the publicness step runs while a poll IS journaled
+-- (the @\/poll@ send happened) but nothing CONSUMED it yet — 'dsLastPoll' is
+-- still 'Nothing', so the step must abort with the no-consumed-poll reason.
+refusalFeature :: Text
+refusalFeature =
+    T.unlines
+        [ "Feature: Poll publicness refusal"
+        , ""
+        , "  Scenario: the publicness step refuses before a poll is consumed"
+        , "    Given the poll bot is awake"
+        , "    When the user sends \"/poll\""
+        , "    Then the poll is public"
+        ]
+
+{- | The refusal spec's bootstrap: 'tgTestBootstrap''s twin that does NOT
+fail the example when the step program aborts with a
+'LazyCircus.Testing.TgTest.TgTestError' — the refusal scenario WANTS that
+abort. A guard failure inside a step short-circuits the whole step program
+('TelegramTestScript' is an 'ExceptT'), so the aborted run produces no
+outcome of its own: the error's description is recorded in the 'IORef' for
+the verifier and a synthetic successful outcome is returned, keeping the
+enclosing example green so the verifier owns the refusal assertion.
+-}
+refusalBootstrap
+    :: TgTestConfig app
+    -> (TestConfig app -> Mocks serviceLib -> IO (Update -> IO ()))
+    -> IORef (Maybe Text)
+    -> ScenarioBootstrap serviceLib app TelegramTestScript
+refusalBootstrap baseCfg buildAction errRef journal mocks =
+    pure $ \stepProgram -> do
+        -- per-scenario reset: a reason left by an EARLIER scenario must not
+        -- mask a later scenario that never refused
+        writeIORef errRef Nothing
+        (_mailboxes, result) <-
+            tgTestWithMocks
+                baseCfg
+                    { ttgPerformerConfig =
+                        (ttgPerformerConfig baseCfg){tcJournal = Just journal}
+                    }
+                mocks
+                buildAction
+                stepProgram
+        case result of
+            Right outcome -> pure outcome
+            Left err -> do
+                writeIORef errRef (Just (tgeDescription err))
+                pure $
+                    Right $
+                        StepOutcome
+                            { stepOutcomeContext = appContextFor mocks
+                            , stepOutcomeState = freshScenarioState journal
+                            , stepOutcomeValues = []
+                            , stepOutcomeSteps = []
+                            }
+
+-- | Verifier: the scenario must have REFUSED with the no-consumed-poll
+-- reason (recorded by 'refusalBootstrap'), while the journal still holds
+-- exactly one poll — the refusal is about consumption, not about a missing
+-- send.
+refusalVerifier :: IORef (Maybe Text) -> ScenarioVerifier ()
+refusalVerifier errRef _scenario _outcome observations = do
+    recorded <- readIORef errRef
+    case recorded of
+        Nothing ->
+            expectationFailure "expected the publicness step to refuse before a poll is consumed, but the scenario succeeded"
+        Just reason ->
+            unless (T.isInfixOf "no poll has been consumed yet" reason) $
+                expectationFailure $
+                    "expected the no-consumed-poll refusal, got: " <> T.unpack reason
+    let isPoll ObsTgPoll{} = True
+        isPoll _ = False
+    unless (length (filter isPoll observations) == 1) $
+        expectationFailure $
+            "expected exactly one journaled poll despite the refusal (the send happened, only the consumption did not), got: " <> show observations
 
 --------------------------------------------------------------------------------
 -- The spec-local poll registry
@@ -373,12 +587,17 @@ buildPollAction app cfg mocks = do
                 (Just chatId, Just "/poll") ->
                     runWithConfig app cfg mocks $
                         runScenarioProgram (sendPollScenario polls chatId)
+                (Just chatId, Just "/anonpoll") ->
+                    runWithConfig app cfg mocks $
+                        runScenarioProgram (anonPollScenario polls chatId)
                 _ -> pure ()
 
 -- | The @\/poll@ scenario: sends a NON-anonymous poll (anonymous polls never
 -- produce @poll_answer@ updates — the vote scenarios depend on the
--- @poll_answer@ delivery) and registers its assigned poll id against the
--- chat, so the chat-less vote update can be routed back.
+-- @poll_answer@ delivery), pinned to the announcement topic
+-- ('pollThreadId') with the close date 'pollCloseDate', and registers its
+-- assigned poll id against the chat, so the chat-less vote update can be
+-- routed back.
 sendPollScenario :: SpecPollRegistry -> ChatId -> ScenarioProgram Script NoServiceLib ()
 sendPollScenario polls chatId = do
     (pollId, _) <-
@@ -387,6 +606,24 @@ sendPollScenario polls chatId = do
                 Tg.sendPoll
                     (defSendPoll (SomeChatId chatId) pollQuestion pollOptionRequests)
                         { sendPollIsAnonymous = Just False
+                        , sendPollCloseDate = Just pollCloseDate
+                        , sendPollMessageThreadId = Just pollThreadId
+                        }
+    runArbitraryIO $ atomically $ registerSpecPoll polls pollId chatId
+
+-- | The @\/anonpoll@ scenario: the anonymous sibling of 'sendPollScenario' —
+-- the same question and options, but an EXPLICITLY anonymous poll with the
+-- thread id and close date left unset, so the digest's 'Maybe' projection
+-- honestly observes 'Nothing' for them (the unset fields are themselves
+-- observable).
+anonPollScenario :: SpecPollRegistry -> ChatId -> ScenarioProgram Script NoServiceLib ()
+anonPollScenario polls chatId = do
+    (pollId, _) <-
+        evalScript $
+            tgScript pollBotName $
+                Tg.sendPoll
+                    (defSendPoll (SomeChatId chatId) pollQuestion pollOptionRequests)
+                        { sendPollIsAnonymous = Just True
                         }
     runArbitraryIO $ atomically $ registerSpecPoll polls pollId chatId
 

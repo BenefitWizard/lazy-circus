@@ -82,7 +82,7 @@ import Telegram.Bot.API
     , editMessageTextMessageId
     , editMessageTextText
     )
-import Telegram.Bot.API.Types (MessageId (..), PollId (..))
+import Telegram.Bot.API.Types (MessageId (..), MessageThreadId (..), PollId (..))
 
 import LazyCircus.Testing.Updates (defaultTestUserId)
 
@@ -206,7 +206,8 @@ preCheckoutAnswer =
         }
 
 -- | A fixed poll observation used as the Eq\/Show baseline of the extended
--- 'ObsTgPoll' shape (message id, poll id and options included).
+-- 'ObsTgPoll' shape (message id, poll id, options, thread id, anonymity flag
+-- and close date included).
 demoPoll :: Observation ()
 demoPoll =
     ObsTgPoll
@@ -215,6 +216,9 @@ demoPoll =
         , obsPollId = PollId "poll-0"
         , obsQuestion = "Who to invite?"
         , obsOptions = ["Jugglers", "Acrobats"]
+        , obsThreadId = Just (MessageThreadId 7)
+        , obsIsAnonymous = Just False
+        , obsCloseDate = Just 1796040000
         }
 
 spec :: Spec
@@ -493,19 +497,28 @@ spec = aroundAll withJournalApp $ do
                     , obsPollId = PollId "poll-0"
                     , obsQuestion = "Who to invite?"
                     , obsOptions = ["Jugglers", "Acrobats"]
+                    , obsThreadId = Just (MessageThreadId 7)
+                    , obsIsAnonymous = Just False
+                    , obsCloseDate = Just 1796040000
                     }
 
-        it "Eq distinguishes ObsTgPoll by message id, poll id and options" $ \_app -> do
+        it "Eq distinguishes ObsTgPoll by message id, poll id, options, thread id, anonymity and close date" $ \_app -> do
             demoPoll `shouldNotBe` demoPoll{obsMsgId = MessageId 1}
             demoPoll `shouldNotBe` demoPoll{obsPollId = PollId "poll-1"}
             demoPoll `shouldNotBe` demoPoll{obsOptions = ["Акробаты", "Жонглёры"]}
+            demoPoll `shouldNotBe` demoPoll{obsThreadId = Just (MessageThreadId 8)}
+            demoPoll `shouldNotBe` demoPoll{obsIsAnonymous = Just True}
+            demoPoll `shouldNotBe` demoPoll{obsCloseDate = Just 1796040001}
 
         it "Show renders ObsTgPoll field-wise" $ \_app -> do
             show demoPoll
                 `shouldBe` "ObsTgPoll{obsChatId = Just (ChatId 1), obsMsgId = MessageId 0"
                     <> ", obsPollId = PollId \"poll-0\""
                     <> ", obsQuestion = \"Who to invite?\""
-                    <> ", obsOptions = [\"Jugglers\",\"Acrobats\"]}"
+                    <> ", obsOptions = [\"Jugglers\",\"Acrobats\"]"
+                    <> ", obsThreadId = Just (MessageThreadId 7)"
+                    <> ", obsIsAnonymous = Just False"
+                    <> ", obsCloseDate = Just 1796040000}"
 
         it "Eq matches equal ObsTgPreCheckoutAnswer observations" $ \_app -> do
             preCheckoutAnswer `shouldBe` ObsTgPreCheckoutAnswer{obsQueryId = "pcq-1", obsOk = True}

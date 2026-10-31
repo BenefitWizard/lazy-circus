@@ -140,7 +140,7 @@ import RIO.Process (HasProcessContext (..))
 import RIO.Time (NominalDiffTime, getCurrentTime)
 import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
-import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollOptions, sendPollQuestion, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
+import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollCloseDate, sendPollIsAnonymous, sendPollMessageThreadId, sendPollOptions, sendPollQuestion, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
 import Telegram.Bot.API.Types (File (..), FileId (..), InputFile (..), MessageId (..), PollId (..), inputPollOptionText)
 
 -- | Response factory used by the Telegram mock to derive a reply from one outgoing request.
@@ -620,6 +620,9 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                                 , obsPollId = mockPollId mid
                                 , obsQuestion = sendPollQuestion req
                                 , obsOptions = map inputPollOptionText (sendPollOptions req)
+                                , obsThreadId = sendPollMessageThreadId req
+                                , obsIsAnonymous = sendPollIsAnonymous req
+                                , obsCloseDate = sendPollCloseDate req
                                 }
                         )
                 let pid = mockPollId mid

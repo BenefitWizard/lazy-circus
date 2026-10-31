@@ -46,7 +46,7 @@ import Control.Concurrent.STM (retry)
 import Data.List (find)
 
 import Telegram.Bot.API (ChatId, SomeReplyMarkup, UserId)
-import Telegram.Bot.API.Types (FileId, MessageId, PollId)
+import Telegram.Bot.API.Types (FileId, MessageId, MessageThreadId, PollId)
 
 import LazyCircus.Testing.Updates (defaultTestUserId)
 
@@ -94,6 +94,17 @@ data Observation app
         , obsOptions :: [Text]
         -- ^ answer-option texts as sent, in order (projected from the
         -- request's input poll options)
+        , obsThreadId :: Maybe MessageThreadId
+        -- ^ target forum topic of the send request ('Nothing' when the
+        -- request left @message_thread_id@ unset)
+        , obsIsAnonymous :: Maybe Bool
+        -- ^ anonymity flag of the send request ('Nothing' when the request
+        -- left @is_anonymous@ unset — the Telegram server then defaults the
+        -- poll to anonymous, so the absence itself is observable)
+        , obsCloseDate :: Maybe Int
+        -- ^ close date as RAW Unix seconds from the send request ('Nothing'
+        -- when unset); the library keeps the raw value — timezone
+        -- interpretation stays with project steps of the consumer
         }
     | ObsTgInvoice
         { obsChatId :: Maybe ChatId
@@ -146,12 +157,15 @@ instance Eq app => Eq (Observation app) where
                 && isJust markup1 == isJust markup2
         (ObsTgDocument{obsChatId = chat1, obsFileId = file1}, ObsTgDocument{obsChatId = chat2, obsFileId = file2}) ->
             chat1 == chat2 && file1 == file2
-        (ObsTgPoll{obsChatId = chat1, obsMsgId = msg1, obsPollId = poll1, obsQuestion = question1, obsOptions = options1}, ObsTgPoll{obsChatId = chat2, obsMsgId = msg2, obsPollId = poll2, obsQuestion = question2, obsOptions = options2}) ->
+        (ObsTgPoll{obsChatId = chat1, obsMsgId = msg1, obsPollId = poll1, obsQuestion = question1, obsOptions = options1, obsThreadId = thread1, obsIsAnonymous = anon1, obsCloseDate = close1}, ObsTgPoll{obsChatId = chat2, obsMsgId = msg2, obsPollId = poll2, obsQuestion = question2, obsOptions = options2, obsThreadId = thread2, obsIsAnonymous = anon2, obsCloseDate = close2}) ->
             chat1 == chat2
                 && msg1 == msg2
                 && poll1 == poll2
                 && question1 == question2
                 && options1 == options2
+                && thread1 == thread2
+                && anon1 == anon2
+                && close1 == close2
         (ObsTgInvoice{obsChatId = chat1, obsTitle = title1}, ObsTgInvoice{obsChatId = chat2, obsTitle = title2}) ->
             chat1 == chat2 && title1 == title2
         (ObsTgReaction reaction1, ObsTgReaction reaction2) -> reaction1 == reaction2
@@ -178,12 +192,15 @@ instance Show app => Show (Observation app) where
                 <> "}"
         ObsTgDocument{obsChatId = chat, obsFileId = file} ->
             "ObsTgDocument{obsChatId = " <> show chat <> ", obsFileId = " <> show file <> "}"
-        ObsTgPoll{obsChatId = chat, obsMsgId = msg, obsPollId = pid, obsQuestion = question, obsOptions = options} ->
+        ObsTgPoll{obsChatId = chat, obsMsgId = msg, obsPollId = pid, obsQuestion = question, obsOptions = options, obsThreadId = thread, obsIsAnonymous = anon, obsCloseDate = close} ->
             "ObsTgPoll{obsChatId = " <> show chat
                 <> ", obsMsgId = " <> show msg
                 <> ", obsPollId = " <> show pid
                 <> ", obsQuestion = " <> show question
                 <> ", obsOptions = " <> show options
+                <> ", obsThreadId = " <> show thread
+                <> ", obsIsAnonymous = " <> show anon
+                <> ", obsCloseDate = " <> show close
                 <> "}"
         ObsTgInvoice{obsChatId = chat, obsTitle = title} ->
             "ObsTgInvoice{obsChatId = " <> show chat <> ", obsTitle = " <> show title <> "}"
@@ -280,11 +297,16 @@ data DialogState = DialogState
 
 -- | Everything the dialog view keeps about a consumed poll: the ids a voting
 -- step needs ('pdPollId') plus the question and option texts to resolve a
--- voted option into its index.
+-- voted option into its index, and the observability fields mirrored from the
+-- send request — each 'Maybe' honestly reflects \"the request left the field
+-- unset\".
 data PollDigest = PollDigest
-    { pdPollId   :: PollId -- ^ mock poll id assigned to the sent poll
-    , pdQuestion :: Text   -- ^ poll question as sent
-    , pdOptions  :: [Text] -- ^ answer-option texts as sent, in order
+    { pdPollId      :: PollId                -- ^ mock poll id assigned to the sent poll
+    , pdQuestion    :: Text                  -- ^ poll question as sent
+    , pdOptions     :: [Text]                -- ^ answer-option texts as sent, in order
+    , pdThreadId    :: Maybe MessageThreadId -- ^ target forum topic ('sendPollMessageThreadId'), 'Nothing' when unset
+    , pdIsAnonymous :: Maybe Bool            -- ^ anonymity flag ('sendPollIsAnonymous'), 'Nothing' when unset (the server defaults to anonymous)
+    , pdCloseDate   :: Maybe Int             -- ^ close date ('sendPollCloseDate') as RAW Unix seconds — timezone interpretation stays with the consumer
     }
     deriving (Eq, Show)
 
@@ -449,12 +471,24 @@ peekLastConsumed st = case ssLastConsumed st of
 -- | Fold one matched observation into the derived dialog state. Two
 -- observation kinds are interpreted: 'ObsTgMessage' sets 'dsLastReply' from
 -- the message text and 'dsLastKeyboard' from its 'obsMarkup'; 'ObsTgPoll'
--- sets 'dsLastPoll' from the poll's ids, question and options. The two
+-- sets 'dsLastPoll' from the poll's ids, question and options, mirroring the
+-- request's thread id, anonymity flag and close date into the digest. The two
 -- families update their own fields and leave each other untouched — a
 -- message following a poll does not invalidate the poll digest.
 updateDialog :: DialogState -> Observation app -> DialogState
 updateDialog ds ObsTgMessage{obsText = txt, obsMarkup = markup} =
     ds{dsLastReply = Just txt, dsLastKeyboard = markup}
-updateDialog ds ObsTgPoll{obsPollId = pid, obsQuestion = question, obsOptions = options} =
-    ds{dsLastPoll = Just (PollDigest pid question options)}
+updateDialog ds ObsTgPoll{obsPollId = pid, obsQuestion = question, obsOptions = options, obsThreadId = threadId, obsIsAnonymous = isAnonymous, obsCloseDate = closeDate} =
+    ds
+        { dsLastPoll =
+            Just
+                PollDigest
+                    { pdPollId = pid
+                    , pdQuestion = question
+                    , pdOptions = options
+                    , pdThreadId = threadId
+                    , pdIsAnonymous = isAnonymous
+                    , pdCloseDate = closeDate
+                    }
+        }
 updateDialog ds _ = ds

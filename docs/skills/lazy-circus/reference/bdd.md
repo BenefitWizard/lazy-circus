@@ -136,7 +136,9 @@ data Observation app
                     , obsMsgId :: MessageId, obsMarkup :: Maybe SomeReplyMarkup }
     | ObsTgDocument { obsChatId :: Maybe ChatId, obsFileId :: Maybe FileId }
     | ObsTgPoll     { obsChatId :: Maybe ChatId, obsMsgId :: MessageId
-                    , obsPollId :: PollId, obsQuestion :: Text, obsOptions :: [Text] }
+                    , obsPollId :: PollId, obsQuestion :: Text, obsOptions :: [Text]
+                    , obsThreadId :: Maybe MessageThreadId
+                    , obsIsAnonymous :: Maybe Bool, obsCloseDate :: Maybe Int }
     | ObsTgInvoice  { obsChatId :: Maybe ChatId, obsTitle :: Text }
     | ObsTgReaction { obsTargetMsgId :: Maybe MessageId }
     | ObsTgEdit     { obsTargetMsgId :: Maybe MessageId, obsNewText :: Text }
@@ -177,9 +179,15 @@ Conventions (all enforced by Haddock contracts and tests):
 
 The mocked performer assigns every sent poll the deterministic id
 `PollId "poll-<messageId>"` and journals the full shape — chat, message id, poll id,
-question and option texts (projected from the request) — as `ObsTgPoll`. The dialog
+question, option texts (projected from the request) and the request's
+`message_thread_id` / `is_anonymous` / `close_date` — as `ObsTgPoll`. The dialog
 state folds a consumed poll into `dsLastPoll :: Maybe PollDigest`
-(`pdPollId` / `pdQuestion` / `pdOptions`); messages do NOT invalidate the digest.
+(`pdPollId` / `pdQuestion` / `pdOptions` plus `pdThreadId` / `pdIsAnonymous` /
+`pdCloseDate`); messages do NOT invalidate the digest. Each digest `Maybe` mirrors
+the matching send-request field: `Nothing` honestly means "left unset in the
+request". `pdCloseDate` is RAW Unix seconds — timezone interpretation stays with
+project steps of the consumer. Note the Telegram server defaults `is_anonymous` to
+`True` when the request leaves it unset (unset ≠ public).
 
 Library steps (in `LazyCircus.Testing.Bdd.Tg`, registry-ready):
 
@@ -189,6 +197,8 @@ Then the bot sends a poll "Кого позвать в шапито?"
     | Жонглёры    |    # the options table pins the FULL option list,
     | Акробаты    |    # one single-cell row per option, in order
     | Дрессировщик |
+And the poll is public                         # And-continuation on the digest:
+                                               # is_anonymous was set to Just False
 When the user votes for "Акробаты" in the poll      # single vote via the quoted capture
 Then the bot replies with "🗳 голос учтён: [1] от 1001"
 When the member "@alice" votes for "Акробаты" in the poll   # a named cast member,
@@ -198,6 +208,14 @@ Then the bot replies with "🗳 голос учтён: [1] от 2000000123"   # 
 - `botSendsPoll` (`Then`) consumes exactly one `ObsTgPoll` with the expected question;
   with a table attached it also pins the expected options. Malformed tables (a row that
   is not exactly one non-empty cell) fail the step BEFORE any waiting.
+- `pollIsPublic` (`Then`/And, `the poll is public`) — And-continuation asserting the
+  last consumed poll's `pdIsAnonymous == Just False`; never waits, never consumes.
+  Aborts with the no-poll-yet reason when no poll was consumed, and with the
+  server-default explanation when the flag is `Nothing` or `Just True` (only public
+  polls deliver `poll_answer`).
+- `pollIsAnonymous` (`Then`/And, `the poll is anonymous`) — the strict sibling of
+  `pollIsPublic`: requires `Just True` explicitly (an unset flag aborts even though
+  the server would treat the poll as anonymous by default).
 - `userVotesFor` (`When`, `the user votes for "$option" in the poll`) resolves the
   captured option text against the consumed poll's `pdOptions` and feeds one chat-less
   `poll_answer` update via the `sendPollAnswer` DSL op; a table attached to this step is
@@ -219,6 +237,10 @@ A working end-to-end example (bot sends a non-anonymous poll on `/poll`, registe
 poll id in a poll→chat registry, acknowledges votes with the voted indexes AND the
 voter's user id — the voter-aware ack is what makes the member-vote scenarios
 meaningful) lives in `testing/test/Bdd/PollSpec.hs` — mirror it for your own poll flows.
+The observability example is there too: the `/poll` scenario pins `Just`-valued digest
+fields via `the poll is public` and spec-local digest-pin steps, the `/anonpoll`
+scenario pins the explicit `Just True` and the honest `Nothing`s, and the refusal
+feature proves the publicness steps abort before a poll is consumed.
 
 ## The Acting User
 

@@ -159,6 +159,9 @@ spec = aroundAll withBotTestApp $
                                 , obsPollId = PollId "poll-0"
                                 , obsQuestion = demoQuestion
                                 , obsOptions = optionTexts
+                                , obsThreadId = Nothing
+                                , obsIsAnonymous = Just False
+                                , obsCloseDate = Nothing
                                 }
                            ]
             captures <- readOutgoingMailbox mocks

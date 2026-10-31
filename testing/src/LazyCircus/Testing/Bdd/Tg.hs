@@ -30,7 +30,8 @@ in their own capture, resolved through
 'LazyCircus.Testing.Updates.userIdForLogin', regardless of the current actor.
 
 Await semantics (one await = one observation): every @Then@ constructor
-except 'botReplyContains' performs ONE 'awaitObservation' whose predicate
+except 'botReplyContains', 'pollIsPublic' and 'pollIsAnonymous' performs ONE
+'awaitObservation' whose predicate
 matches ONLY the core @ObsTg*@ constructors — app-specific 'ObsApp' entries
 are skipped over and never consumed. A matched 'ObsTgMessage' folds into
 'ssDialog' ('dsLastReply' from the text, 'dsLastKeyboard' from its markup),
@@ -42,7 +43,9 @@ resolved through 'LazyCircus.Testing.Updates.userIdForLogin').
 'botReplyContains' is the
 And-continuation: it re-inspects the last consumed entry via
 'peekLastConsumed' — NO wait and NO consumption — asserting on @dsLastReply@
-without moving the cursor.
+without moving the cursor. The publicness pair 'pollIsPublic' and
+'pollIsAnonymous' are fellow And-continuations asserting on the last consumed
+poll's digest ('dsLastPoll') — likewise with NO wait and NO consumption.
 
 The module also exports 'tgTestBootstrap', the canonical @tgTest@-shaped
 'LazyCircus.Testing.Bdd.Runner.ScenarioBootstrap': it executes a BDD
@@ -55,6 +58,8 @@ module LazyCircus.Testing.Bdd.Tg
     , botReplyContains
     , botRepliesWithKeyboard
     , botSendsPoll
+    , pollIsPublic
+    , pollIsAnonymous
     , botReactsTo
     , botDeletesMessage
     , botSendsDocument
@@ -183,6 +188,84 @@ botSendsPoll =
             Right mExpected -> do
                 let question = fromMaybe "" (lookupParam "$question" params)
                 awaitMatching ("a poll \"" <> question <> "\"") (isPollWith question mExpected) st
+
+-- | @the poll is public@ — And-continuation asserting the last consumed poll
+-- was sent as PUBLIC: the request set @is_anonymous@ to 'False' explicitly.
+--
+-- The Telegram server delivers @poll_answer@ updates only for public polls
+-- and defaults @is_anonymous@ to @True@ when the request leaves it unset, so
+-- a forgotten flag means empty vote data in production while the mock stays
+-- green — this step catches exactly that (the mock does not simulate the
+-- server-side default; the step checks the request's flag, which is what the
+-- app controls).
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. The poll counts as public only when the digest's 'pdIsAnonymous' is
+-- @Just False@ — a @Nothing@ (request left the flag unset) or @Just True@
+-- aborts the DSL with a guard failure explaining the server default.
+pollIsPublic :: StepDef TelegramTestScript c (ScenarioState app) a
+pollIsPublic =
+    thenDef "the poll is public" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith (notPublicReason digest) (pdIsAnonymous digest == Just False)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the consumed poll is not public: covers an
+-- explicitly anonymous request and the unset-flag trap alike (the server
+-- defaults anonymous polls to @True@).
+notPublicReason :: PollDigest -> Text
+notPublicReason digest = case pdIsAnonymous digest of
+    Nothing ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" left is_anonymous unset in the send request; the Telegram server defaults"
+            <> " it to anonymous, so the poll is NOT public — set sendPollIsAnonymous = Just False"
+            <> " to make it public (only public polls deliver poll_answer)"
+    Just True ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" was sent with is_anonymous = True (an anonymous poll)"
+
+-- | @the poll is anonymous@ — And-continuation asserting the last consumed
+-- poll was sent as ANONYMOUS: the request set @is_anonymous@ to 'True'
+-- explicitly. The strict sibling of 'pollIsPublic'.
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. The poll counts as anonymous only when the digest's 'pdIsAnonymous'
+-- is @Just True@ — a @Nothing@ (request left the flag unset) aborts with the
+-- explanation that the app never said so explicitly, even though the server
+-- would treat the poll as anonymous by default.
+pollIsAnonymous :: StepDef TelegramTestScript c (ScenarioState app) a
+pollIsAnonymous =
+    thenDef "the poll is anonymous" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith (notAnonymousReason digest) (pdIsAnonymous digest == Just True)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the consumed poll is not explicitly anonymous.
+notAnonymousReason :: PollDigest -> Text
+notAnonymousReason digest = case pdIsAnonymous digest of
+    Nothing ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" left is_anonymous unset in the send request; the server would treat it as"
+            <> " anonymous by default, but the step requires the explicit sendPollIsAnonymous = Just True"
+    Just False ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" was sent with is_anonymous = False (a public poll)"
 
 -- | @the user sends "$msg"@ — the CURRENT actor sends a text message in the
 -- default test chat. The canonical user-input step: \"the user\" always means
