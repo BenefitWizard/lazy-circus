@@ -48,6 +48,7 @@ import LazyCircus.Testing.Bdd.Journal
     , ObservationLog
     , ScenarioState (..)
     , Sequenced (..)
+    , actingUserId
     , appendObservation
     , awaitObservation
     , defaultAwaitBudgetUs
@@ -73,6 +74,7 @@ import OpenAI.V1.Usage (Usage (..))
 import Telegram.Bot.API
     ( ChatId (..)
     , SomeChatId (..)
+    , UserId (..)
     , defEditMessageText
     , defSendMessage
     , defSetMessageReaction
@@ -81,6 +83,8 @@ import Telegram.Bot.API
     , editMessageTextText
     )
 import Telegram.Bot.API.Types (MessageId (..), PollId (..))
+
+import LazyCircus.Testing.Updates (defaultTestUserId)
 
 {- | Run an action with a minimal database-free 'DefaultApp' that has one
 Telegram bot (@demo-bot@) registered, so @tgScript "demo-bot"@ effects are
@@ -446,6 +450,26 @@ spec = aroundAll withJournalApp $ do
                                 obs3 `shouldBe` tgMsg "three" (MessageId 2)
                                 ssConsumed st2 `shouldBe` Set.fromList [1, 2]
                                 ssLastConsumed st2 `shouldBe` Just 2
+
+    describe "actingUserId (the user the input steps act as)" $ do
+        it "defaults a fresh scenario state to the default test user" $ \_app -> do
+            st0 <- newScenarioState :: IO (ScenarioState ())
+            ssActingUser st0 `shouldBe` Nothing
+            actingUserId st0 `shouldBe` defaultTestUserId
+
+        it "returns the cast member once ssActingUser is set, and the field SURVIVES an await" $ \_app -> do
+            st0 <- newScenarioState :: IO (ScenarioState ())
+            let st1 = st0{ssActingUser = Just (UserId 2000000123)}
+            actingUserId st1 `shouldBe` UserId 2000000123
+            -- the acting user is non-derived state: a wait consumes an
+            -- observation (record-update on the state) and must carry it over
+            atomically $ appendObservation (ssLog st1) (tgMsg "hi" (MessageId 0))
+            result <- awaitObservation defaultAwaitBudgetUs st1 (isTextReply "hi") "the reply"
+            case result of
+                Left err -> expectationFailure ("expected a match, timed out: " <> show err)
+                Right (_, st2) -> do
+                    ssConsumed st2 `shouldBe` Set.singleton 0
+                    actingUserId st2 `shouldBe` UserId 2000000123
 
     describe "Observation Eq and Show for the Stars constructors" $ do
         it "Eq matches equal ObsTgInvoice observations" $ \_app -> do

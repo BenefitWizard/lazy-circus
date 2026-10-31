@@ -9,17 +9,19 @@ smoke passes with PostgreSQL stopped; the scenario touches only the Telegram
 sub-language.
 
 The round trip: the inline feature is turned into an hspec tree by
-'gherkinSpec'; the STATIC registry reuses the library Telegram step
-dictionary — 'LazyCircus.Testing.Bdd.Tg.botSendsPoll' (with the poll options
-attached as a @| ... |@ step table) for the @Then@ phase and
+'gherkinSpec'; the STATIC registry is ENTIRELY library dictionary —
+'LazyCircus.Testing.Bdd.Tg.botSendsPoll' (with the poll options attached as a
+@| ... |@ step table) for the @Then@ phase, and for the @When@ phase
+'LazyCircus.Testing.Bdd.Tg.userSends' (feeding the captured words through the
+canonical @tgTest@ driver), the vote pair
 'LazyCircus.Testing.Bdd.Tg.userVotesFor' \/
 'LazyCircus.Testing.Bdd.Tg.userVotesIn' (single option via the quoted capture,
-multi-vote via the options table) plus their multi-actor siblings
+multi-vote via the options table), their multi-actor shorthand siblings
 'LazyCircus.Testing.Bdd.Tg.memberVotesFor' \/
 'LazyCircus.Testing.Bdd.Tg.memberVotesIn' (voting as the named cast member,
-resolved through 'LazyCircus.Testing.Updates.userIdForLogin') for the @When@
-phase; the @When@ "the user sends" step feeds the user's words through the
-canonical @tgTest@ driver.
+resolved through 'LazyCircus.Testing.Updates.userIdForLogin') and the
+acting-user switch 'LazyCircus.Testing.Bdd.Tg.memberTakesStage' \/
+'LazyCircus.Testing.Bdd.Tg.defaultUserTakesStage'.
 
 The bot's buildAction mirrors the demo's poll flow
 ('BotHandler.dispatch'): a @\/poll@ command sends a NON-anonymous poll
@@ -43,7 +45,11 @@ table; (2) a single default-user vote resolved through the consumed poll's
 id; (3) a table-driven default-user multi-vote acknowledged with both
 indexes and the voter's id; (4) two cast members voting as themselves
 (single-option and table forms of the member vote steps) acknowledged with
-THEIR user ids — proving per-voter identity survives the round trip.
+THEIR user ids — proving per-voter identity survives the round trip; (5)
+the acting-user mechanism: 'memberTakesStage' redirects every subsequent
+user-named step (the @the user votes ...@ form here) to the member and
+'defaultUserTakesStage' hands the stage back — the voter-aware ack proves
+both hops end-to-end.
 -}
 module Bdd.PollSpec (spec) where
 
@@ -54,7 +60,6 @@ import LazyCircus.Scenario (ScenarioProgram, evalScript, runArbitraryIO)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg (sendMessage, sendPoll)
 import LazyCircus.Script (Script)
 import LazyCircus.Testing.Bdd.Journal (Observation (..))
-import LazyCircus.Testing.Bdd.Pattern (Pattern, lookupParam)
 import LazyCircus.Testing.Bdd.Runner
     ( FeatureSource (..)
     , ScenarioRegistry
@@ -62,13 +67,16 @@ import LazyCircus.Testing.Bdd.Runner
     , expectScenarioSuccess
     , gherkinSpec
     )
-import LazyCircus.Testing.Bdd.Step (givenDef, mkRegistry, whenDef)
+import LazyCircus.Testing.Bdd.Step (givenDef, mkRegistry)
 import LazyCircus.Testing.Bdd.Tg
     ( botRepliesWithMessage
     , botSendsPoll
+    , defaultUserTakesStage
+    , memberTakesStage
     , memberVotesFor
     , memberVotesIn
     , tgTestBootstrap
+    , userSends
     , userVotesFor
     , userVotesIn
     )
@@ -81,7 +89,6 @@ import LazyCircus.Testing.Performer
 import LazyCircus.Testing.TgTest
     ( TelegramTestScript
     , defaultTgTestConfig
-    , sendMessage
     )
 import LazyCircus.Testing.Updates (defaultTestUserId, userIdForLogin)
 import RIO
@@ -190,11 +197,17 @@ memberAlice = "@alice"
 memberBob :: Text
 memberBob = "@bob"
 
+-- | The @carol@ cast member of the acting-user scenario.
+memberCarol :: Text
+memberCarol = "@carol"
+
 -- | The smoke's feature document: a poll send observed with its option
 -- table, a single vote acknowledged by index and voter, a table-driven
--- multi-vote acknowledged by both indexes and the voter, and two cast
--- members voting as themselves (single-option and table member-vote forms)
--- acknowledged with THEIR voter ids.
+-- multi-vote acknowledged by both indexes and the voter, two cast members
+-- voting as themselves (single-option and table member-vote forms)
+-- acknowledged with THEIR voter ids, and the acting-user switch proven
+-- end-to-end (a member takes the stage — @the user ...@ steps act as them;
+-- the default user takes it back).
 pollFeature :: Text
 pollFeature =
     T.unlines $
@@ -242,24 +255,32 @@ pollFeature =
             , optionRow (pollOptionTexts !! 0)
             , optionRow (pollOptionTexts !! 2)
             , "    Then the bot replies with \"" <> voteAckText (userIdForLogin memberBob) [pollOptionTexts !! 0, pollOptionTexts !! 2] <> "\""
+            , ""
+            , "  Scenario: the acting member takes the stage"
+            , "    Given the poll bot is awake"
+            , "    When the user sends \"/poll\""
+            , "    Then the bot sends a poll \"" <> pollQuestion <> "\""
+            ]
+            ++ map optionRow pollOptionTexts
+            ++
+            [ "    When the member \"" <> memberCarol <> "\" takes the stage"
+            , "    And the user votes for \"" <> (pollOptionTexts !! 0) <> "\" in the poll"
+            , "    Then the bot replies with \"" <> voteAckText (userIdForLogin memberCarol) [pollOptionTexts !! 0] <> "\""
+            , "    When the default user takes the stage"
+            , "    And the user votes for \"" <> (pollOptionTexts !! 1) <> "\" in the poll"
+            , "    Then the bot replies with \"" <> voteAckText defaultTestUserId [pollOptionTexts !! 1] <> "\""
             ]
 
--- | The @When@ pattern of the user-message step: the quoted span is the
--- user's message.
-sendsPattern :: Pattern
-sendsPattern = "the user sends \"$msg\""
-
 -- | The STATIC poll registry, shared by every scenario of the feature: the
--- Given is a no-op marker, the user-message When feeds the captured words
--- through the @tgTest@ DSL, and the poll steps come from the library
+-- Given is a no-op marker and EVERY When step comes from the library
 -- dictionary (they read their expected values from their own captures and
 -- tables).
 pollStepRegistry :: ScenarioRegistry NoServiceLib () TelegramTestScript
 pollStepRegistry = mkRegistry
     [ givenDef "the poll bot is awake" (\_params -> pure . id)
-    , whenDef sendsPattern $ \params st -> do
-        _ <- sendMessage (fromMaybe "" (lookupParam "$msg" params))
-        pure (st, Nothing)
+    , userSends
+    , memberTakesStage
+    , defaultUserTakesStage
     , botSendsPoll
     , userVotesFor
     , userVotesIn

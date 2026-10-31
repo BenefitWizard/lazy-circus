@@ -19,15 +19,16 @@ Everything runs with the database switched off:
 The round trip: the inline feature is turned into an hspec tree by
 'gherkinSpec' (its coverage meta-test and ambiguity probe are part of THIS
 spec tree); the STATIC registry (one shared value for every scenario) reuses
-the library Telegram @Then@-dictionary
+the library Telegram dictionary — @Then@
 ('LazyCircus.Testing.Bdd.Tg.botRepliesWithMessage' +
-'LazyCircus.Testing.Bdd.Tg.botReplyContains' as the @And@-continuation); the
-@When@ step sends the user's words through the canonical @tgTest@ driver —
-'LazyCircus.Testing.TgTest.sendMessage' feeds a fake update into the headless
-bot whose buildAction runs the echo scenario (a @ScenarioProgram@ that
-@sendTo@s the incoming text back) under
+'LazyCircus.Testing.Bdd.Tg.botReplyContains' as the @And@-continuation) and
+@When@ ('LazyCircus.Testing.Bdd.Tg.userSends', which sends the user's words
+through the canonical @tgTest@ driver — a fake update from the state's
+acting user fed into the headless bot whose buildAction runs the echo
+scenario (a @ScenarioProgram@ that @sendTo@s the incoming text back) under
 'LazyCircus.Testing.Performer.runWithConfig' with the scenario's fresh
-observation journal injected via @tcJournal@.
+observation journal injected via @tcJournal@). The one spec-local @When@ is
+the document upload (it honors the acting user too).
 
 Executor note: the registry monad is 'LazyCircus.Testing.TgTest.TelegramTestScript'
 (the library Then-constructors' dialog monad), so the bootstrap is the
@@ -64,7 +65,7 @@ import LazyCircus.Script (Script)
 import LazyCircus.Telegram (makeBotEnv)
 import LazyCircus.Testing.Bdd.Gherkin (GherkinKeyword (..), GherkinScenario (..), GherkinStep (..))
 import LazyCircus.Testing.Bdd.Given (stagedTgDownloads)
-import LazyCircus.Testing.Bdd.Journal (Observation (..))
+import LazyCircus.Testing.Bdd.Journal (Observation (..), actingUserId)
 import LazyCircus.Testing.Bdd.Pattern (Pattern, lookupParam, matchAll)
 import LazyCircus.Testing.Bdd.Runner
     ( FeatureSource (..)
@@ -74,7 +75,12 @@ import LazyCircus.Testing.Bdd.Runner
     , gherkinSpec
     )
 import LazyCircus.Testing.Bdd.Step (givenDef, mkRegistry, whenDef)
-import LazyCircus.Testing.Bdd.Tg (botReplyContains, botRepliesWithMessage, tgTestBootstrap)
+import LazyCircus.Testing.Bdd.Tg
+    ( botReplyContains
+    , botRepliesWithMessage
+    , tgTestBootstrap
+    , userSends
+    )
 import LazyCircus.Testing.Performer
     ( Mocks
     , TestConfig
@@ -84,9 +90,9 @@ import LazyCircus.Testing.Performer
 import LazyCircus.Testing.TgTest
     ( TelegramTestScript
     , defaultTgTestConfig
-    , sendDocumentAs
-    , sendMessage
+    , sendDocumentByUser
     )
+import LazyCircus.Testing.Updates (defaultTestChatId, mkDocument)
 import Network.HTTP.Client.TLS (newTlsManager)
 import OpenAI.V1 (getClientEnv, makeMethods)
 import RIO
@@ -193,11 +199,6 @@ undefinedStepFeature =
         , "    Then the bot replies with \"lovely weather\""
         ]
 
--- | The @When@ pattern of the echo registry: the quoted span is the user's
--- message.
-whenPattern :: Pattern
-whenPattern = "the user sends \"$msg\""
-
 -- | The @And@-continuation pattern: the quoted span is the asserted fragment
 -- of the last consumed reply.
 containsPattern :: Pattern
@@ -232,9 +233,11 @@ stagedReply = T.pack (show (BS.length stagedBytes))
 
 -- | The STATIC echo registry, shared by every scenario of the feature: no
 -- value is baked in at registration time — the Given staging def keys the
--- canned bytes off its own capture, the @When@ actions read the user's words
--- / upload target from the matched step's own captures, and the library
--- Then-constructors read their expected values from their own captures.
+-- canned bytes off its own capture, the text-message @When@ is the LIBRARY
+-- 'userSends' (it acts as the state's acting user), the upload @When@ reads
+-- its target from the matched step's own capture and acts as the acting user
+-- too, and the library Then-constructors read their expected values from
+-- their own captures.
 --
 -- Selection is deterministic by rule, not by registration order:
 -- 'matchingDefs' picks a 'Literal' match first, then templates in
@@ -247,11 +250,10 @@ echoRegistry = mkRegistry
         \params ->
             stagedTgDownloads
                 [(FileId (fromMaybe "doc-1" (lookupParam "$name" params)), stagedBytes)]
-    , whenDef whenPattern $ \params st -> do
-        _ <- sendMessage (fromMaybe "" (lookupParam "$msg" params))
-        pure (st, Nothing)
+    , userSends
     , whenDef uploadPattern $ \params st -> do
-        _ <- sendDocumentAs (FileId (fromMaybe "doc-1" (lookupParam "$file" params))) Nothing Nothing Nothing
+        let fid = FileId (fromMaybe "doc-1" (lookupParam "$file" params))
+        _ <- sendDocumentByUser (actingUserId st) defaultTestChatId (mkDocument fid)
         pure (st, Nothing)
     , botReplyContains
     , botRepliesWithMessage

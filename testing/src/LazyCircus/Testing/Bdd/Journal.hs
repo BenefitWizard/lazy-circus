@@ -33,6 +33,7 @@ module LazyCircus.Testing.Bdd.Journal
     , newScenarioState
     , freshScenarioState
     , ssLastConsumed
+    , actingUserId
     , awaitObservation
     , peekLastConsumed
     ) where
@@ -44,8 +45,10 @@ import RIO.Set qualified as Set
 import Control.Concurrent.STM (retry)
 import Data.List (find)
 
-import Telegram.Bot.API (ChatId, SomeReplyMarkup)
+import Telegram.Bot.API (ChatId, SomeReplyMarkup, UserId)
 import Telegram.Bot.API.Types (FileId, MessageId, PollId)
+
+import LazyCircus.Testing.Updates (defaultTestUserId)
 
 -- | One observed side effect of a scenario run, expressed in the testing
 -- library's shared vocabulary.
@@ -290,10 +293,10 @@ emptyDialogState :: DialogState
 emptyDialogState = DialogState Nothing Nothing Nothing
 
 -- | Caller-owned consumption state threaded through BDD steps: which journal
--- entries have already been observed plus a derived view of the dialog. The
--- state is an immutable snapshot — 'awaitObservation' returns a NEW state
--- instead of mutating, so steps (and And-continuations) can fork from any
--- point without interference.
+-- entries have already been observed, a derived view of the dialog, and the
+-- acting user the user-input steps perform as. The state is an immutable
+-- snapshot — 'awaitObservation' returns a NEW state instead of mutating, so
+-- steps (and And-continuations) can fork from any point without interference.
 data ScenarioState app = ScenarioState
     { ssConsumed :: !(Set Int)
     -- ^ 'sqNumber's already consumed by 'awaitObservation' waits; the source
@@ -302,6 +305,12 @@ data ScenarioState app = ScenarioState
     -- ^ the journal this state observes (shared with the producing threads)
     , ssDialog :: !DialogState
     -- ^ dialog view folded from the consumed observations
+    , ssActingUser :: !(Maybe UserId)
+    -- ^ the user the user-input steps (e.g. 'LazyCircus.Testing.Bdd.Tg.userSends',
+    -- 'LazyCircus.Testing.Bdd.Tg.userVotesFor') currently act as — set by the
+    -- takes-the-stage steps ('Nothing' = the 'defaultTestUserId'). The ONLY
+    -- non-derived field: it changes when a step sets it, not from observations,
+    -- and survives every 'awaitObservation' (record update).
     }
 
 -- | 'sqNumber' of the highest journal entry consumed so far ('Nothing' when
@@ -311,23 +320,32 @@ data ScenarioState app = ScenarioState
 ssLastConsumed :: ScenarioState app -> Maybe Int
 ssLastConsumed = Set.lookupMax . ssConsumed
 
+-- | The user id the user-input steps act as: 'ssActingUser' when a
+-- takes-the-stage step set it, 'defaultTestUserId' otherwise. Convenience view
+-- — read this instead of pattern-matching 'ssActingUser'.
+actingUserId :: ScenarioState app -> UserId
+actingUserId = fromMaybe defaultTestUserId . ssActingUser
+
 -- | Allocate a fresh journal together with a fresh scenario state observing it.
 -- POST-CONTRACT: The state's 'ssConsumed' is empty (nothing consumed), its
--- journal is empty, and its dialog state is 'emptyDialogState'.
+-- journal is empty, its dialog state is 'emptyDialogState', and it acts as the
+-- default test user ('ssActingUser' is 'Nothing').
 newScenarioState :: IO (ScenarioState app)
 newScenarioState = freshScenarioState <$> newObservationLog
 
 -- | Wrap an existing journal in a fresh scenario state — use this when the
 -- journal is shared (e.g. configured via @tcJournal@) or appended to from
 -- other threads.
--- POST-CONTRACT: The state's 'ssConsumed' is empty (nothing consumed) and its
--- dialog state is 'emptyDialogState'; the journal is not touched.
+-- POST-CONTRACT: The state's 'ssConsumed' is empty (nothing consumed), its
+-- dialog state is 'emptyDialogState' and it acts as the default test user
+-- ('ssActingUser' is 'Nothing'); the journal is not touched.
 freshScenarioState :: ObservationLog app -> ScenarioState app
 freshScenarioState logRef =
     ScenarioState
         { ssConsumed = Set.empty
         , ssLog = logRef
         , ssDialog = emptyDialogState
+        , ssActingUser = Nothing
         }
 
 {- | Wait for the next UNCONSUMED journal entry that satisfies the predicate,

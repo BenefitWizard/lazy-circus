@@ -9,14 +9,25 @@ dialog monad is 'TelegramTestScript' (the @tgTest@ DSL — a parameter-free
 reader over the test runtime with an IO escape), and the threaded state is
 'ScenarioState' (the observation journal's consumed set plus the derived
 dialog view). @Then@ constructors build 'thenDef' entries, @When@
-constructors ('userVotesFor', 'userVotesIn', 'memberVotesFor',
-'memberVotesIn') build 'whenDef' entries, so
+constructors ('userSends', 'memberTakesStage', 'defaultUserTakesStage',
+'userVotesFor', 'userVotesIn', 'memberVotesFor', 'memberVotesIn') build
+'whenDef' entries, so
 document steps — including @And@\/@But@ continuations, which inherit the
 previous step's keyword during parsing — select them. The expected values are
 read from the step text's captured parameters themselves (via
 'LazyCircus.Testing.Bdd.Pattern.lookupParam') and from the step's @| ... |@
 argument table (via 'LazyCircus.Testing.Bdd.Pattern.StepParams'
 @stepParamsTable@), not passed at registration time.
+
+Acting user: the user-named input steps ('userSends', 'userVotesFor',
+'userVotesIn') act as the CURRENT actor — the state's 'actingUserId', i.e.
+the 'LazyCircus.Testing.Updates.defaultTestUserId' until a takes-the-stage
+step ('memberTakesStage' \/ 'defaultUserTakesStage') puts a cast member on
+stage (the state's 'ssActingUser' field; it survives every 'awaitObservation'
+and resets per scenario). The member-named steps ('memberVotesFor'\/
+'memberVotesIn') are explicit shorthands: they always act as the login named
+in their own capture, resolved through
+'LazyCircus.Testing.Updates.userIdForLogin', regardless of the current actor.
 
 Await semantics (one await = one observation): every @Then@ constructor
 except 'botReplyContains' performs ONE 'awaitObservation' whose predicate
@@ -25,9 +36,10 @@ are skipped over and never consumed. A matched 'ObsTgMessage' folds into
 'ssDialog' ('dsLastReply' from the text, 'dsLastKeyboard' from its markup),
 and a matched 'ObsTgPoll' folds its 'PollDigest' into 'dsLastPoll' (what the vote
 steps 'userVotesFor'\/'userVotesIn'\/'memberVotesFor'\/'memberVotesIn' vote
-against — the @user@ pair always as the default test user, the @member@ pair
-as the cast member named in the step's @«@login@»@ capture, resolved through
-'LazyCircus.Testing.Updates.userIdForLogin'). 'botReplyContains' is the
+against — the @user@ pair as the current actor ('actingUserId'), the
+@member@ pair as the cast member named in the step's @«@login@»@ capture,
+resolved through 'LazyCircus.Testing.Updates.userIdForLogin').
+'botReplyContains' is the
 And-continuation: it re-inspects the last consumed entry via
 'peekLastConsumed' — NO wait and NO consumption — asserting on @dsLastReply@
 without moving the cursor.
@@ -46,6 +58,9 @@ module LazyCircus.Testing.Bdd.Tg
     , botReactsTo
     , botDeletesMessage
     , botSendsDocument
+    , userSends
+    , memberTakesStage
+    , defaultUserTakesStage
     , userVotesFor
     , userVotesIn
     , memberVotesFor
@@ -63,6 +78,7 @@ import LazyCircus.Testing.Bdd.Journal
     , PollDigest (..)
     , ScenarioState (..)
     , Sequenced (..)
+    , actingUserId
     , awaitObservation
     , defaultAwaitBudgetUs
     , peekLastConsumed
@@ -76,10 +92,11 @@ import LazyCircus.Testing.TgTest
     , TgTestConfig (..)
     , guardWith
     , sendPollAnswerByUser
+    , sendMessageByUser
     , tgeDescription
     , tgTestWithMocks
     )
-import LazyCircus.Testing.Updates (defaultTestUserId, userIdForLogin)
+import LazyCircus.Testing.Updates (defaultTestChatId, userIdForLogin)
 import Telegram.Bot.API (Update, UserId)
 import Test.Hspec (expectationFailure)
 
@@ -167,8 +184,58 @@ botSendsPoll =
                 let question = fromMaybe "" (lookupParam "$question" params)
                 awaitMatching ("a poll \"" <> question <> "\"") (isPollWith question mExpected) st
 
--- | @the user votes for "$option" in the poll@ — the user votes for exactly
--- the step's quoted capture in the last consumed poll.
+-- | @the user sends "$msg"@ — the CURRENT actor sends a text message in the
+-- default test chat. The canonical user-input step: \"the user\" always means
+-- the state's 'actingUserId' ('defaultTestUserId' until a 'memberTakesStage'
+-- step puts a cast member on stage).
+--
+-- PRE-CONTRACT: The message text appears inside double quotes in the step
+-- text (the pattern's @"$msg"@ span) — the runner matched the step, so the
+-- capture is present.
+-- POST-CONTRACT: One text-message update has been fed to the bot from
+-- 'actingUserId' of the threaded state in 'defaultTestChatId'; the scenario
+-- state passes through unchanged.
+userSends :: StepDef TelegramTestScript c (ScenarioState app) a
+userSends =
+    whenDef "the user sends \"$msg\"" $ \params st -> do
+        let msg = fromMaybe "" (lookupParam "$msg" params)
+        _ <- sendMessageByUser (actingUserId st) defaultTestChatId msg
+        pure (st, Nothing)
+
+-- | @the member "$login" takes the stage@ — every subsequent user-named input
+-- step acts as the named cast member (resolved through
+-- 'LazyCircus.Testing.Updates.userIdForLogin'). The multi-actor switch: one
+-- step changes WHO \"the user\" is, so every input verb stays single-form
+-- instead of sprouting @member<Verb>@ variants.
+--
+-- PRE-CONTRACT: The login (verbatim, typically with its leading @@@) appears
+-- inside double quotes in the step text (the pattern's @"$login"@ span) — the
+-- runner matched the step, so the capture is present.
+-- POST-CONTRACT: 'ssActingUser' of the threaded state is set to the member's
+-- id — 'userSends'\/'userVotesFor'\/'userVotesIn' (and any spec-local step
+-- reading 'actingUserId') act as that member until 'defaultUserTakesStage'
+-- resets it or the scenario ends (a fresh state starts with 'Nothing').
+memberTakesStage :: StepDef TelegramTestScript c (ScenarioState app) a
+memberTakesStage =
+    whenDef "the member \"$login\" takes the stage" $ \params st -> do
+        let login = fromMaybe "" (lookupParam "$login" params)
+        pure (st{ssActingUser = Just (userIdForLogin login)}, Nothing)
+
+-- | @the default user takes the stage@ — resets the acting user to the
+-- 'defaultTestUserId' (clears 'ssActingUser'), undoing a previous
+-- 'memberTakesStage'.
+--
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: 'ssActingUser' of the threaded state is 'Nothing' —
+-- user-named input steps act as the default test user again; the state
+-- passes through otherwise unchanged.
+defaultUserTakesStage :: StepDef TelegramTestScript c (ScenarioState app) a
+defaultUserTakesStage =
+    whenDef "the default user takes the stage" $ \_params st ->
+        pure (st{ssActingUser = Nothing}, Nothing)
+
+-- | @the user votes for "$option" in the poll@ — the CURRENT actor votes for
+-- exactly the step's quoted capture in the last consumed poll.
 --
 -- PRE-CONTRACT: The option text appears inside double quotes in the step text
 -- (the pattern's @"$option"@ span) — the runner matched the step, so the
@@ -177,10 +244,11 @@ botSendsPoll =
 -- explanatory reason otherwise. A table attached to this step is a misuse
 -- ('userVotesIn' owns the table form) and aborts likewise.
 -- POST-CONTRACT: On success one chat-less @poll_answer@ update has been fed
--- to the bot against the consumed poll's id ('pdPollId'), carrying the single
--- option index the capture resolves to in 'pdOptions'; the scenario state
--- passes through unchanged. On an unknown option text the DSL aborts with a
--- guard failure and nothing is fed.
+-- to the bot against the consumed poll's id ('pdPollId') from 'actingUserId'
+-- of the threaded state, carrying the single option index the capture
+-- resolves to in 'pdOptions'; the scenario state passes through unchanged. On
+-- an unknown option text the DSL aborts with a guard failure and nothing is
+-- fed.
 userVotesFor :: StepDef TelegramTestScript c (ScenarioState app) a
 userVotesFor =
     whenDef "the user votes for \"$option\" in the poll" $ \params st ->
@@ -193,7 +261,7 @@ userVotesFor =
                     >> pure (st, Nothing)
             (Nothing, Just digest) -> do
                 let option = fromMaybe "" (lookupParam "$option" params)
-                voteIn digest [option] st
+                voteInAs (actingUserId st) digest [option] st
 
 -- | @the user votes in the poll@ — the user votes for the option texts of the
 -- @| ... |@ table attached to the step (one single-cell row per option), in
@@ -205,10 +273,11 @@ userVotesFor =
 -- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
 -- explanatory reason otherwise.
 -- POST-CONTRACT: On success one chat-less @poll_answer@ update has been fed
--- to the bot against the consumed poll's id ('pdPollId'), carrying the option
--- indexes the table rows resolve to in 'pdOptions', in table order; the
--- scenario state passes through unchanged. On an unknown option text the DSL
--- aborts with a guard failure and nothing is fed.
+-- to the bot against the consumed poll's id ('pdPollId') from 'actingUserId'
+-- of the threaded state, carrying the option indexes the table rows resolve
+-- to in 'pdOptions', in table order; the scenario state passes through
+-- unchanged. On an unknown option text the DSL aborts with a guard failure
+-- and nothing is fed.
 userVotesIn :: StepDef TelegramTestScript c (ScenarioState app) a
 userVotesIn =
     whenDef "the user votes in the poll" $ \params st ->
@@ -222,7 +291,8 @@ userVotesIn =
             (Nothing, Right (Just _)) ->
                 guardWith noPollYetReason False
                     >> pure (st, Nothing)
-            (Just digest, Right (Just options)) -> voteIn digest options st
+            (Just digest, Right (Just options)) ->
+                voteInAs (actingUserId st) digest options st
 
 -- | @the member "$login" votes for "$option" in the poll@ — a named cast
 -- member (NOT the default test user) votes for exactly the step's quoted
@@ -468,15 +538,11 @@ noPollYetReason =
     "no poll has been consumed yet; a poll-consuming step (e.g. 'the bot sends a poll ...') must run first"
 
 -- | Feeds one @poll_answer@ update for the consumed poll's digest from the
--- default test user: resolves each voted option text to its index in the
--- digest's options (guard failure listing the poll's actual options on an
--- unknown text) and sends the ids.
-voteIn :: PollDigest -> [Text] -> ScenarioState app -> TelegramTestScript (ScenarioState app, Maybe a)
-voteIn = voteInAs defaultTestUserId
-
--- | 'voteIn' from a specific user — the engine behind every vote step
--- ('userVotesFor'\/'userVotesIn' pass 'defaultTestUserId', the member pair
--- passes the login's resolved id).
+-- given user: resolves each voted option text to its index in the digest's
+-- options (guard failure listing the poll's actual options on an unknown
+-- text) and sends the ids — the engine behind every vote step
+-- ('userVotesFor'\/'userVotesIn' pass the state's 'actingUserId', the member
+-- pair passes the login's resolved id).
 voteInAs :: UserId -> PollDigest -> [Text] -> ScenarioState app -> TelegramTestScript (ScenarioState app, Maybe a)
 voteInAs userId digest voted st = case mapM (optionIndex (pdOptions digest)) voted of
     Nothing ->

@@ -31,7 +31,7 @@ library dependency of this subpackage only; the core stays hspec-free.
 | `LazyCircus.Testing.Bdd.Gherkin` | pure `parseFeature :: Text -> Either GherkinParseError GherkinFeature`; AST carries line numbers; Outline rows expand at parse time |
 | `LazyCircus.Testing.Bdd.Pattern` | the `Pattern` ADT (`Template` / `Literal`, `IsString`), `matchStep :: Pattern -> Text -> Maybe [(ParamName, ParamValue)]`; quoted spans `"..."` and `«...»` capture strictly quoted values; `StepParams` (captures + the step's argument table), `lookupParam`, `patternSource`, `duplicateParamNames`, `matchAll` (every matching name, input order) |
 | `LazyCircus.Testing.Bdd.Step` | `StepDef m c s a` (actions receive the matched captures plus the step's table, as one `StepParams`), `StepRegistry` with deterministic `matchingDefs` selection (`Literal` first, then `Template` in registration order), `runScenarioSteps`, structural `StepError` values |
-| `LazyCircus.Testing.Bdd.Journal` | `Observation app`, append-only `ObservationLog`, `awaitObservation`, `peekLastConsumed`, `ScenarioState` with the `dsLastPoll` digest |
+| `LazyCircus.Testing.Bdd.Journal` | `Observation app`, append-only `ObservationLog`, `awaitObservation`, `peekLastConsumed`, `ScenarioState` with the `dsLastPoll` digest and the acting user (`ssActingUser` / `actingUserId`) |
 | `LazyCircus.Testing.Bdd.Tg` | ready-made Telegram `When`/`Then` dictionary over the journal (expected values read from captures and step tables via `lookupParam` / `stepParamsTable`; includes the poll and vote steps — the default-user pair and the per-member pair) and the canonical `tgTestBootstrap` |
 | `LazyCircus.Testing.Bdd.Given` | `AppContext app` and Given-phase staging combinators |
 | `LazyCircus.Testing.Bdd.Runner` | `gherkinSpec`: hspec tree, coverage meta-test, ambiguity probe, `@blocked` |
@@ -220,6 +220,34 @@ poll id in a poll→chat registry, acknowledges votes with the voted indexes AND
 voter's user id — the voter-aware ack is what makes the member-vote scenarios
 meaningful) lives in `testing/test/Bdd/PollSpec.hs` — mirror it for your own poll flows.
 
+## The Acting User
+
+Every user-named input step acts as the state's CURRENT actor
+(`actingUserId :: ScenarioState app -> UserId`, `LazyCircus.Testing.Bdd.Journal`):
+`defaultTestUserId` until a takes-the-stage step selects a cast member. The
+switches (library `When` steps):
+
+```gherkin
+When the member "@carol" takes the stage    # every "the user ..." acts as id(@carol)
+And the user sends "привет"                 # fed from carol's id
+And the user votes for "Да" in the poll
+When the default user takes the stage       # back to defaultTestUserId (1001)
+```
+
+- `memberTakesStage` / `defaultUserTakesStage` only change WHO "the user" is —
+  input verbs stay single-form instead of sprouting `member<Verb>` variants. The
+  actor rides in `ssActingUser :: Maybe UserId`, the only non-derived field of
+  `ScenarioState`: it survives every `awaitObservation` (record update) and
+  resets per scenario (`freshScenarioState` seeds `Nothing`).
+- The member-named vote steps (`memberVotesFor` / `memberVotesIn`) are explicit
+  shorthands: they act as the login in their own capture regardless of the
+  current actor. Prefer the switch when several actions follow as the same
+  member; prefer the shorthand for a one-off vote.
+- Spec-local input steps should honor the actor too: read `actingUserId st` and
+  call the `*ByUser` DSL ops (`sendMessageByUser`, `sendDocumentByUser`,
+  `sendKeypressByUser`, ...). The library `userSends` ("the user sends "$msg"")
+  already does.
+
 ## The Runner (`gherkinSpec`)
 
 ```haskell
@@ -277,13 +305,15 @@ declared — staging into an unwired context fails loudly.
 
 `testing/test/Bdd/EchoSmokeSpec.hs` runs an inline feature through `gherkinSpec` against a
 database-free echo app. The registry is a STATIC value shared by every scenario
-(`\_ -> pure echoRegistry`) — nothing is baked in at registration: the When action reads
-the user's words via `lookupParam "$msg"`, the Given staging def keys the canned bytes
-off its own `"$name"` capture, and the library Then-constructors read their expected
-texts from their own captures. The bootstrap is the canonical `tgTestBootstrap
-defaultTgTestConfig (buildEchoAction app)`.
+(`\_ -> pure echoRegistry`) — nothing is baked in at registration: the text-message When
+is the LIBRARY `userSends`, the Given staging def keys the canned bytes off its own
+`"$name"` capture, the one spec-local When (the document upload) reads its target via
+`lookupParam "$file"` and acts as `actingUserId st`, and the library Then-constructors
+read their expected texts from their own captures. The bootstrap is the canonical
+`tgTestBootstrap defaultTgTestConfig (buildEchoAction app)`.
 
-Covered flows: When `the user sends "$msg"` drives `sendMessage`; Then `the bot replies
+Covered flows: When `the user sends "$msg"` (library `userSends`) feeds the text from the
+acting user; Then `the bot replies
 with "$text"` consumes the journaled reply; And `the bot replies with a message
 containing "$frag"` re-inspects the last consumed message without waiting; the scenario
 `echoes twice with different words` runs the same When/Then patterns at two values (the
