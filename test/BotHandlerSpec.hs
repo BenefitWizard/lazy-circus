@@ -25,6 +25,7 @@ import LazyCircus.Testing.Performer
     , OutgoingMessage (..)
     , defaultTestConfig
     , makeMocks
+    , mockPollId
     , readOutgoingMailbox
     , readTgRequests
     , runScenarioProgram
@@ -265,14 +266,14 @@ capturedSendPoll captures = case filter ((== OutSendPoll) . omKind) captures of
         pure (OutgoingMessage OutSendPoll Nothing Nothing Nothing Nothing)
 
 -- | Recover the 'PollId' the Telegram mock assigned to a captured @sendPoll@.
--- The mock derives the id from its message-id counter (@\"poll-\" <> show mid@),
--- so tests must reconstruct it from the capture instead of hardcoding it.
+-- The mock derives the id from its message-id counter via 'mockPollId', so
+-- tests must reconstruct it from the capture instead of hardcoding it.
 -- PRE-CONTRACT: The capture is an 'OutSendPoll' with an assigned 'omMessageId'.
 -- POST-CONTRACT: Returns the same 'PollId' the mock returned to the handler and
 -- the handler registered in the 'PollRegistry'.
 capturedPollId :: OutgoingMessage -> IO PollId
 capturedPollId pollCapture = case omMessageId pollCapture of
-    Just mid -> pure (PollId ("poll-" <> tshow mid))
+    Just mid -> pure (mockPollId mid)
     Nothing -> do
         expectationFailure ("OutSendPoll capture has no assigned message id: " <> show pollCapture)
         pure (PollId "")

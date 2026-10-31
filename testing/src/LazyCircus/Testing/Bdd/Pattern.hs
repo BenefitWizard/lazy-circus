@@ -39,7 +39,7 @@ module LazyCircus.Testing.Bdd.Pattern
     , ParamName
     , ParamValue
       -- * Captured parameters
-    , StepParams
+    , StepParams (..)
     , lookupParam
       -- * Matching
     , matchStep
@@ -73,9 +73,19 @@ type ParamName = Text
 -- without the surrounding quotes.
 type ParamValue = Text
 
--- | Captured step parameters of one matched pattern: name\/value pairs in the
--- order the quoted spans appear in the pattern (as produced by 'matchStep').
-type StepParams = [(ParamName, ParamValue)]
+-- | Everything a matched step passes to its action: the quoted captures of
+-- the pattern plus the @| ... |@ argument table attached to the step in the
+-- document (as parsed by "LazyCircus.Testing.Bdd.Gherkin"). Name it with
+-- 'StepParams' field accessors — 'lookupParam' reads 'stepParamsCaptures'.
+data StepParams = StepParams
+    { stepParamsCaptures :: [(ParamName, ParamValue)]
+      -- ^ name\/value pairs in the order the quoted spans appear in the
+      -- pattern (as produced by 'matchStep')
+    , stepParamsTable    :: Maybe [[Text]]
+      -- ^ rows of the table attached to the step, in document order
+      -- ('Nothing' when the step carries no table)
+    }
+    deriving (Eq, Show)
 
 --------------------------------------------------------------------------------
 -- Pattern inspection
@@ -116,7 +126,7 @@ duplicateParamNames (Template t) = collect [] [] (parseSegments t)
 -- present in params.
 -- POST-CONTRACT: 'Nothing' only for a name the pattern does not contain.
 lookupParam :: ParamName -> StepParams -> Maybe ParamValue
-lookupParam name params = lookup name params
+lookupParam name params = lookup name (stepParamsCaptures params)
 
 --------------------------------------------------------------------------------
 -- Matching

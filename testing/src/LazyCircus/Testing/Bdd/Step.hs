@@ -145,10 +145,10 @@ matchingDefs registry kw text = literalMatches <> templateMatches
     -- | All same-keyword definitions whose pattern matches the text, in
     -- registration order.
     matches =
-        [ (entry, params)
+        [ (entry, StepParams caps Nothing)
         | entry <- registryStepDefs registry
         , stepDefKeyword entry == kw
-        , Just params <- [matchStep (stepDefPattern entry) text]
+        , Just caps <- [matchStep (stepDefPattern entry) text]
         ]
     -- | Exact definitions win over templates: a fully spelled-out step text
     -- is the more specific, intended selection.
@@ -170,7 +170,7 @@ data StepRun a = StepRun
     { stepRunKeyword :: GherkinKeyword          -- ^ resolved keyword of the executed step
     , stepRunText    :: Text                    -- ^ step text with the keyword stripped
     , stepRunLine    :: Int                     -- ^ 1-based source line of the step
-    , stepRunParams  :: [(ParamName, ParamValue)] -- ^ parameters captured by the pattern
+    , stepRunParams  :: StepParams              -- ^ parameters captured by the pattern, plus the step's argument table when the document attached one
     , stepRunValue   :: Maybe a                 -- ^ value emitted by a Dialog step; 'Nothing' for Given steps and silent Dialog steps
     }
     deriving (Eq, Show)
@@ -191,8 +191,9 @@ data StepOutcome c s a = StepOutcome
 -- 'matchingDefs' — 'Literal' matches before 'Template' matches, each class in
 -- registration order — is executed. 'GivenDef' entries
 -- update the context (their 'IO' action is lifted into @m@); 'DialogDef'
--- entries thread the state and may emit a value. Both receive the parameters
--- captured by the matched pattern. A Given appearing after the
+-- entries thread the state and may emit a value. Both receive the matched
+-- pattern's captures plus the step's argument table, as one 'StepParams'
+-- value. A Given appearing after the
 -- first When\/Then of the scenario is a phase violation and aborts with
 -- 'StepGivenAfterDialog'.
 --
@@ -229,7 +230,13 @@ runScenarioSteps registry scenario c0 s0 =
                 pure (Left (mkStepError step StepGivenAfterDialog))
             | otherwise -> case findMatch kw txt of
                 Left reason -> pure (Left (mkStepError step reason))
-                Right (entry, params) -> execute step rest entry params c s dialogStarted values runs
+                Right (entry, params) -> execute step rest entry (withTable step params) c s dialogStarted values runs
+
+    -- | Attaches the document step's argument table to the matched pattern's
+    -- captures: the matcher sees step text only, so the table rides in
+    -- separately (both end up in the action's 'StepParams').
+    withTable :: GherkinStep -> StepParams -> StepParams
+    withTable step params = params{stepParamsTable = gherkinStepTable step}
 
     -- | Executes one matched step and continues with the rest.
     -- POST-CONTRACT: A pattern binding a parameter name more than once fails
@@ -253,7 +260,7 @@ runScenarioSteps registry scenario c0 s0 =
                     (mkStepRun step params result : runs)
 
     -- | Assembles the record of one executed step.
-    mkStepRun :: GherkinStep -> [(ParamName, ParamValue)] -> Maybe a -> StepRun a
+    mkStepRun :: GherkinStep -> StepParams -> Maybe a -> StepRun a
     mkStepRun GherkinStep{gherkinStepKeyword = kw, gherkinStepText = txt, gherkinStepLine = line} params value = StepRun
         { stepRunKeyword = kw
         , stepRunText = txt

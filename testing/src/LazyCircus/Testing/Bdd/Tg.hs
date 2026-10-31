@@ -1,27 +1,32 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 
-{- | Library @Then@-phase step constructors for the Telegram dialog subset of
-the BDD runner — the shared step vocabulary every app registry can reuse.
+{- | Library @When@- and @Then@-phase step constructors for the Telegram
+dialog subset of the BDD runner — the shared step vocabulary every app
+registry can reuse.
 
 The constructors are registry-ready 'StepDef's over the canonical stack: the
 dialog monad is 'TelegramTestScript' (the @tgTest@ DSL — a parameter-free
 reader over the test runtime with an IO escape), and the threaded state is
 'ScenarioState' (the observation journal's consumed set plus the derived
-dialog view). Each constructor builds a 'thenDef' entry, so document steps
-resolved as @Then@ — including @And@\/@But@ continuations, which inherit the
+dialog view). @Then@ constructors build 'thenDef' entries, @When@
+constructors ('userVotesFor', 'userVotesIn') build 'whenDef' entries, so
+document steps — including @And@\/@But@ continuations, which inherit the
 previous step's keyword during parsing — select them. The expected values are
 read from the step text's captured parameters themselves (via
-'LazyCircus.Testing.Bdd.Pattern.lookupParam'), not passed at registration
-time.
+'LazyCircus.Testing.Bdd.Pattern.lookupParam') and from the step's @| ... |@
+argument table (via 'LazyCircus.Testing.Bdd.Pattern.StepParams'
+@stepParamsTable@), not passed at registration time.
 
-Await semantics (one await = one observation): every constructor except
-'botReplyContains' performs ONE 'awaitObservation' whose predicate matches
-ONLY the core @ObsTg*@ constructors — app-specific 'ObsApp' entries are
-skipped over and never consumed. A matched 'ObsTgMessage' folds into
-'ssDialog' ('dsLastReply' from the text, 'dsLastKeyboard' from its markup).
-'botReplyContains' is the And-continuation: it re-inspects the last consumed
-entry via 'peekLastConsumed' — NO wait and NO consumption — asserting on
-@dsLastReply@ without moving the cursor.
+Await semantics (one await = one observation): every @Then@ constructor
+except 'botReplyContains' performs ONE 'awaitObservation' whose predicate
+matches ONLY the core @ObsTg*@ constructors — app-specific 'ObsApp' entries
+are skipped over and never consumed. A matched 'ObsTgMessage' folds into
+'ssDialog' ('dsLastReply' from the text, 'dsLastKeyboard' from its markup),
+and a matched 'ObsTgPoll' folds its 'PollDigest' into 'dsLastPoll' (what
+'userVotesFor'\/'userVotesIn' vote against). 'botReplyContains' is the
+And-continuation: it re-inspects the last consumed entry via
+'peekLastConsumed' — NO wait and NO consumption — asserting on @dsLastReply@
+without moving the cursor.
 
 The module also exports 'tgTestBootstrap', the canonical @tgTest@-shaped
 'LazyCircus.Testing.Bdd.Runner.ScenarioBootstrap': it executes a BDD
@@ -33,9 +38,12 @@ module LazyCircus.Testing.Bdd.Tg
     ( botRepliesWithMessage
     , botReplyContains
     , botRepliesWithKeyboard
+    , botSendsPoll
     , botReactsTo
     , botDeletesMessage
     , botSendsDocument
+    , userVotesFor
+    , userVotesIn
     , tgTestBootstrap
     ) where
 
@@ -44,21 +52,24 @@ import RIO.Text qualified as T
 
 import LazyCircus.Testing.Bdd.Journal
     ( AwaitTimeout (..)
+    , DialogState (..)
     , Observation (..)
-    , ScenarioState
+    , PollDigest (..)
+    , ScenarioState (..)
     , Sequenced (..)
     , awaitObservation
     , defaultAwaitBudgetUs
     , peekLastConsumed
     )
-import LazyCircus.Testing.Bdd.Pattern (lookupParam)
+import LazyCircus.Testing.Bdd.Pattern (StepParams (..), lookupParam)
 import LazyCircus.Testing.Bdd.Runner (ScenarioBootstrap)
-import LazyCircus.Testing.Bdd.Step (StepDef (..), thenDef)
+import LazyCircus.Testing.Bdd.Step (StepDef (..), thenDef, whenDef)
 import LazyCircus.Testing.Performer (Mocks, TestConfig (..))
 import LazyCircus.Testing.TgTest
     ( TelegramTestScript
     , TgTestConfig (..)
     , guardWith
+    , sendPollAnswer
     , tgeDescription
     , tgTestWithMocks
     )
@@ -123,6 +134,87 @@ botRepliesWithKeyboard :: StepDef TelegramTestScript c (ScenarioState app) a
 botRepliesWithKeyboard =
     thenDef "the bot replies with a keyboard" $ \_params ->
         awaitMatching "a reply with a keyboard" isKeyboardReply
+
+-- | @the bot sends a poll "$question"@ — the bot sent a poll whose question
+-- equals the step's quoted capture; a @| ... |@ table attached to the step
+-- pins the full option list (one option per single-cell row).
+--
+-- PRE-CONTRACT: The expected question appears inside double quotes in the
+-- step text (the pattern's @"$question"@ span) — the runner matched the step,
+-- so the capture is present. When a table is attached, every row must carry
+-- exactly one cell (checked BEFORE any waiting — the step aborts with an
+-- explanatory reason otherwise).
+-- POST-CONTRACT: On success exactly one 'ObsTgPoll' with the expected
+-- question (and, when the table pinned the options, exactly those option
+-- texts in order) has been consumed and folded into 'ssDialog' as
+-- 'dsLastPoll' — a subsequent 'userVotesFor'\/'userVotesIn' resolves against
+-- it. When no unconsumed matching poll appears within 'defaultAwaitBudgetUs',
+-- the step aborts with a timeout reason and nothing is consumed.
+botSendsPoll :: StepDef TelegramTestScript c (ScenarioState app) a
+botSendsPoll =
+    thenDef "the bot sends a poll \"$question\"" $ \params st ->
+        case tableOptions (stepParamsTable params) of
+            Left problem -> guardWith problem False >> pure (st, Nothing)
+            Right mExpected -> do
+                let question = fromMaybe "" (lookupParam "$question" params)
+                awaitMatching ("a poll \"" <> question <> "\"") (isPollWith question mExpected) st
+
+-- | @the user votes for "$option" in the poll@ — the user votes for exactly
+-- the step's quoted capture in the last consumed poll.
+--
+-- PRE-CONTRACT: The option text appears inside double quotes in the step text
+-- (the pattern's @"$option"@ span) — the runner matched the step, so the
+-- capture is present. A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise. A table attached to this step is a misuse
+-- ('userVotesIn' owns the table form) and aborts likewise.
+-- POST-CONTRACT: On success one chat-less @poll_answer@ update has been fed
+-- to the bot against the consumed poll's id ('pdPollId'), carrying the single
+-- option index the capture resolves to in 'pdOptions'; the scenario state
+-- passes through unchanged. On an unknown option text the DSL aborts with a
+-- guard failure and nothing is fed.
+userVotesFor :: StepDef TelegramTestScript c (ScenarioState app) a
+userVotesFor =
+    whenDef "the user votes for \"$option\" in the poll" $ \params st ->
+        case (stepParamsTable params, dsLastPoll (ssDialog st)) of
+            (Just _, _) ->
+                guardWith "a table is attached to the vote step; use 'the user votes in the poll' with the options table instead" False
+                    >> pure (st, Nothing)
+            (Nothing, Nothing) ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            (Nothing, Just digest) -> do
+                let option = fromMaybe "" (lookupParam "$option" params)
+                voteIn digest [option] st
+
+-- | @the user votes in the poll@ — the user votes for the option texts of the
+-- @| ... |@ table attached to the step (one single-cell row per option), in
+-- the last consumed poll. The multi-vote form of 'userVotesFor' (a
+-- multi-answer poll votes with all the rows' indexes at once).
+--
+-- PRE-CONTRACT: A table with one single-cell row per voted option is attached
+-- to the step, and a poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: On success one chat-less @poll_answer@ update has been fed
+-- to the bot against the consumed poll's id ('pdPollId'), carrying the option
+-- indexes the table rows resolve to in 'pdOptions', in table order; the
+-- scenario state passes through unchanged. On an unknown option text the DSL
+-- aborts with a guard failure and nothing is fed.
+userVotesIn :: StepDef TelegramTestScript c (ScenarioState app) a
+userVotesIn =
+    whenDef "the user votes in the poll" $ \params st ->
+        case (dsLastPoll (ssDialog st), tableOptions (stepParamsTable params)) of
+            (_, Left problem) ->
+                guardWith problem False
+                    >> pure (st, Nothing)
+            (_, Right Nothing) ->
+                guardWith "attach the options table (one single-cell row per option) to 'the user votes in the poll'" False
+                    >> pure (st, Nothing)
+            (Nothing, Right (Just _)) ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            (Just digest, Right (Just options)) -> voteIn digest options st
 
 -- | @the bot reacts to a message@ — the bot set a reaction (on any message).
 --
@@ -262,3 +354,63 @@ isDeleteObs _ = False
 isDocumentObs :: Observation app -> Bool
 isDocumentObs ObsTgDocument{} = True
 isDocumentObs _ = False
+
+-- | Predicate: a bot poll with the given question and — when the expected
+-- options are pinned ('Just') — exactly those option texts in order.
+isPollWith :: Text -> Maybe [Text] -> Observation app -> Bool
+isPollWith question mExpectedOptions obs = case obs of
+    ObsTgPoll{obsQuestion = q, obsOptions = options} ->
+        q == question && maybe True (== options) mExpectedOptions
+    _ -> False
+
+-- | Extracts the expected poll options from a step table: 'Right Nothing'
+-- when the step carries no table, 'Right' the single cell of every row (one
+-- option per row) when it does, 'Left' an explanation when some row does not
+-- have exactly one non-empty cell.
+tableOptions :: Maybe [[Text]] -> Either Text (Maybe [Text])
+tableOptions Nothing = Right Nothing
+tableOptions (Just rows) = case traverse firstCell rows of
+    Just cells -> Right (Just cells)
+    Nothing -> Left (badPollTable rows)
+  where
+    -- | The row's single cell ('Nothing' unless the row is exactly one
+    -- non-empty cell).
+    firstCell [cell] | not (T.null cell) = Just cell
+    firstCell _ = Nothing
+
+-- | Guard-failure message for a poll table whose rows are not single cells.
+badPollTable :: [[Text]] -> Text
+badPollTable rows =
+    "a poll option table must have exactly one non-empty cell per row (one option per row); got "
+        <> tshow rows
+
+-- | Guard-failure message for a vote step run before any poll was consumed.
+noPollYetReason :: Text
+noPollYetReason =
+    "no poll has been consumed yet; a poll-consuming step (e.g. 'the bot sends a poll ...') must run first"
+
+-- | Feeds one @poll_answer@ update for the consumed poll's digest: resolves
+-- each voted option text to its index in the digest's options (guard failure
+-- listing the poll's actual options on an unknown text) and sends the ids
+-- from the default test user.
+voteIn :: PollDigest -> [Text] -> ScenarioState app -> TelegramTestScript (ScenarioState app, Maybe a)
+voteIn digest voted st = case mapM (optionIndex (pdOptions digest)) voted of
+    Nothing ->
+        guardWith (unknownOptions digest voted) False
+            >> pure (st, Nothing)
+    Just optionIds -> do
+        _ <- sendPollAnswer (pdPollId digest) optionIds
+        pure (st, Nothing)
+
+-- | 0-based index of a text's first occurrence in the option list ('Nothing'
+-- when absent).
+optionIndex :: [Text] -> Text -> Maybe Int
+optionIndex options option = lookup option (zip options [0 ..])
+
+-- | Guard-failure message when a voted option text is not among the consumed
+-- poll's options.
+unknownOptions :: PollDigest -> [Text] -> Text
+unknownOptions digest voted =
+    "the user votes for an option the poll \"" <> pdQuestion digest
+        <> "\" does not offer; poll options: " <> tshow (pdOptions digest)
+        <> ", voted for: " <> tshow voted

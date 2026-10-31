@@ -80,7 +80,7 @@ import Telegram.Bot.API
     , editMessageTextMessageId
     , editMessageTextText
     )
-import Telegram.Bot.API.Types (MessageId (..))
+import Telegram.Bot.API.Types (MessageId (..), PollId (..))
 
 {- | Run an action with a minimal database-free 'DefaultApp' that has one
 Telegram bot (@demo-bot@) registered, so @tgScript "demo-bot"@ effects are
@@ -199,6 +199,18 @@ preCheckoutAnswer =
     ObsTgPreCheckoutAnswer
         { obsQueryId = "pcq-1"
         , obsOk = True
+        }
+
+-- | A fixed poll observation used as the Eq\/Show baseline of the extended
+-- 'ObsTgPoll' shape (message id, poll id and options included).
+demoPoll :: Observation ()
+demoPoll =
+    ObsTgPoll
+        { obsChatId = Just (ChatId 1)
+        , obsMsgId = MessageId 0
+        , obsPollId = PollId "poll-0"
+        , obsQuestion = "Who to invite?"
+        , obsOptions = ["Jugglers", "Acrobats"]
         }
 
 spec :: Spec
@@ -446,8 +458,30 @@ spec = aroundAll withJournalApp $ do
 
         it "Eq distinguishes ObsTgInvoice from other Observation constructors" $ \_app -> do
             starsInvoice `shouldNotBe` tgMsg "Circus Ticket" (MessageId 0)
-            starsInvoice `shouldNotBe` ObsTgPoll{obsChatId = Just (ChatId 1), obsQuestion = "Circus Ticket"}
+            starsInvoice `shouldNotBe` demoPoll
             starsInvoice `shouldNotBe` preCheckoutAnswer
+
+        it "Eq matches equal ObsTgPoll observations" $ \_app -> do
+            demoPoll
+                `shouldBe` ObsTgPoll
+                    { obsChatId = Just (ChatId 1)
+                    , obsMsgId = MessageId 0
+                    , obsPollId = PollId "poll-0"
+                    , obsQuestion = "Who to invite?"
+                    , obsOptions = ["Jugglers", "Acrobats"]
+                    }
+
+        it "Eq distinguishes ObsTgPoll by message id, poll id and options" $ \_app -> do
+            demoPoll `shouldNotBe` demoPoll{obsMsgId = MessageId 1}
+            demoPoll `shouldNotBe` demoPoll{obsPollId = PollId "poll-1"}
+            demoPoll `shouldNotBe` demoPoll{obsOptions = ["Акробаты", "Жонглёры"]}
+
+        it "Show renders ObsTgPoll field-wise" $ \_app -> do
+            show demoPoll
+                `shouldBe` "ObsTgPoll{obsChatId = Just (ChatId 1), obsMsgId = MessageId 0"
+                    <> ", obsPollId = PollId \"poll-0\""
+                    <> ", obsQuestion = \"Who to invite?\""
+                    <> ", obsOptions = [\"Jugglers\",\"Acrobats\"]}"
 
         it "Eq matches equal ObsTgPreCheckoutAnswer observations" $ \_app -> do
             preCheckoutAnswer `shouldBe` ObsTgPreCheckoutAnswer{obsQueryId = "pcq-1", obsOk = True}

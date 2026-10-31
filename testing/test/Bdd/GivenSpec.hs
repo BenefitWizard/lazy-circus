@@ -145,7 +145,7 @@ mkScenario steps = GherkinScenario "test scenario" [] steps 1
 
 -- | Builds a step with an explicit 1-based line number.
 st :: GherkinKeyword -> Int -> Text -> GherkinStep
-st kw line text = GherkinStep kw text line
+st kw line text = GherkinStep kw text line Nothing
 
 -- | UTF-8 bytes of a text literal — the canned download payloads.
 bytes :: Text -> ByteString

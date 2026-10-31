@@ -77,6 +77,7 @@ module LazyCircus.Testing.Performer (
     fireScheduledTimers,
     readCastRequests,
     readCastRequestsOfType,
+    mockPollId,
 )
 where
 
@@ -139,8 +140,8 @@ import RIO.Process (HasProcessContext (..))
 import RIO.Time (NominalDiffTime, getCurrentTime)
 import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
-import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollQuestion, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
-import Telegram.Bot.API.Types (File (..), FileId (..), InputFile (..), MessageId (..), PollId (..))
+import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollOptions, sendPollQuestion, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
+import Telegram.Bot.API.Types (File (..), FileId (..), InputFile (..), MessageId (..), PollId (..), inputPollOptionText)
 
 -- | Response factory used by the Telegram mock to derive a reply from one outgoing request.
 type OnSendMessageRequest = WithImportance SendMessageRequest -> Response Message
@@ -612,13 +613,16 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                                 }
                         )
                         -- journal observation, recorded in the SAME transaction
-                        ( \_mid ->
+                        ( \mid ->
                             ObsTgPoll
                                 { obsChatId = someChatIdToChatId (sendPollChatId req)
+                                , obsMsgId = mid
+                                , obsPollId = mockPollId mid
                                 , obsQuestion = sendPollQuestion req
+                                , obsOptions = map inputPollOptionText (sendPollOptions req)
                                 }
                         )
-                let pid = PollId ("poll-" <> tshow mid)
+                let pid = mockPollId mid
                     msg =
                         TGDefault.defaultMessage
                             { messagePoll = Just TGDefault.defaultPoll{pollId = pid}
@@ -654,6 +658,15 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                 resp <- asks (defaultResponse . tgMock . mocks . app)
                 pure (stampMessageId fresh resp)
             Real -> timedAndLog "Telegram" "SendInvoice" $ TG.sendInvoice req
+
+-- | The deterministic mock 'PollId' of a mocked @sendPoll@: @poll-\<n\>@ for
+-- the incremental 'MessageId' @MessageId n@ the send was assigned (per the
+-- poll-sending plan's D3 decision). Used both for the journaled 'ObsTgPoll'
+-- and for the '(PollId, Message)' the mocked send returns, so the app and
+-- the journal always agree on the id — tests correlating poll answers derive
+-- the id with this function too, never with a hand-rolled projection.
+mockPollId :: MessageId -> PollId
+mockPollId (MessageId n) = PollId ("poll-" <> tshow n)
 
 -- | Project the current 'TgMock' out of the bot-environment-wrapped test environment.
 askTgMock :: TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib app)) TgMock

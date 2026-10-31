@@ -29,10 +29,10 @@ library dependency of this subpackage only; the core stays hspec-free.
 | Module | Responsibility |
 |---|---|
 | `LazyCircus.Testing.Bdd.Gherkin` | pure `parseFeature :: Text -> Either GherkinParseError GherkinFeature`; AST carries line numbers; Outline rows expand at parse time |
-| `LazyCircus.Testing.Bdd.Pattern` | the `Pattern` ADT (`Template` / `Literal`, `IsString`), `matchStep :: Pattern -> Text -> Maybe [(ParamName, ParamValue)]`; quoted spans `"..."` and `«...»` capture strictly quoted values; `patternSource`, `duplicateParamNames`, `matchAll` (every matching name, input order) |
-| `LazyCircus.Testing.Bdd.Step` | `StepDef m c s a` (actions receive the captured `StepParams`), `StepRegistry` with deterministic `matchingDefs` selection (`Literal` first, then `Template` in registration order), `runScenarioSteps`, structural `StepError` values |
-| `LazyCircus.Testing.Bdd.Journal` | `Observation app`, append-only `ObservationLog`, `awaitObservation`, `peekLastConsumed`, `ScenarioState` |
-| `LazyCircus.Testing.Bdd.Tg` | ready-made Telegram `Then` dictionary over the journal (expected values read from captures via `lookupParam`) and the canonical `tgTestBootstrap` |
+| `LazyCircus.Testing.Bdd.Pattern` | the `Pattern` ADT (`Template` / `Literal`, `IsString`), `matchStep :: Pattern -> Text -> Maybe [(ParamName, ParamValue)]`; quoted spans `"..."` and `«...»` capture strictly quoted values; `StepParams` (captures + the step's argument table), `lookupParam`, `patternSource`, `duplicateParamNames`, `matchAll` (every matching name, input order) |
+| `LazyCircus.Testing.Bdd.Step` | `StepDef m c s a` (actions receive the matched captures plus the step's table, as one `StepParams`), `StepRegistry` with deterministic `matchingDefs` selection (`Literal` first, then `Template` in registration order), `runScenarioSteps`, structural `StepError` values |
+| `LazyCircus.Testing.Bdd.Journal` | `Observation app`, append-only `ObservationLog`, `awaitObservation`, `peekLastConsumed`, `ScenarioState` with the `dsLastPoll` digest |
+| `LazyCircus.Testing.Bdd.Tg` | ready-made Telegram `When`/`Then` dictionary over the journal (expected values read from captures and step tables via `lookupParam` / `stepParamsTable`; includes the poll steps) and the canonical `tgTestBootstrap` |
 | `LazyCircus.Testing.Bdd.Given` | `AppContext app` and Given-phase staging combinators |
 | `LazyCircus.Testing.Bdd.Runner` | `gherkinSpec`: hspec tree, coverage meta-test, ambiguity probe, `@blocked` |
 
@@ -61,15 +61,19 @@ library dependency of this subpackage only; the core stays hspec-free.
 
 Supported: `Feature:` with description lines, tags above features and scenarios (carried
 in the AST; the runner acts on `@blocked`), `Scenario:`, `Scenario Outline:` + `Examples:`
-(placeholders `<param>` substitute into steps AND the scenario name; each row becomes its
-own scenario), `And`/`But` (stored in the AST with the RESOLVED keyword), wrapped steps (a
-plain non-keyword line inside a scenario continues the previous step's text — the two
-trimmed texts join with a single space, and the step keeps the line of its first line),
-`#` comments, empty lines.
+(placeholders `<param>` substitute into steps, their tables AND the scenario name; each
+row becomes its own scenario), `And`/`But` (stored in the AST with the RESOLVED keyword),
+wrapped steps (a plain non-keyword line inside a scenario continues the previous step's
+text — the two trimmed texts join with a single space, and the step keeps the line of its
+first line), step argument tables (`| ... |` rows directly after a step attach to it as
+`gherkinStepTable`; rows are consumed greedily, so a plain text line AFTER a table row is
+an error — the table ends the step; no width check for step tables), `#` comments, empty
+lines.
 Errors carry 1-based line numbers (step outside a scenario, `Examples` without a header
-row, `And`/`But` before any `Given`/`When`/`Then`).
+row, `And`/`But` before any `Given`/`When`/`Then`, table row with no preceding step,
+plain line after a step table).
 
-Not supported: docstrings (`"""`) and data tables in steps.
+Not supported: docstrings (`"""`).
 
 Patterns are the `Pattern` ADT: a string literal denotes a `Template`, and a `Literal`
 matches exactly (quotes are ordinary characters there — use it for step texts that
@@ -101,8 +105,10 @@ data StepDef m c s a
   deterministic via `matchingDefs`: `Literal` patterns match FIRST, then `Template`
   patterns, each class in registration order — a fully spelled-out step text always wins
   over competing templates, so no registration-order discipline is required.
-- Captured parameters are delivered to the action as `StepParams` (name/value pairs in
-  the order the quoted spans appear in the pattern); read one with
+- Captured parameters are delivered to the action as a `StepParams` record: the captures
+  (`stepParamsCaptures`, name/value pairs in the order the quoted spans appear in the
+  pattern) plus the step's argument table (`stepParamsTable :: Maybe [[Text]]`, rows in
+  document order, `Nothing` when the step carries no table); read a capture with
   `lookupParam :: ParamName -> StepParams -> Maybe ParamValue` — `Nothing` only for a
   name the pattern does not contain. A pattern binding the same name twice fails the
   step at execution with `StepDuplicateParam`, before the action runs.
@@ -129,7 +135,8 @@ data Observation app
     = ObsTgMessage  { obsChatId :: Maybe ChatId, obsText :: Text
                     , obsMsgId :: MessageId, obsMarkup :: Maybe SomeReplyMarkup }
     | ObsTgDocument { obsChatId :: Maybe ChatId, obsFileId :: Maybe FileId }
-    | ObsTgPoll     { obsChatId :: Maybe ChatId, obsQuestion :: Text }
+    | ObsTgPoll     { obsChatId :: Maybe ChatId, obsMsgId :: MessageId
+                    , obsPollId :: PollId, obsQuestion :: Text, obsOptions :: [Text] }
     | ObsTgInvoice  { obsChatId :: Maybe ChatId, obsTitle :: Text }
     | ObsTgReaction { obsTargetMsgId :: Maybe MessageId }
     | ObsTgEdit     { obsTargetMsgId :: Maybe MessageId, obsNewText :: Text }
@@ -165,6 +172,43 @@ Conventions (all enforced by Haddock contracts and tests):
   `ObsAsyncScheduled` / `ObsTimerScheduled`, described by `obsScenarioDesc`
 - the blessing rule: a new library `Observation` constructor is added only after an
   observation shape has survived at least two scenarios through app hooks
+
+## Telegram Step Dictionary (Polls)
+
+The mocked performer assigns every sent poll the deterministic id
+`PollId "poll-<messageId>"` and journals the full shape — chat, message id, poll id,
+question and option texts (projected from the request) — as `ObsTgPoll`. The dialog
+state folds a consumed poll into `dsLastPoll :: Maybe PollDigest`
+(`pdPollId` / `pdQuestion` / `pdOptions`); messages do NOT invalidate the digest.
+
+Library steps (in `LazyCircus.Testing.Bdd.Tg`, registry-ready):
+
+```gherkin
+When the user sends "/poll"
+Then the bot sends a poll "Кого позвать в шапито?"
+    | Жонглёры    |    # the options table pins the FULL option list,
+    | Акробаты    |    # one single-cell row per option, in order
+    | Дрессировщик |
+When the user votes for "Акробаты" in the poll      # single vote via the quoted capture
+Then the bot replies with "🗳 голос учтён: [1]"
+```
+
+- `botSendsPoll` (`Then`) consumes exactly one `ObsTgPoll` with the expected question;
+  with a table attached it also pins the expected options. Malformed tables (a row that
+  is not exactly one non-empty cell) fail the step BEFORE any waiting.
+- `userVotesFor` (`When`, `the user votes for "$option" in the poll`) resolves the
+  captured option text against the consumed poll's `pdOptions` and feeds one chat-less
+  `poll_answer` update via the `sendPollAnswer` DSL op; a table attached to this step is
+  a misuse (use `userVotesIn`).
+- `userVotesIn` (`When`, `the user votes in the poll`) votes the TABLE rows — the
+  multi-answer form (all rows' indexes in one `poll_answer`).
+- Both vote steps require a poll to have been CONSUMED first (`botSendsPoll` or any
+  await over an `ObsTgPoll`), since they vote against `dsLastPoll`; an option text not
+  among the poll's options fails the step with the actual option list.
+
+A working end-to-end example (bot sends a non-anonymous poll on `/poll`, registers the
+poll id in a poll→chat registry, acknowledges votes with the voted indexes) lives in
+`testing/test/Bdd/PollSpec.hs` — mirror it for your own poll flows.
 
 ## The Runner (`gherkinSpec`)
 
@@ -242,6 +286,8 @@ DB and HTTP are the only always-real sub-languages and the echo never touches th
 
 - Does every feature step match a registry entry (meta-test green) and does the ambiguity
   probe report no unintended collisions?
+- Do step tables follow the consuming step's contract (e.g. the library poll steps
+  require exactly one non-empty cell per row)?
 - Does every pattern bind each parameter name at most once (`StepDuplicateParam` fails
   the step at execution)?
 - Do feature steps quote every parameter value (`"value"` / `«value»`)? An unquoted

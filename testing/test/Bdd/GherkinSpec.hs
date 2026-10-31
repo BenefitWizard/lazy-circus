@@ -35,7 +35,7 @@ spec = do
                             "Drinking"
                             []
                             ["Water is essential", "More notes"]
-                            [GherkinScenario "sip" [] [GherkinStep GivenKeyword "a glass" 6] 5])
+                            [GherkinScenario "sip" [] [GherkinStep GivenKeyword "a glass" 6 Nothing] 5])
 
             it "rejects a Feature line without a name" $
                 parseFeature "Feature:\n" `shouldBe` Left (GherkinMissingFeatureName 1)
@@ -79,9 +79,9 @@ spec = do
                     ]) of
                     Right GherkinFeature{gherkinFeatureScenarios = [s]} ->
                         gherkinScenarioSteps s `shouldBe`
-                            [ GherkinStep GivenKeyword "a user" 3
-                            , GherkinStep WhenKeyword "they act" 4
-                            , GherkinStep ThenKeyword "outcome" 5
+                            [ GherkinStep GivenKeyword "a user" 3 Nothing
+                            , GherkinStep WhenKeyword "they act" 4 Nothing
+                            , GherkinStep ThenKeyword "outcome" 5 Nothing
                             ]
                     other -> expectationFailure ("unexpected parse result: " <> show other)
 
@@ -99,13 +99,13 @@ spec = do
                     ]) of
                     Right GherkinFeature{gherkinFeatureScenarios = [s]} ->
                         gherkinScenarioSteps s `shouldBe`
-                            [ GherkinStep GivenKeyword "a user" 3
-                            , GherkinStep GivenKeyword "another user" 4
-                            , GherkinStep WhenKeyword "they act" 5
-                            , GherkinStep WhenKeyword "again" 6
-                            , GherkinStep WhenKeyword "not twice" 7
-                            , GherkinStep ThenKeyword "outcome" 8
-                            , GherkinStep ThenKeyword "verifiable" 9
+                            [ GherkinStep GivenKeyword "a user" 3 Nothing
+                            , GherkinStep GivenKeyword "another user" 4 Nothing
+                            , GherkinStep WhenKeyword "they act" 5 Nothing
+                            , GherkinStep WhenKeyword "again" 6 Nothing
+                            , GherkinStep WhenKeyword "not twice" 7 Nothing
+                            , GherkinStep ThenKeyword "outcome" 8 Nothing
+                            , GherkinStep ThenKeyword "verifiable" 9 Nothing
                             ]
                     other -> expectationFailure ("unexpected parse result: " <> show other)
 
@@ -141,11 +141,12 @@ spec = do
                             [ GherkinScenario
                                 "wrapped"
                                 []
-                                [ GherkinStep GivenKeyword "a fresh session" 3
+                                [ GherkinStep GivenKeyword "a fresh session" 3 Nothing
                                 , GherkinStep
                                     ThenKeyword
                                     "the bot shows a progress status and rewrites it in place as the work progresses"
                                     4
+                                    Nothing
                                 ]
                                 2
                             ])
@@ -160,7 +161,7 @@ spec = do
                     ]) of
                     Right GherkinFeature
                         { gherkinFeatureScenarios =
-                            [GherkinScenario _ _ [GherkinStep WhenKeyword txt 3] _]
+                            [GherkinScenario _ _ [GherkinStep WhenKeyword txt 3 Nothing] _]
                         } -> txt `shouldBe` "the user sends a message and waits patiently"
                     other -> expectationFailure ("unexpected parse result: " <> show other)
 
@@ -174,7 +175,7 @@ spec = do
                     , "      of water"
                     ]) of
                     Right GherkinFeature{gherkinFeatureScenarios = [s]} ->
-                        s `shouldBe` (GherkinScenario "gaps" [] [GherkinStep GivenKeyword "a glass of water" 3] 2)
+                        s `shouldBe` (GherkinScenario "gaps" [] [GherkinStep GivenKeyword "a glass of water" 3 Nothing] 2)
                     other -> expectationFailure ("unexpected parse result: " <> show other)
 
             it "substitutes outline params into the joined step text" $
@@ -192,7 +193,7 @@ spec = do
                             (GherkinScenario
                                 "o hi"
                                 []
-                                [GherkinStep ThenKeyword "the bot replies with hi twice" 3]
+                                [GherkinStep ThenKeyword "the bot replies with hi twice" 3 Nothing]
                                 2)
                     other -> expectationFailure ("unexpected parse result: " <> show other)
 
@@ -239,7 +240,7 @@ spec = do
                             (GherkinScenario
                                 "S 1"
                                 []
-                                [GherkinStep GivenKeyword "x" 7, GherkinStep ThenKeyword "y" 10]
+                                [GherkinStep GivenKeyword "x" 7 Nothing, GherkinStep ThenKeyword "y" 10 Nothing]
                                 6)
                     other -> expectationFailure ("unexpected parse result: " <> show other)
 
@@ -274,17 +275,17 @@ spec = do
                             [ GherkinScenario
                                 "eating apples 3 times"
                                 []
-                                [ GherkinStep GivenKeyword "I eat 3 apples" 3
-                                , GherkinStep GivenKeyword "I note apples" 4
-                                , GherkinStep ThenKeyword "full" 5
+                                [ GherkinStep GivenKeyword "I eat 3 apples" 3 Nothing
+                                , GherkinStep GivenKeyword "I note apples" 4 Nothing
+                                , GherkinStep ThenKeyword "full" 5 Nothing
                                 ]
                                 2
                             , GherkinScenario
                                 "eating bananas 5 times"
                                 []
-                                [ GherkinStep GivenKeyword "I eat 5 bananas" 3
-                                , GherkinStep GivenKeyword "I note bananas" 4
-                                , GherkinStep ThenKeyword "full" 5
+                                [ GherkinStep GivenKeyword "I eat 5 bananas" 3 Nothing
+                                , GherkinStep GivenKeyword "I note bananas" 4 Nothing
+                                , GherkinStep ThenKeyword "full" 5 Nothing
                                 ]
                                 2
                             ])
@@ -300,7 +301,7 @@ spec = do
                     ]) of
                     Right GherkinFeature{gherkinFeatureScenarios = [s]} -> do
                         gherkinScenarioName s `shouldBe` "O <unknown>"
-                        gherkinScenarioSteps s `shouldBe` [GherkinStep GivenKeyword "x <missing>" 3]
+                        gherkinScenarioSteps s `shouldBe` [GherkinStep GivenKeyword "x <missing>" 3 Nothing]
                     other -> expectationFailure ("unexpected parse result: " <> show other)
 
             it "rejects an Examples block without a header row at the Examples line" $
@@ -341,13 +342,90 @@ spec = do
                     , "      | a |"
                     ])) `shouldBe` Just 4
 
-            it "rejects a table row outside an Examples block" $
+            it "rejects a table row with no preceding step in the scenario" $
                 errLine (parseFeature (T.unlines
                     [ "Feature: R"
                     , "  Scenario: S"
-                    , "    Given x"
                     , "    | a |"
-                    ])) `shouldBe` Just 4
+                    ])) `shouldBe` Just 3
+
+        describe "step argument tables" $ do
+            it "attaches consecutive rows to the most recent step in document order" $
+                case parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario: S"
+                    , "    Given a poll"
+                    , "      | Жонглёры |"
+                    , "      | Акробаты |"
+                    , "    Then check it"
+                    ]) of
+                    Right GherkinFeature{gherkinFeatureScenarios = [s]} ->
+                        gherkinScenarioSteps s `shouldBe`
+                            [ GherkinStep GivenKeyword "a poll" 3 (Just [["Жонглёры"], ["Акробаты"]])
+                            , GherkinStep ThenKeyword "check it" 6 Nothing
+                            ]
+                    other -> expectationFailure ("unexpected parse result: " <> show other)
+
+            it "attaches a table to a wrapped (continued) step" $
+                case parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario: S"
+                    , "    Given a long named poll"
+                    , "      called the circus vote"
+                    , "      | Жонглёры |"
+                    ]) of
+                    Right GherkinFeature{gherkinFeatureScenarios = [s]} ->
+                        gherkinScenarioSteps s `shouldBe`
+                            [ GherkinStep
+                                GivenKeyword
+                                "a long named poll called the circus vote"
+                                3
+                                (Just [["Жонглёры"]])
+                            ]
+                    other -> expectationFailure ("unexpected parse result: " <> show other)
+
+            it "accepts ragged rows in a step table (no width check)" $
+                case parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario: S"
+                    , "    Given a table"
+                    , "      | one | two |"
+                    , "      | uno |"
+                    ]) of
+                    Right GherkinFeature{gherkinFeatureScenarios = [s]} ->
+                        gherkinScenarioSteps s `shouldBe`
+                            [GherkinStep GivenKeyword "a table" 3 (Just [["one", "two"], ["uno"]])]
+                    other -> expectationFailure ("unexpected parse result: " <> show other)
+
+            it "rejects a plain line after a step table (the table ends the step)" $
+                errLine (parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario: S"
+                    , "    Given a poll"
+                    , "      | one |"
+                    , "      trailing text"
+                    ])) `shouldBe` Just 5
+
+            it "substitutes outline params into step-table cells" $
+                case parseFeature (T.unlines
+                    [ "Feature: W"
+                    , "  Scenario Outline: o"
+                    , "    Then the bot sends a poll \"<q>\""
+                    , "      | <a> |"
+                    , "      | <b> |"
+                    , "    Examples:"
+                    , "      | q | a | b |"
+                    , "      | Вопрос | Жонглёры | Акробаты |"
+                    ]) of
+                    Right GherkinFeature{gherkinFeatureScenarios = [s]} ->
+                        gherkinScenarioSteps s `shouldBe`
+                            [ GherkinStep
+                                ThenKeyword
+                                "the bot sends a poll \"Вопрос\""
+                                3
+                                (Just [["Жонглёры"], ["Акробаты"]])
+                            ]
+                    other -> expectationFailure ("unexpected parse result: " <> show other)
 
         describe "error cases" $ do
             it "rejects a Scenario line without a name at its line" $

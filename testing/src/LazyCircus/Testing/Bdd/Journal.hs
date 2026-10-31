@@ -27,6 +27,7 @@ module LazyCircus.Testing.Bdd.Journal
     , AwaitTimeout (..)
     , defaultAwaitBudgetUs
     , DialogState (..)
+    , PollDigest (..)
     , emptyDialogState
     , ScenarioState (..)
     , newScenarioState
@@ -44,7 +45,7 @@ import Control.Concurrent.STM (retry)
 import Data.List (find)
 
 import Telegram.Bot.API (ChatId, SomeReplyMarkup)
-import Telegram.Bot.API.Types (FileId, MessageId)
+import Telegram.Bot.API.Types (FileId, MessageId, PollId)
 
 -- | One observed side effect of a scenario run, expressed in the testing
 -- library's shared vocabulary.
@@ -79,8 +80,17 @@ data Observation app
     | ObsTgPoll
         { obsChatId :: Maybe ChatId
         -- ^ target chat id ('Nothing' for username-targeted sends)
+        , obsMsgId :: MessageId
+        -- ^ incremental mock id assigned to the sent poll (matches the id
+        -- published to the outgoing mailbox for the same effect)
+        , obsPollId :: PollId
+        -- ^ deterministic mock poll id (the same id the mocked @sendPoll@
+        -- returns to the app, so a 'poll_answer' update can be built against it)
         , obsQuestion :: Text
         -- ^ poll question as sent
+        , obsOptions :: [Text]
+        -- ^ answer-option texts as sent, in order (projected from the
+        -- request's input poll options)
         }
     | ObsTgInvoice
         { obsChatId :: Maybe ChatId
@@ -133,8 +143,12 @@ instance Eq app => Eq (Observation app) where
                 && isJust markup1 == isJust markup2
         (ObsTgDocument{obsChatId = chat1, obsFileId = file1}, ObsTgDocument{obsChatId = chat2, obsFileId = file2}) ->
             chat1 == chat2 && file1 == file2
-        (ObsTgPoll{obsChatId = chat1, obsQuestion = question1}, ObsTgPoll{obsChatId = chat2, obsQuestion = question2}) ->
-            chat1 == chat2 && question1 == question2
+        (ObsTgPoll{obsChatId = chat1, obsMsgId = msg1, obsPollId = poll1, obsQuestion = question1, obsOptions = options1}, ObsTgPoll{obsChatId = chat2, obsMsgId = msg2, obsPollId = poll2, obsQuestion = question2, obsOptions = options2}) ->
+            chat1 == chat2
+                && msg1 == msg2
+                && poll1 == poll2
+                && question1 == question2
+                && options1 == options2
         (ObsTgInvoice{obsChatId = chat1, obsTitle = title1}, ObsTgInvoice{obsChatId = chat2, obsTitle = title2}) ->
             chat1 == chat2 && title1 == title2
         (ObsTgReaction reaction1, ObsTgReaction reaction2) -> reaction1 == reaction2
@@ -161,8 +175,13 @@ instance Show app => Show (Observation app) where
                 <> "}"
         ObsTgDocument{obsChatId = chat, obsFileId = file} ->
             "ObsTgDocument{obsChatId = " <> show chat <> ", obsFileId = " <> show file <> "}"
-        ObsTgPoll{obsChatId = chat, obsQuestion = question} ->
-            "ObsTgPoll{obsChatId = " <> show chat <> ", obsQuestion = " <> show question <> "}"
+        ObsTgPoll{obsChatId = chat, obsMsgId = msg, obsPollId = pid, obsQuestion = question, obsOptions = options} ->
+            "ObsTgPoll{obsChatId = " <> show chat
+                <> ", obsMsgId = " <> show msg
+                <> ", obsPollId = " <> show pid
+                <> ", obsQuestion = " <> show question
+                <> ", obsOptions = " <> show options
+                <> "}"
         ObsTgInvoice{obsChatId = chat, obsTitle = title} ->
             "ObsTgInvoice{obsChatId = " <> show chat <> ", obsTitle = " <> show title <> "}"
         ObsTgReaction{obsTargetMsgId = target} ->
@@ -251,11 +270,24 @@ data DialogState = DialogState
     , dsLastKeyboard :: !(Maybe SomeReplyMarkup)
     -- ^ keyboard attached to the last consumed 'ObsTgMessage' ('Nothing'
     -- before the first, or when the message carried no reply markup)
+    , dsLastPoll :: !(Maybe PollDigest)
+    -- ^ digest of the last consumed 'ObsTgPoll' ('Nothing' before the first);
+    -- NOT reset by later messages — messages and polls update their own fields
     }
+
+-- | Everything the dialog view keeps about a consumed poll: the ids a voting
+-- step needs ('pdPollId') plus the question and option texts to resolve a
+-- voted option into its index.
+data PollDigest = PollDigest
+    { pdPollId   :: PollId -- ^ mock poll id assigned to the sent poll
+    , pdQuestion :: Text   -- ^ poll question as sent
+    , pdOptions  :: [Text] -- ^ answer-option texts as sent, in order
+    }
+    deriving (Eq, Show)
 
 -- | Dialog state before anything has been consumed.
 emptyDialogState :: DialogState
-emptyDialogState = DialogState Nothing Nothing
+emptyDialogState = DialogState Nothing Nothing Nothing
 
 -- | Caller-owned consumption state threaded through BDD steps: which journal
 -- entries have already been observed plus a derived view of the dialog. The
@@ -324,7 +356,8 @@ Semantics:
   'AwaitTimeout'. The timeout is the ONLY source of non-determinism.
 * /Dialog/: a matched 'ObsTgMessage' folds into the derived dialog state
   ('dsLastReply' from the message text, 'dsLastKeyboard' from its
-  'obsMarkup'). Other observations leave the dialog untouched. Convention: one
+  'obsMarkup'), and a matched 'ObsTgPoll' folds its 'PollDigest' into
+  'dsLastPoll'. Other observations leave the dialog untouched. Convention: one
   'awaitObservation' on 'ObsTgMessage' corresponds to exactly one bot message.
 
 PRE-CONTRACT: None. (The state may be freshly allocated; the budget is
@@ -395,11 +428,15 @@ peekLastConsumed st = case ssLastConsumed st of
         entries <- readTVarIO (observationLogEntries (ssLog st))
         pure (find ((== lastN) . sqNumber) entries)
 
--- | Fold one matched observation into the derived dialog state. Only
--- 'ObsTgMessage' is interpreted: it sets 'dsLastReply' from the message text
--- and 'dsLastKeyboard' from its 'obsMarkup'. Everything else leaves the
--- dialog untouched.
+-- | Fold one matched observation into the derived dialog state. Two
+-- observation kinds are interpreted: 'ObsTgMessage' sets 'dsLastReply' from
+-- the message text and 'dsLastKeyboard' from its 'obsMarkup'; 'ObsTgPoll'
+-- sets 'dsLastPoll' from the poll's ids, question and options. The two
+-- families update their own fields and leave each other untouched — a
+-- message following a poll does not invalidate the poll digest.
 updateDialog :: DialogState -> Observation app -> DialogState
-updateDialog _ ObsTgMessage{obsText = txt, obsMarkup = markup} =
-    DialogState{dsLastReply = Just txt, dsLastKeyboard = markup}
+updateDialog ds ObsTgMessage{obsText = txt, obsMarkup = markup} =
+    ds{dsLastReply = Just txt, dsLastKeyboard = markup}
+updateDialog ds ObsTgPoll{obsPollId = pid, obsQuestion = question, obsOptions = options} =
+    ds{dsLastPoll = Just (PollDigest pid question options)}
 updateDialog ds _ = ds

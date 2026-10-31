@@ -7,7 +7,8 @@
 -- mailbox (question text, chat id), return a @('PollId', 'Message')@ pair
 -- consistent with the mock's incremental id stamping (with the poll stamped
 -- into the message), and — with journaling enabled via @tcJournal@ — record
--- an 'ObsTgPoll' observation carrying the same chat id and question.
+-- an 'ObsTgPoll' observation carrying the same chat id, question, option
+-- texts and the mock's message\/poll ids.
 --
 -- The final example pins the facade re-export: 'Facade.sendPoll' imported
 -- from "LazyCircus.Scene.Telegram" must be the effect's smart constructor
@@ -32,6 +33,7 @@ import LazyCircus.Testing.Performer
     , OutgoingMessage (..)
     , TestConfig (..)
     , defaultTestConfig
+    , mockPollId
     , readOutgoingMailbox
     , runScenarioProgram
     , runWithDefaultConfig
@@ -44,6 +46,7 @@ import Telegram.Bot.API
     , SendPollRequest
     , SomeChatId (..)
     , defSendPoll
+    , inputPollOptionText
     , messageMessageId
     , messagePoll
     , pollId
@@ -130,7 +133,7 @@ spec = aroundAll withBotTestApp $
             case captures of
                 [OutgoingMessage{omMessageId = Just mid}] -> do
                     mid `shouldBe` MessageId 0
-                    returnedPollId `shouldBe` PollId ("poll-" <> tshow mid)
+                    returnedPollId `shouldBe` mockPollId mid
                     messageMessageId msg `shouldBe` mid
                     case messagePoll msg of
                         Just stampedPoll -> pollId stampedPoll `shouldBe` returnedPollId
@@ -141,15 +144,23 @@ spec = aroundAll withBotTestApp $
                     expectationFailure $
                         "Expected exactly one OutSendPoll capture with an assigned id, got: " <> show captures
 
-        it "journals ObsTgPoll with the chat id and question when tcJournal is set" $ \app -> do
+        it "journals ObsTgPoll with the chat id, question, options and mock ids when tcJournal is set" $ \app -> do
             journal <- newObservationLog :: IO (ObservationLog ())
             let cfg = defaultTestConfig{tcJournal = Just journal}
             (mocks, _) <-
                 runWithDefaultConfig app cfg $
                     runScenarioProgram (evalScript sendPollScenario)
             observed <- readObservations journal
+            let optionTexts = map inputPollOptionText demoPollOptions
             observed
-                `shouldBe` [ObsTgPoll{obsChatId = Just demoChatId, obsQuestion = demoQuestion}]
+                `shouldBe` [ ObsTgPoll
+                                { obsChatId = Just demoChatId
+                                , obsMsgId = MessageId 0
+                                , obsPollId = PollId "poll-0"
+                                , obsQuestion = demoQuestion
+                                , obsOptions = optionTexts
+                                }
+                           ]
             captures <- readOutgoingMailbox mocks
             length captures `shouldBe` 1
 
@@ -166,8 +177,8 @@ spec = aroundAll withBotTestApp $
             messageMessageId secondMsg `shouldBe` MessageId 1
             firstPollId `shouldNotBe` secondPollId
             messageMessageId firstMsg `shouldNotBe` messageMessageId secondMsg
-            firstPollId `shouldBe` PollId ("poll-" <> tshow (messageMessageId firstMsg))
-            secondPollId `shouldBe` PollId ("poll-" <> tshow (messageMessageId secondMsg))
+            firstPollId `shouldBe` mockPollId (messageMessageId firstMsg)
+            secondPollId `shouldBe` mockPollId (messageMessageId secondMsg)
 
         it "sendPoll imported from the LazyCircus.Scene.Telegram facade captures exactly one OutSendPoll" $ \app -> do
             (mocks, _) <- runWithDefaultMocks app $

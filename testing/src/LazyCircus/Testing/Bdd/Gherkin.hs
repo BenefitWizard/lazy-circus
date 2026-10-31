@@ -21,6 +21,12 @@ Supported grammar:
   * steps starting with @Given@, @When@, @Then@, @And@, @But@. @And@ and
     @But@ inherit the previous resolved keyword, and the AST stores only
     resolved keywords ('GherkinKeyword');
+  * step argument tables: one or more @| ... |@ rows directly after a step
+    attach to it as 'gherkinStepTable' (rows in document order, no width
+    check — a step table is column-free data). Rows are consumed greedily,
+    so a plain text line AFTER a table row is an error rather than a
+    continuation; in a @Scenario Outline:@, @\<param\>@ placeholders are
+    substituted into table cells together with the step text;
   * wrapped steps: a plain (non-keyword) line inside a scenario continues
     the text of the scenario's most recent step — the two trimmed texts
     join with a single space, and the step keeps the source line of its
@@ -31,7 +37,7 @@ Supported grammar:
   * full-line comments (first non-space character @#@) and empty lines are
     ignored everywhere, including inside @Examples:@ blocks.
 
-Not supported: step argument tables and doc strings, multiple @Examples:@
+Not supported: doc strings, multiple @Examples:@
 blocks per outline, @Background:@ \/ @Rule:@ sections, localized keywords,
 trailing comments after step text.
 
@@ -72,6 +78,7 @@ data GherkinStep = GherkinStep
     { gherkinStepKeyword :: GherkinKeyword -- ^ resolved keyword; @And@\/@But@ inherit the previous @Given@\/@When@\/@Then@
     , gherkinStepText    :: Text           -- ^ step text with the keyword stripped, trimmed
     , gherkinStepLine    :: Int            -- ^ 1-based source line of the step
+    , gherkinStepTable   :: Maybe [[Text]] -- ^ rows of the @| ... |@ table attached to the step, in document order ('Nothing' when the step carries no table)
     }
     deriving (Eq, Show)
 
@@ -199,18 +206,26 @@ parseFeature input = go emptyState (zip [1 ..] (T.lines input))
             | Just _ <- saExamples sa -> Left (GherkinUnexpected n "Expected a single 'Examples:' block per Scenario Outline")
             | otherwise -> Right st { stScenario = Just sa { saExamples = Just (ExamplesAcc n Nothing []) } }
 
-    -- | Ingests one @| ... |@ row: the first row is the header, the rest are
-    -- data rows checked against the header width.
+    -- | Ingests one @| ... |@ row: inside an open @Examples:@ block the first
+    -- row is the header and the rest are data rows checked against the header
+    -- width; otherwise the row attaches to the open scenario's most recent
+    -- step as its argument table (an error when the scenario has no step yet).
     handleRow :: Int -> [Text] -> PState -> Either GherkinParseError PState
     handleRow n cells st = case stScenario st of
         Nothing -> Left (GherkinUnexpected n "Expected an 'Examples:' block, found a table row")
         Just sa -> case saExamples sa of
-            Nothing -> Left (GherkinUnexpected n "Expected an 'Examples:' block, found a table row")
             Just ea -> case eaHeader ea of
                 Nothing -> Right st { stScenario = Just sa { saExamples = Just ea { eaHeader = Just cells } } }
                 Just header
                     | length cells /= length header -> Left (GherkinRowWidthMismatch n)
                     | otherwise -> Right st { stScenario = Just sa { saExamples = Just ea { eaRows = cells : eaRows ea } } }
+            Nothing -> case saSteps sa of
+                [] -> Left (GherkinUnexpected n "Expected an 'Examples:' block, found a table row")
+                (recent : older) ->
+                    Right
+                        st
+                            { stScenario = Just sa { saSteps = attachTableRow cells recent : older }
+                            }
 
     -- | Appends one step, resolving @And@\/@But@ against the previous keyword.
     handleStep :: Int -> RawKeyword -> Text -> PState -> Either GherkinParseError PState
@@ -222,16 +237,21 @@ parseFeature input = go emptyState (zip [1 ..] (T.lines input))
                 kw <- resolveStep n rkw (stLastKeyword st)
                 Right
                     st
-                        { stScenario = Just sa { saSteps = GherkinStep kw stepText n : saSteps sa }
+                        { stScenario = Just sa { saSteps = GherkinStep kw stepText n Nothing : saSteps sa }
                         , stLastKeyword = Just kw
                         }
 
     -- | Collects a description line before the first scenario, continues the
     -- most recent step of an open scenario (wrapped step), or rejects junk.
+    -- A plain line after the recent step's argument table is an error: the
+    -- table greedily ends the step, so a continuation would be ambiguous.
     handleText :: Int -> Text -> PState -> Either GherkinParseError PState
     handleText n txt st = case stScenario st of
         Just sa
             | Just _ <- saExamples sa -> Left (GherkinUnexpected n ("Expected a new Scenario, found: " <> txt))
+            | (recent : _) <- saSteps sa
+            , isJust (gherkinStepTable recent) ->
+                Left (GherkinUnexpected n ("Expected a table row or a new Step, found: " <> txt))
             | (recent : older) <- saSteps sa ->
                 Right
                     st
@@ -257,7 +277,7 @@ parseFeature input = go emptyState (zip [1 ..] (T.lines input))
         Just sa -> case saExamples sa of
             Nothing
                 | saOutline sa -> Left (GherkinUnexpected (saLine sa) "Expected an 'Examples:' block in the Scenario Outline")
-                | otherwise -> appendScenarios [GherkinScenario (saName sa) (saTags sa) (reverse (saSteps sa)) (saLine sa)] st
+                | otherwise -> appendScenarios [GherkinScenario (saName sa) (saTags sa) (map finishStep (reverse (saSteps sa))) (saLine sa)] st
             Just ea -> case eaHeader ea of
                 Nothing -> Left (GherkinExamplesWithoutHeader (eaLine ea))
                 Just header -> appendScenarios (expandOutline sa header ea) st
@@ -289,20 +309,25 @@ parseFeature input = go emptyState (zip [1 ..] (T.lines input))
     resolveStep n RKBut prev = maybe (Left (GherkinAndButBeforeStep n)) Right prev
 
     -- | Expands an outline scenario into one scenario per @Examples:@ data
-    -- row, substituting @\<param\>@ placeholders in the name and step texts.
-    -- Returns the scenarios in document order.
+    -- row, substituting @\<param\>@ placeholders in the name, step texts and
+    -- step-table cells. Returns the scenarios in document order.
     expandOutline :: ScenarioAcc -> [Text] -> ExamplesAcc -> [GherkinScenario]
     expandOutline sa header ea =
         [ GherkinScenario
-            { gherkinScenarioName = substituteParams (zip header cells) (saName sa)
+            { gherkinScenarioName = substituteParams rowParams (saName sa)
             , gherkinScenarioTags = saTags sa
             , gherkinScenarioSteps =
-                [ step { gherkinStepText = substituteParams (zip header cells) (gherkinStepText step) }
+                [ finishStep
+                    step
+                        { gherkinStepText = substituteParams rowParams (gherkinStepText step)
+                        , gherkinStepTable = fmap (map (map (substituteParams rowParams))) (gherkinStepTable step)
+                        }
                 | step <- reverse (saSteps sa)
                 ]
             , gherkinScenarioLine = saLine sa
             }
         | cells <- reverse (eaRows ea)
+        , let rowParams = zip header cells
         ]
 
     -- | Replaces every @\<param\>@ placeholder with its row value;
@@ -316,6 +341,18 @@ parseFeature input = go emptyState (zip [1 ..] (T.lines input))
 appendContinuation :: Text -> GherkinStep -> GherkinStep
 appendContinuation txt step =
     step{gherkinStepText = T.strip (gherkinStepText step) <> " " <> T.strip txt}
+
+-- | Attaches one table row to a step's argument table. Accumulated steps
+-- (and their rows) are stored in reverse order, so the row is prepended;
+-- 'finishStep' restores document order when the scenario closes.
+attachTableRow :: [Text] -> GherkinStep -> GherkinStep
+attachTableRow cells step =
+    step{gherkinStepTable = Just (cells : fromMaybe [] (gherkinStepTable step))}
+
+-- | Normalizes a step accumulated in reverse order: the attached table rows
+-- are reversed into document order.
+finishStep :: GherkinStep -> GherkinStep
+finishStep step = step{gherkinStepTable = reverse <$> gherkinStepTable step}
 
 --------------------------------------------------------------------------------
 -- Parser state

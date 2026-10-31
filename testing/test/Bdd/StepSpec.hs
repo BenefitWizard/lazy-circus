@@ -18,7 +18,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import LazyCircus.Testing.Bdd.Gherkin
-import LazyCircus.Testing.Bdd.Pattern (Pattern (..), lookupParam)
+import LazyCircus.Testing.Bdd.Pattern (Pattern (..), StepParams (..), lookupParam)
 import LazyCircus.Testing.Bdd.Step
 import Test.Hspec
 
@@ -112,7 +112,7 @@ spec = do
                         Right outcome -> do
                             stepOutcomeValues outcome `shouldBe` ["exact:1"]
                             map stepRunParams (stepOutcomeSteps outcome)
-                                `shouldBe` [[]]
+                                `shouldBe` [StepParams [] Nothing]
                         other -> expectationFailure ("unexpected error: " <> show other)
                     )
                     [captureFirst, exactFirst]
@@ -199,7 +199,7 @@ mkScenario steps = GherkinScenario "test scenario" [] steps 1
 
 -- | Builds a step with an explicit 1-based line number.
 st :: GherkinKeyword -> Int -> Text -> GherkinStep
-st kw line text = GherkinStep kw text line
+st kw line text = GherkinStep kw text line Nothing
 
 -- | A Given action appending @mark@ to the context.
 appendContext :: Text -> Text -> IO Text

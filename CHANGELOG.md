@@ -9,6 +9,25 @@ and this project adheres to the
 ## Unreleased
 
 ### Added
+- Step argument tables in the Gherkin parser: `| ... |` rows directly after a step attach
+  to it as `gherkinStepTable :: Maybe [[Text]]` (rows in document order, no width check;
+  rows are consumed greedily, so a plain text line after a table row is a parse error;
+  Outline `<param>` placeholders substitute into table cells together with the step text).
+- Telegram poll BDD steps in `LazyCircus.Testing.Bdd.Tg`: `botSendsPoll` (Then —
+  consumes one `ObsTgPoll` by question, with an attached options table pinning the full
+  option list), `userVotesFor` (When — one vote via the quoted capture) and
+  `userVotesIn` (When — multi-vote via the options table); both vote steps resolve
+  option texts to indexes against the consumed poll's digest and feed a chat-less
+  `poll_answer` update.
+- `sendPollAnswer` / `sendPollAnswerByUser` in `LazyCircus.Testing.TgTest`: DSL ops
+  feeding a `poll_answer` update against a known `PollId` (mirroring
+  `sendPreCheckoutQueryByUser`).
+- `PollDigest` and `dsLastPoll` in `LazyCircus.Testing.Bdd.Journal`: the dialog state
+  folds a consumed poll (id, question, options) into `dsLastPoll`; messages update only
+  their own fields and never invalidate the digest.
+- Poll smoke (`testing/test/Bdd/PollSpec.hs`): a DB-free inline feature running poll
+  send (with the options table), single vote and table-driven multi-vote through
+  `gherkinSpec` + `tgTestBootstrap` — the blessing ground for the extended `ObsTgPoll`.
 - `StepParams` and `lookupParam` in `LazyCircus.Testing.Bdd.Pattern`: the captured
   parameters of a matched step (name/value pairs in pattern order), delivered to every
   step action; `lookupParam` reads one capture by name.
@@ -33,6 +52,17 @@ and this project adheres to the
   (`echoes twice with different words`).
 
 ### Changed
+- **(Breaking)** `ObsTgPoll` in `LazyCircus.Testing.Bdd.Journal` gained `obsMsgId`,
+  `obsPollId` and `obsOptions` fields (the mocked performer journals the full shape —
+  option texts projected from the request). Update constructors in tests accordingly.
+- **(Breaking)** the mocked `sendPoll` `PollId` is now literally `poll-<n>` for the
+  assigned `MessageId n` (the documented D3 intent): the rule lives in the newly
+  exported `mockPollId` (`LazyCircus.Testing.Performer`); previously `tshow` rendered
+  the constructor name into the id (`poll-MessageId 0`). Tests correlating poll answers
+  must derive the id via `mockPollId` instead of a hand-rolled projection.
+- **(Breaking)** `StepParams` is a record, not a type alias — construct it with
+  `StepParams captures mTable` instead of a bare list (list-literal call sites fail to
+  compile).
 - **(Breaking)** `StepDef` / `givenDef` / `whenDef` / `thenDef` take a `StepParams`
   action slot — captured parameters are delivered to the action instead of being baked
   into the definition at registration. Migrate `givenDef pat (pure . id)` to

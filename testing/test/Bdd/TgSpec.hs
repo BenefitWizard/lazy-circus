@@ -28,7 +28,7 @@ import LazyCircus.Testing.Bdd.Journal
     , newScenarioState
     , readObservations
     )
-import LazyCircus.Testing.Bdd.Pattern (StepParams)
+import LazyCircus.Testing.Bdd.Pattern (ParamName, ParamValue, StepParams (..))
 import LazyCircus.Testing.Bdd.Step (StepDef (..))
 import LazyCircus.Testing.Bdd.Tg
     ( botDeletesMessage
@@ -228,17 +228,17 @@ confirmButton =
 -- 'LazyCircus.Testing.Bdd.Tg' read their expected values from the captures
 -- ('LazyCircus.Testing.Bdd.Pattern.lookupParam'), so a unit test simulates
 -- the runner's match by injecting the captures the definition's pattern
--- names.
+-- names (no step table — none of the tested definitions reads one).
 -- PRE-CONTRACT: The definition comes from 'LazyCircus.Testing.Bdd.Tg' (always
--- a 'DialogDef'); @params@ carries a value for every capture the
+-- a 'DialogDef'); @captures@ carries a value for every capture the
 -- definition's pattern registers.
 thenActionWithParams ::
-    StepParams ->
+    [(ParamName, ParamValue)] ->
     StepDef TelegramTestScript () (ScenarioState app) () ->
     ScenarioState app ->
     TelegramTestScript (ScenarioState app, Maybe ())
-thenActionWithParams params (DialogDef _ _ act) = act params
-thenActionWithParams params (GivenDef _ _) = \st ->
+thenActionWithParams captures (DialogDef _ _ act) = act (StepParams captures Nothing)
+thenActionWithParams captures (GivenDef _ _) = \st ->
     guardWith "library Then definitions are DialogDefs, never GivenDefs" False
         >> pure (st, Nothing)
 

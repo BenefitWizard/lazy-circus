@@ -72,6 +72,8 @@ module LazyCircus.Testing.TgTest (
     sendDocumentAs,
     sendKeypress,
     sendKeypressByUser,
+    sendPollAnswer,
+    sendPollAnswerByUser,
     sendPreCheckoutQueryByUser,
     sendSuccessfulPaymentByUser,
     -- ** Waiting for bot replies
@@ -102,7 +104,7 @@ import RIO.Text qualified as Text
 
 import Telegram.Bot.API (ChatId (..), Update, UserId (..), messageMessageId, updateMessage)
 import Telegram.Bot.API.GettingUpdates (UpdateId, updateUpdateId)
-import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..))
+import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..), PollId)
 import Telegram.Bot.Extra.Headless (feedUpdates, runHeadlessBot)
 
 import LazyCircus.Testing.Performer
@@ -126,6 +128,7 @@ import LazyCircus.Testing.Updates
     , mkDocument
     , mkDocumentUpdate
     , mkFileUpdate
+    , mkPollAnswerUpdate
     , mkPreCheckoutQueryUpdateByUser
     , mkSuccessfulPaymentUpdateByUser
     , mkTextUpdateByUser
@@ -524,6 +527,26 @@ sendKeypressByUser :: UserId -> ChatId -> MessageId -> Text -> TelegramTestScrip
 sendKeypressByUser userId chatId targetMsgId cbData = do
     rt <- ttsAsk
     upd <- liftIO $ mkCallbackQueryUpdate (ttrFactory rt) userId chatId targetMsgId cbData
+    feedAndReturnId rt upd
+
+-- | Vote in a poll from the default test user: the chat-less @poll_answer@
+-- update Telegram delivers when a poll participant picks option(s).
+-- PRE-CONTRACT: 'pollId' must be a poll id the bot actually received from a
+-- mocked @sendPoll@ in this run (the mock assigns @poll-\<messageId\>@ ids, so
+-- poll answers against unknown polls are only visible to handlers that track
+-- them); 'optionIds' are 0-based indexes into the poll's option list.
+-- POST-CONTRACT: Returns the update's 'UpdateId'. The update carries no
+-- @message@ (like 'sendKeypress'), so no 'MessageId' is available.
+sendPollAnswer :: PollId -> [Int] -> TelegramTestScript UpdateId
+sendPollAnswer = sendPollAnswerByUser defaultTestUserId
+
+-- | Vote in a poll from a specific user.
+-- PRE-CONTRACT: Same as 'sendPollAnswer'.
+-- POST-CONTRACT: Same as 'sendPollAnswer'.
+sendPollAnswerByUser :: UserId -> PollId -> [Int] -> TelegramTestScript UpdateId
+sendPollAnswerByUser userId pollId optionIds = do
+    rt <- ttsAsk
+    upd <- liftIO $ mkPollAnswerUpdate (ttrFactory rt) userId pollId optionIds
     feedAndReturnId rt upd
 
 -- | Send a @pre_checkout_query@ from a specific user: the chat-less
