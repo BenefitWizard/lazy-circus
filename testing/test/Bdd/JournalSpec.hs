@@ -46,6 +46,7 @@ import LazyCircus.Testing.Bdd.Journal
     , DialogState (..)
     , Observation (..)
     , ObservationLog
+    , PollDigest (..)
     , ScenarioState (..)
     , Sequenced (..)
     , actingUserId
@@ -171,6 +172,12 @@ tgMsg txt mid =
 isTextReply :: Text -> Observation app -> Bool
 isTextReply txt obs = case obs of
     ObsTgMessage{obsText = t} -> t == txt
+    _ -> False
+
+-- | Predicate matching any 'ObsTgPoll' observation.
+isObsTgPoll :: Observation app -> Bool
+isObsTgPoll obs = case obs of
+    ObsTgPoll{} -> True
     _ -> False
 
 -- | Wait budget for the fast-failing timeout tests: 20 ms, far below any
@@ -487,6 +494,22 @@ spec = aroundAll withJournalApp $ do
                                 obs3 `shouldBe` tgMsg "three" (MessageId 2)
                                 ssConsumed st2 `shouldBe` Set.fromList [1, 2]
                                 ssLastConsumed st2 `shouldBe` Just 2
+
+    describe "poll digest folding (consumed ObsTgPoll -> dsLastPoll)" $ do
+        it "folds the poll's message id into pdMsgId alongside the poll id" $ \_app -> do
+            st0 <- newScenarioState :: IO (ScenarioState ())
+            atomically $ appendObservation (ssLog st0) demoPoll
+            result <- awaitObservation defaultAwaitBudgetUs st0 isObsTgPoll "the demo poll"
+            case result of
+                Left err -> expectationFailure ("expected a match, timed out: " <> show err)
+                Right (_, st1) -> case dsLastPoll (ssDialog st1) of
+                    Nothing -> expectationFailure "expected the consumed poll to fold into dsLastPoll"
+                    Just digest -> do
+                        -- the announcement's message id must surface in the
+                        -- digest: it is what a reply-to-the-announcement step
+                        -- feeds to the reply-aware update builder
+                        pdMsgId digest `shouldBe` MessageId 0
+                        pdPollId digest `shouldBe` PollId "poll-0"
 
     describe "actingUserId (the user the input steps act as)" $ do
         it "defaults a fresh scenario state to the default test user" $ \_app -> do

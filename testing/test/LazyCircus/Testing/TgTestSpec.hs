@@ -11,8 +11,11 @@ with the injected mocks) and echoes it into the chat, so the DSL's reply wait
 proves both directions of the injection: the bot reads the seeded queue of the
 PASSED mocks and the DSL observes the PASSED mocks' outgoing mailbox. A second
 example pins the 'TgTestConfigError' guard to the injected-mocks entry point.
-No live DB and no live Telegram: the app is the DB-free fixture
-'TestSupport.DbFreeApp.mkDbFreeApp' and the performer config is all-mocked.
+A third drives the reply-aware input op 'sendReplyByUser' end-to-end: the fed
+update's @reply_to_message@ must survive the wire format so a handler can read
+the target message id back out of it. No live DB and no live Telegram: the app
+is the DB-free fixture 'TestSupport.DbFreeApp.mkDbFreeApp' and the performer
+config is all-mocked.
 -}
 module LazyCircus.Testing.TgTestSpec (spec) where
 
@@ -49,9 +52,11 @@ import LazyCircus.Testing.TgTest
     , defaultTgTestConfig
     , guardWith
     , sendMessage
+    , sendReplyByUser
     , tgTestWithMocks
     , waitForReply
     )
+import LazyCircus.Testing.Updates (defaultTestChatId, defaultTestUserId)
 import OpenAI.V1.Chat.Completions qualified as Chat
 import OpenAI.V1.Usage (Usage (..))
 import Telegram.Bot.API
@@ -59,10 +64,13 @@ import Telegram.Bot.API
     , SomeChatId (..)
     , Update
     , defSendMessage
+    , messageMessageId
+    , messageReplyToMessage
     , messageText
     , updateMessage
     )
 import Telegram.Bot.API.GettingUpdates (updateChatId)
+import Telegram.Bot.API.Types (MessageId (..))
 
 spec :: Spec
 spec = do
@@ -92,6 +100,18 @@ spec = do
                         } :: TgTestConfig ()
             tgTestWithMocks realTgConfig mocks noBot (pure ())
                 `shouldThrow` \(TgTestConfigError _) -> True
+
+    describe "sendReplyByUser (reply-aware text input)" $ do
+        it "delivers a reply update whose target the bot can read back, returning the user's own message id" $ do
+            mocks <- makeMocks
+            (mailboxes, result) <-
+                tgTestWithMocks defaultTgTestConfig mocks (replyEchoAction app) replyEchoScript
+            case result of
+                Left err -> expectationFailure ("run aborted: " <> show err)
+                Right () -> pure ()
+            -- the echo was consumed from the passed mocks' mailbox (the
+            -- snapshot shares it)
+            mbOutgoing mailboxes `shouldSatisfy` null
 
 --------------------------------------------------------------------------------
 -- Test stack
@@ -149,6 +169,49 @@ seededAnswerScript = do
 -- | A bot driver ignoring every update (used where only the config guard runs).
 noBot :: TestConfig () -> Mocks NoServiceLib -> IO (Update -> IO ())
 noBot _ _ = pure (\_ -> pure ())
+
+-- | The reply-aware sibling of 'aiEchoScenario': a text update carrying a
+-- @reply_to_message@ is acknowledged with the target's message id — the exact
+-- projection a production correction handler performs on the reply target.
+replyEchoScenario :: ChatId -> Integer -> ScenarioProgram Script NoServiceLib ()
+replyEchoScenario chatId targetNum =
+    void $
+        evalScript $
+            tgScript botName $
+                Tg.sendMessage
+                    (defSendMessage (SomeChatId chatId) ("корректировка на сообщении " <> tshow targetNum))
+
+-- | The reply test bot's buildAction: drives 'replyEchoScenario' for updates
+-- carrying a @reply_to_message@ (reading the target id back out of the parsed
+-- update — the wire-format round trip under test); everything else is ignored.
+replyEchoAction
+    :: DefaultApp NoServiceLib
+    -> TestConfig ()
+    -> Mocks NoServiceLib
+    -> IO (Update -> IO ())
+replyEchoAction app cfg mocks =
+    pure $ \update ->
+        case (updateChatId update, updateMessage update) of
+            (Just chatId, Just msg) ->
+                case messageReplyToMessage msg of
+                    Just target -> do
+                        let MessageId targetNum = messageMessageId target
+                        runWithConfig app cfg mocks (runScenarioProgram (replyEchoScenario chatId targetNum))
+                    Nothing -> pure ()
+            _ -> pure ()
+
+-- | The DSL run: reply to a fabricated target as a specific user, then wait
+-- for the bot's echo of the target id. Also pins that the returned 'MessageId'
+-- is the USER's reply message — the fresh runtime factory's first fed update
+-- (id 1), not the target (id 42).
+replyEchoScript :: TelegramTestScript ()
+replyEchoScript = do
+    (_uid, userMsgId) <- sendReplyByUser defaultTestUserId defaultTestChatId (MessageId 42) "+@olga"
+    guardWith
+        "expected the returned MessageId to be the user's own reply, not the target"
+        (userMsgId == MessageId 1)
+    reply <- waitForReply
+    guardWith "expected the bot to echo the reply target" (reply == "корректировка на сообщении 42")
 
 -- | Build a 'Chat.ChatCompletionObject' with a single Assistant choice
 -- carrying the given content text (mirrors test/Bdd/JournalSpec.hs).

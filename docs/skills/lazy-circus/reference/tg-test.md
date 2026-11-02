@@ -181,18 +181,20 @@ of the journal snapshot its verifier receives. The runner satisfies the
 failing `guard` or `waitFor*` short-circuits to `Left`.
 
 **Sending fake user input.** The message-sending ops (`sendMessage`, `sendMessageIn`,
-`sendMessageByUser`, `sendFile`, `sendFileByUser`) return `(UpdateId, MessageId)` — the
-`MessageId` is the sent user message's id, suitable for passing to `waitForReaction` or
-`sendKeypress`. The `sendKeypress*` and `sendPollAnswer*` ops return just `UpdateId`. The
-Stars payment ops split the same way: `sendSuccessfulPaymentByUser` (a chat message)
-returns `(UpdateId, MessageId)`, while `sendPreCheckoutQueryByUser` is chat-less (like
-`sendKeypress*`/`sendPollAnswer*`) and returns just `UpdateId`.
+`sendMessageByUser`, `sendReply`, `sendReplyByUser`, `sendFile`, `sendFileByUser`) return
+`(UpdateId, MessageId)` — the `MessageId` is the sent user message's id, suitable for
+passing to `waitForReaction` or `sendKeypress`. The `sendKeypress*` and `sendPollAnswer*`
+ops return just `UpdateId`. The Stars payment ops split the same way:
+`sendSuccessfulPaymentByUser` (a chat message) returns `(UpdateId, MessageId)`, while
+`sendPreCheckoutQueryByUser` is chat-less (like `sendKeypress*`/`sendPollAnswer*`) and
+returns just `UpdateId`.
 
 | Operation | Input produced |
 |---|---|
 | `sendMessage txt` | text from `defaultTestUserId` in `defaultTestChatId` |
 | `sendMessageIn chatId txt` | text in a specific chat |
 | `sendMessageByUser userId chatId txt` | text from a specific user/chat |
+| `sendReply msgId txt` / `sendReplyByUser userId chatId msgId txt` | a text message whose `reply_to_message` references `msgId` (e.g. a consumed poll digest's `pdMsgId`) — the update Telegram delivers when a user replies to a bot message; the stub carries the target's identity only, and the returned `MessageId` is the user's own reply, not the target |
 | `sendFile fileId` / `sendFileByUser ...` | a document upload (metadata-free) |
 | `sendDocumentByUser userId chatId doc` / `sendDocumentAs fileId name mime size` | a document upload carrying the client-declared `file_name` / `mime_type` / `file_size` (for metadata pre-check tests) |
 | `sendKeypress msgId cbData` / `sendKeypressByUser ...` | a `callback_query` on an inline keyboard |
@@ -236,6 +238,8 @@ DSL signatures (module `LazyCircus.Testing.TgTest`; types from `Telegram.Bot.API
 sendMessage        :: Text -> TelegramTestScript (UpdateId, MessageId)
 sendMessageIn      :: ChatId -> Text -> TelegramTestScript (UpdateId, MessageId)
 sendMessageByUser  :: UserId -> ChatId -> Text -> TelegramTestScript (UpdateId, MessageId)
+sendReply          :: MessageId -> Text -> TelegramTestScript (UpdateId, MessageId)
+sendReplyByUser    :: UserId -> ChatId -> MessageId -> Text -> TelegramTestScript (UpdateId, MessageId)
 sendFile           :: FileId -> TelegramTestScript (UpdateId, MessageId)
 sendFileByUser     :: UserId -> ChatId -> FileId -> TelegramTestScript (UpdateId, MessageId)
 sendDocumentByUser :: UserId -> ChatId -> Document -> TelegramTestScript (UpdateId, MessageId)

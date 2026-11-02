@@ -66,6 +66,8 @@ module LazyCircus.Testing.TgTest (
     sendMessage,
     sendMessageByUser,
     sendMessageIn,
+    sendReply,
+    sendReplyByUser,
     sendFile,
     sendFileByUser,
     sendDocumentByUser,
@@ -132,6 +134,7 @@ import LazyCircus.Testing.Updates
     , mkFileUpdate
     , mkPollAnswerUpdate
     , mkPreCheckoutQueryUpdateByUser
+    , mkReplyUpdateByUser
     , mkSuccessfulPaymentUpdateByUser
     , mkTextUpdateByUser
     , newUpdateFactory
@@ -464,6 +467,25 @@ sendMessageByUser userId chatId txt = do
 -- passing to 'waitForReaction').
 sendMessageIn :: ChatId -> Text -> TelegramTestScript (UpdateId, MessageId)
 sendMessageIn chatId txt = sendMessageByUser defaultTestUserId chatId txt
+
+-- | Send a text message from the default user in the default chat, REPLYING to
+-- the given 'MessageId'; returns the update's 'UpdateId' and the 'MessageId' of
+-- the sent user reply itself (not the target — suitable for passing to
+-- 'waitForReaction').
+sendReply :: MessageId -> Text -> TelegramTestScript (UpdateId, MessageId)
+sendReply = sendReplyByUser defaultTestUserId defaultTestChatId
+
+-- | Send a text message from a specific user in a specific chat, REPLYING to
+-- the given 'MessageId' (e.g. the poll announcement a digest's 'pdMsgId'
+-- identifies); returns the update's 'UpdateId' and the 'MessageId' of the sent
+-- user reply itself (not the target — suitable for passing to
+-- 'waitForReaction'). The @reply_to_message@ stub the update carries holds the
+-- target's identity only; see 'LazyCircus.Testing.Updates.mkReplyUpdateByUser'.
+sendReplyByUser :: UserId -> ChatId -> MessageId -> Text -> TelegramTestScript (UpdateId, MessageId)
+sendReplyByUser userId chatId targetMsgId txt = do
+    rt <- ttsAsk
+    upd <- liftIO $ mkReplyUpdateByUser (ttrFactory rt) userId chatId targetMsgId txt
+    feedAndReturn rt upd
 
 -- | Send a file upload from the default user in the default chat; returns the
 -- update's 'UpdateId' and the 'MessageId' of the sent user message (suitable for

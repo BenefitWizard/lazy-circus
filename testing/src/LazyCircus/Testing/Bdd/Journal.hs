@@ -339,13 +339,15 @@ data DialogState = DialogState
     -- their own fields
     }
 
--- | Everything the dialog view keeps about a consumed poll: the ids a voting
--- step needs ('pdPollId') plus the question and option texts to resolve a
--- voted option into its index, and the observability fields mirrored from the
--- send request — each 'Maybe' honestly reflects \"the request left the field
--- unset\".
+-- | Everything the dialog view keeps about a consumed poll: the ids a voting or
+-- replying step needs ('pdPollId' to build a @poll_answer@ against,
+-- 'pdMsgId' to build a reply-to-the-announcement update against) plus the
+-- question and option texts to resolve a voted option into its index, and the
+-- observability fields mirrored from the send request — each 'Maybe' honestly
+-- reflects \"the request left the field unset\".
 data PollDigest = PollDigest
     { pdPollId      :: PollId                -- ^ mock poll id assigned to the sent poll
+    , pdMsgId       :: MessageId             -- ^ message id of the announcement carrying the poll (mock-assigned; bijective with 'pdPollId' via @mockPollId@)
     , pdQuestion    :: Text                  -- ^ poll question as sent
     , pdOptions     :: [Text]                -- ^ answer-option texts as sent, in order
     , pdThreadId    :: Maybe MessageThreadId -- ^ target forum topic ('sendPollMessageThreadId'), 'Nothing' when unset
@@ -555,12 +557,13 @@ peekLastConsumed st = case ssLastConsumed st of
 updateDialog :: DialogState -> Observation app -> DialogState
 updateDialog ds ObsTgMessage{obsText = txt, obsMarkup = markup} =
     ds{dsLastReply = Just txt, dsLastKeyboard = markup}
-updateDialog ds ObsTgPoll{obsPollId = pid, obsQuestion = question, obsOptions = options, obsThreadId = threadId, obsIsAnonymous = isAnonymous, obsAllowsMultipleAnswers = allowsMultipleAnswers, obsAllowsRevoting = allowsRevoting, obsShuffleOptions = shuffleOptions, obsCloseDate = closeDate} =
+updateDialog ds ObsTgPoll{obsMsgId = msgId, obsPollId = pid, obsQuestion = question, obsOptions = options, obsThreadId = threadId, obsIsAnonymous = isAnonymous, obsAllowsMultipleAnswers = allowsMultipleAnswers, obsAllowsRevoting = allowsRevoting, obsShuffleOptions = shuffleOptions, obsCloseDate = closeDate} =
     ds
         { dsLastPoll =
             Just
                 PollDigest
                     { pdPollId = pid
+                    , pdMsgId = msgId
                     , pdQuestion = question
                     , pdOptions = options
                     , pdThreadId = threadId

@@ -38,7 +38,12 @@ This spec is also the blessing ground for the extended 'ObsTgPoll'
 observation shape (id, poll id, options plus the thread id, anonymity flag,
 the choice flags — multiple answers, re-voting, option shuffling — and the
 close date of the send request in the shared journal): the full shape
-survives the scenarios below, satisfying the journal's blessing rule.
+survives the scenarios below, satisfying the journal's blessing rule. The
+digest's 'pdMsgId' (the announcement's message id) is proven by the
+correction-reply scenarios: a spec-local When step replies to the
+announcement through it ('LazyCircus.Testing.TgTest.sendReplyByUser'), the
+bot resolves the reply target back to the poll, and a reply to any other
+message is ignored — journal silence asserted by a dedicated verifier.
 
 Coverage: (1) a poll send observed with question AND options from the step
 table; (2) a single default-user vote resolved through the consumed poll's
@@ -50,11 +55,15 @@ THEIR user ids — proving per-voter identity survives the round trip; (5)
 the acting-user mechanism: 'memberTakesStage' redirects every subsequent
 user-named step (the @the user votes ...@ form here) to the member and
 'defaultUserTakesStage' hands the stage back — the voter-aware ack proves
-both hops end-to-end; (6) the observability fields — the @\/poll@ scenario
-pins @Just@-values via the publicness step plus digest pins, the
-@\/anonpoll@ scenario pins the explicit @Just True@ and the honest
-@Nothing@s; (7) the publicness steps' refusal before a poll is consumed
-(the poll IS journaled, just not consumed); (8) the choice-flag
+both hops end-to-end; (6) a member's correction reply to the announcement —
+fed as a reply update against the digest's 'pdMsgId', resolved by the bot
+through the poll registry, acknowledged with the resolved poll id — and its
+negative twin: a correction reply to an UNRELATED message id is ignored
+(zero acknowledgement messages in the journal); (7) the observability
+fields — the @\/poll@ scenario pins @Just@-values via the publicness step
+plus digest pins, the @\/anonpoll@ scenario pins the explicit @Just True@
+and the honest @Nothing@s; (8) the publicness steps' refusal before a poll
+is consumed (the poll IS journaled, just not consumed); (9) the choice-flag
 observability — the @\/fancypoll@ scenario pins the explicit @Just True@
 shuffle\/re-vote\/multiple-answers flags through the choice-step sextet and
 digest pins, the @\/plainpoll@ scenario pins their explicit @Just False@
@@ -85,7 +94,8 @@ import LazyCircus.Testing.Bdd.Runner
     , expectScenarioSuccess
     , gherkinSpec
     )
-import LazyCircus.Testing.Bdd.Step (StepDef, StepOutcome (..), givenDef, mkRegistry, thenDef)
+import LazyCircus.Testing.Bdd.Pattern (lookupParam)
+import LazyCircus.Testing.Bdd.Step (StepDef, StepOutcome (..), givenDef, mkRegistry, thenDef, whenDef)
 import LazyCircus.Testing.Bdd.Tg
     ( botRepliesWithMessage
     , botSendsPoll
@@ -117,10 +127,11 @@ import LazyCircus.Testing.TgTest
     , TgTestConfig (..)
     , defaultTgTestConfig
     , guardWith
+    , sendReplyByUser
     , tgeDescription
     , tgTestWithMocks
     )
-import LazyCircus.Testing.Updates (defaultTestUserId, userIdForLogin)
+import LazyCircus.Testing.Updates (defaultTestChatId, defaultTestUserId, userIdForLogin)
 import RIO
 import RIO.HashMap qualified as HM
 import RIO.Text qualified as T
@@ -133,6 +144,8 @@ import Telegram.Bot.API
     , UserId (..)
     , defSendMessage
     , defSendPoll
+    , messageMessageId
+    , messageReplyToMessage
     , messageText
     , pollAnswerOptionIds
     , pollAnswerPollId
@@ -146,7 +159,7 @@ import Telegram.Bot.API
     , updateMessage
     , userId
     )
-import Telegram.Bot.API.Types (MessageThreadId (..), PollId (..))
+import Telegram.Bot.API.Types (Message, MessageId (..), MessageThreadId (..), PollId (..))
 import Telegram.Bot.API.GettingUpdates (updateChatId, updatePollAnswer)
 import Test.Hspec
 import TestSupport.DbFreeApp (mkDbFreeApp)
@@ -166,6 +179,12 @@ spec = do
             (\_ -> pure pollStepRegistry)
             (tgTestBootstrap defaultTgTestConfig (buildPollAction app))
             pollVerifier
+    describe "Poll correction reply ignoring (feature -> gherkinSpec -> poll bot, no PostgreSQL)" $
+        gherkinSpec
+            (FeatureInline "poll reply ignoring feature" replyIgnoredFeature)
+            (\_ -> pure pollStepRegistry)
+            (tgTestBootstrap defaultTgTestConfig (buildPollAction app))
+            replyIgnoredVerifier
     describe "Poll publicness refusal (feature -> gherkinSpec -> guard failure, no PostgreSQL)" $ do
         refusalReason <- runIO (newIORef (Nothing :: Maybe Text))
         gherkinSpec
@@ -256,14 +275,54 @@ memberBob = "@bob"
 memberCarol :: Text
 memberCarol = "@carol"
 
+-- | The @sensei@ cast member of the correction-reply scenarios (the club
+-- instructor adjusting attendance by replying to the announcement).
+memberSensei :: Text
+memberSensei = "@sensei"
+
+-- | The correction the reply scenarios carry (a @+login@ attendance
+-- adjustment).
+correctionText :: Text
+correctionText = "+@olga"
+
+-- | The message id the mock assigns to a scenario's single poll
+-- announcement: fresh mocks per scenario and the poll is the bot's FIRST side
+-- effect, so the assignment is deterministic.
+announcementMsgId :: MessageId
+announcementMsgId = MessageId 0
+
+-- | The mock-assigned poll id of an announcement message — bijective with the
+-- message id through the mock's @poll-<message id>@ derivation (the same rule
+-- 'pdPollId' of a digest with 'pdMsgId' @n@ follows). The feature's expected
+-- acknowledgement goes through it, so the pin and the mock's id assignment
+-- stay in sync by construction.
+mockPollIdOf :: MessageId -> PollId
+mockPollIdOf (MessageId n) = PollId ("poll-" <> tshow n)
+
+-- | A message id no scenario announcement ever carries: the mock's message-id
+-- counter starts at 0 per scenario (fresh mocks) and a scenario journals a
+-- handful of bot messages at most.
+unrelatedMsgId :: MessageId
+unrelatedMsgId = MessageId 999
+
+-- | Renders the correction acknowledgement for a correction text and the poll
+-- id the reply target resolved to — the single projection the bot's reply and
+-- the feature's expected texts both go through, so they stay in sync by
+-- construction.
+correctionAckText :: Text -> PollId -> Text
+correctionAckText correction (PollId pollIdText) =
+    "✅ корректировка учтена: " <> correction <> " на " <> pollIdText
+
 -- | The smoke's feature document: a poll send observed with its option
 -- table, a single vote acknowledged by index and voter, a table-driven
 -- multi-vote acknowledged by both indexes and the voter, two cast members
 -- voting as themselves (single-option and table member-vote forms)
 -- acknowledged with THEIR voter ids, the acting-user switch proven
 -- end-to-end (a member takes the stage — @the user ...@ steps act as them;
--- the default user takes it back), the two observability scenarios (a
--- public poll pinned to the announcement topic; an anonymous poll leaving
+-- the default user takes it back), a correction reply to the announcement
+-- acknowledged with the poll id the reply target resolved to (the reply
+-- rides 'pdMsgId' of the consumed digest), the two observability scenarios
+-- (a public poll pinned to the announcement topic; an anonymous poll leaving
 -- thread and close date unset), and the two choice-flag scenarios (a
 -- @\/fancypoll@ with every choice flag explicitly @True@; a @\/plainpoll@
 -- with every choice flag explicitly @False@).
@@ -328,6 +387,17 @@ pollFeature =
             , "    When the default user takes the stage"
             , "    And the user votes for \"" <> (pollOptionTexts !! 1) <> "\" in the poll"
             , "    Then the bot replies with \"" <> voteAckText defaultTestUserId [pollOptionTexts !! 1] <> "\""
+            ]
+            ++ [ ""
+               , "  Scenario: a member's correction reply to the announcement is acknowledged"
+               , "    Given the poll bot is awake"
+               , "    When the user sends \"/poll\""
+               , "    Then the bot sends a poll \"" <> pollQuestion <> "\""
+               ]
+            ++ map optionRow pollOptionTexts
+            ++
+            [ "    When the member \"" <> memberSensei <> "\" replies \"" <> correctionText <> "\" to the poll announcement"
+            , "    Then the bot replies with \"" <> correctionAckText correctionText (mockPollIdOf announcementMsgId) <> "\""
             ]
             ++ [ ""
                , "  Scenario: sends a public poll pinned to the announcement topic"
@@ -506,6 +576,55 @@ digestPinsPlainChoiceSettings =
                     (pdShuffleOptions digest == Just False)
                 pure (st, Nothing)
 
+-- | @the member "$login" replies "$msg" to the poll announcement@ — an
+-- in-spec When step (deliberately NOT library vocabulary: a consumer's
+-- adjustment steps are domain-phrased). The member replies to the LAST
+-- CONSUMED poll's announcement through the digest's 'pdMsgId' — the exact
+-- resolution a production correction handler performs on
+-- @reply_to_message@: the reply target IS the announcement's message.
+--
+-- PRE-CONTRACT: Both captures appear inside double quotes in the step text
+-- (the pattern's @"$login"@ / @"$msg"@ spans — the runner matched the step,
+-- so the captures are present). A poll has been consumed by a previous step
+-- (e.g. 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts
+-- with an explanatory reason otherwise.
+-- POST-CONTRACT: On success one text update whose @reply_to_message@
+-- references 'pdMsgId' of the consumed digest has been fed to the bot as the
+-- member ('LazyCircus.Testing.Updates.userIdForLogin'); the scenario state
+-- passes through unchanged.
+memberRepliesToAnnouncement :: StepDef TelegramTestScript c (ScenarioState app) a
+memberRepliesToAnnouncement =
+    whenDef "the member \"$login\" replies \"$msg\" to the poll announcement" $ \params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noConsumedPollReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                let login = fromMaybe "" (lookupParam "$login" params)
+                    msg = fromMaybe "" (lookupParam "$msg" params)
+                _ <- sendReplyByUser (userIdForLogin login) defaultTestChatId (pdMsgId digest) msg
+                pure (st, Nothing)
+
+-- | @the member "$login" replies "$msg" to an unrelated message@ — the
+-- negative twin of 'memberRepliesToAnnouncement': the reply targets
+-- 'unrelatedMsgId', a message id no announcement ever carries, so a correct
+-- driver resolves nothing and stays silent. The ignoring itself is asserted
+-- by the reply-ignored feature's VERIFIER (journal silence), not by a Then
+-- step — a \"bot stays silent\" wait would have to be timeout-based.
+--
+-- PRE-CONTRACT: Both captures appear inside double quotes in the step text
+-- (the runner matched the step, so the captures are present).
+-- POST-CONTRACT: One text update whose @reply_to_message@ references
+-- 'unrelatedMsgId' has been fed to the bot as the member; the scenario state
+-- passes through unchanged.
+memberRepliesToUnrelatedMessage :: StepDef TelegramTestScript c (ScenarioState app) a
+memberRepliesToUnrelatedMessage =
+    whenDef "the member \"$login\" replies \"$msg\" to an unrelated message" $ \params st -> do
+        let login = fromMaybe "" (lookupParam "$login" params)
+            msg = fromMaybe "" (lookupParam "$msg" params)
+        _ <- sendReplyByUser (userIdForLogin login) defaultTestChatId unrelatedMsgId msg
+        pure (st, Nothing)
+
 -- | Guard-failure message when the digest-pin steps run before any poll was
 -- consumed.
 noConsumedPollReason :: Text
@@ -539,6 +658,8 @@ pollStepRegistry = mkRegistry
     , userVotesIn
     , memberVotesFor
     , memberVotesIn
+    , memberRepliesToAnnouncement
+    , memberRepliesToUnrelatedMessage
     , botRepliesWithMessage
     ]
 
@@ -557,6 +678,50 @@ pollVerifier scenario outcome observations = do
     unless (length (filter isPoll observations) == 1 && all isKnownKind observations) $
         expectationFailure $
             "expected exactly one journaled poll (plus reply messages only), got: " <> show observations
+
+--------------------------------------------------------------------------------
+-- The reply-ignoral feature (a correction reply to a non-announcement)
+--------------------------------------------------------------------------------
+
+-- | The reply-ignoral feature: the member replies to a message id no
+-- announcement ever carries, so a correct driver resolves the target through
+-- the poll registry, finds nothing and STAYS SILENT. The silence IS the
+-- assertion: the verifier requires the journal to hold exactly the one poll
+-- and not a single message — no Then step could express \"the bot said
+-- nothing\" without a timeout-based negative wait.
+replyIgnoredFeature :: Text
+replyIgnoredFeature =
+    T.unlines $
+        [ "Feature: Poll correction reply ignoring"
+        , ""
+        , "  Scenario: a correction reply to another message is ignored"
+        , "    Given the poll bot is awake"
+        , "    When the user sends \"/poll\""
+        , "    Then the bot sends a poll \"" <> pollQuestion <> "\""
+        ]
+            ++ map optionRow pollOptionTexts
+            ++
+            [ "    When the member \"" <> memberSensei <> "\" replies \"" <> correctionText <> "\" to an unrelated message"
+            ]
+
+-- | Verifier: the scenario ran to success and the journal holds EXACTLY the
+-- one poll — not a single 'ObsTgMessage': the unrelated correction reply was
+-- ignored (a wrong driver would have acknowledged it into the journal).
+replyIgnoredVerifier :: ScenarioVerifier ()
+replyIgnoredVerifier scenario outcome observations = do
+    expectScenarioSuccess scenario outcome observations
+    let isPoll ObsTgPoll{} = True
+        isPoll _ = False
+        isMessage ObsTgMessage{} = True
+        isMessage _ = False
+    unless (length (filter isPoll observations) == 1) $
+        expectationFailure $
+            "expected exactly one journaled poll, got: " <> show observations
+    case filter isMessage observations of
+        [] -> pure ()
+        messages ->
+            expectationFailure $
+                "expected the correction reply to an unrelated message to be ignored, got: " <> show messages
 
 --------------------------------------------------------------------------------
 -- The publicness refusal feature (green example for a refusing scenario)
@@ -676,7 +841,9 @@ lookupSpecPollChat registry (PollId pollIdText) =
 -- substituted. The chat-less @poll_answer@ update is dispatched BEFORE the
 -- chat-id gate — exactly like the demo bot's @runUpdate@ — and the chat the
 -- poll belongs to is recovered from the 'SpecPollRegistry' the poll send
--- registered. A fresh registry is created per scenario run.
+-- registered. A text message carrying a @reply_to_message@ is dispatched as
+-- a correction reply ('correctionReplyDriver'); only plain text falls through
+-- to the command branches. A fresh registry is created per scenario run.
 -- PRE-CONTRACT: @mocks@ must be the 'Mocks' set the executor wired the
 -- runtime with (the runner-owned ones), so the bot's outgoing poll and
 -- replies land in the observed mailbox\/journal.
@@ -701,19 +868,24 @@ buildPollAction app cfg mocks = do
                         runWithConfig app cfg mocks $
                             runScenarioProgram (voteAckScenario chatId (userId voter) (pollAnswerOptionIds pa))
                     _ -> pure ()
-            Nothing -> case (updateChatId update, updateMessage update >>= messageText) of
-                (Just chatId, Just "/poll") ->
-                    runWithConfig app cfg mocks $
-                        runScenarioProgram (sendPollScenario polls chatId)
-                (Just chatId, Just "/anonpoll") ->
-                    runWithConfig app cfg mocks $
-                        runScenarioProgram (anonPollScenario polls chatId)
-                (Just chatId, Just "/fancypoll") ->
-                    runWithConfig app cfg mocks $
-                        runScenarioProgram (fancyPollScenario polls chatId)
-                (Just chatId, Just "/plainpoll") ->
-                    runWithConfig app cfg mocks $
-                        runScenarioProgram (plainPollScenario polls chatId)
+            Nothing -> case (updateChatId update, updateMessage update) of
+                (Just chatId, Just msg) -> case messageReplyToMessage msg of
+                    Just target ->
+                        correctionReplyDriver polls app cfg mocks (messageText msg) target
+                    Nothing -> case messageText msg of
+                        Just "/poll" ->
+                            runWithConfig app cfg mocks $
+                                runScenarioProgram (sendPollScenario polls chatId)
+                        Just "/anonpoll" ->
+                            runWithConfig app cfg mocks $
+                                runScenarioProgram (anonPollScenario polls chatId)
+                        Just "/fancypoll" ->
+                            runWithConfig app cfg mocks $
+                                runScenarioProgram (fancyPollScenario polls chatId)
+                        Just "/plainpoll" ->
+                            runWithConfig app cfg mocks $
+                                runScenarioProgram (plainPollScenario polls chatId)
+                        _ -> pure ()
                 _ -> pure ()
 
 -- | The @\/poll@ scenario: sends a NON-anonymous poll (anonymous polls never
@@ -797,3 +969,38 @@ voteAckScenario chatId voterId optionIds =
         evalScript $
             tgScript pollBotName $
                 Tg.sendMessage (defSendMessage (SomeChatId chatId) (voteAckBody voterId optionIds))
+
+-- | Drive a correction reply: resolve the target message id to the poll the
+-- mock assigned it ('mockPollIdOf' — the announcement's message id and its
+-- poll id are bijective) and acknowledge the correction in the chat the poll
+-- was sent to. An unresolvable target (a reply to anything but an
+-- announcement) is IGNORED — no reply, no journal entry — the exact
+-- \"reply on the announcement finds the session by the poll's message\"
+-- resolution a production adjustment handler rides on.
+correctionReplyDriver
+    :: SpecPollRegistry
+    -> DefaultApp NoServiceLib
+    -> TestConfig ()
+    -> Mocks NoServiceLib
+    -> Maybe Text
+    -> Message
+    -> IO ()
+correctionReplyDriver polls app cfg mocks correction target = do
+    let resolvedId = mockPollIdOf (messageMessageId target)
+    mChatId <- lookupSpecPollChat polls resolvedId
+    case (mChatId, correction) of
+        (Just chatId, Just txt) ->
+            runWithConfig app cfg mocks $
+                runScenarioProgram (correctionAckScenario chatId txt resolvedId)
+        _ -> pure ()
+
+-- | The correction-acknowledgement scenario: replies to the poll's chat with
+-- the correction text and the poll id the reply target resolved to (the text
+-- the feature's @Then@ asserts, through the shared 'correctionAckText'
+-- projection).
+correctionAckScenario :: ChatId -> Text -> PollId -> ScenarioProgram Script NoServiceLib ()
+correctionAckScenario chatId correction resolvedId =
+    void $
+        evalScript $
+            tgScript pollBotName $
+                Tg.sendMessage (defSendMessage (SomeChatId chatId) (correctionAckText correction resolvedId))

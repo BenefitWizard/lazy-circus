@@ -39,6 +39,7 @@ module LazyCircus.Testing.Updates (
     -- * Stateful builders (incremental update_id)
     mkTextUpdateByUser,
     mkTextUpdateIn,
+    mkReplyUpdateByUser,
     mkFileUpdate,
     mkDocumentUpdate,
     mkCallbackQueryUpdate,
@@ -207,6 +208,24 @@ mkTextUpdateIn :: UpdateFactory -> ChatId -> Text -> IO Update
 mkTextUpdateIn factory chatId txt =
     mkTextUpdateByUser factory defaultTestUserId chatId txt
 
+-- | Build a text-message 'Update' from a specific user in a specific chat,
+-- replying to the given 'MessageId': the produced @message.reply_to_message@
+-- references the target message the same way a real Telegram client reports a
+-- reply. The embedded @reply_to_message@ stub carries identity only
+-- (@message_id@, @date@, @chat@) with no text or media — mirroring Telegram,
+-- which never nests a further @reply_to_message@ inside it — so handlers must
+-- resolve the reply target by message id, never by the stub's content.
+-- PRE-CONTRACT: @targetMsgId@ must identify a message in @chatId@ (the stub
+-- mirrors the chat so chat-based dispatch stays consistent).
+-- POST-CONTRACT: Returns a valid 'Update' with a fresh @update_id@ whose
+-- @message.reply_to_message.message_id@ equals the supplied 'MessageId' and
+-- whose @message.text@ equals the supplied text, or 'error' if the constructed
+-- JSON fails to parse (a bug in this helper).
+mkReplyUpdateByUser :: UpdateFactory -> UserId -> ChatId -> MessageId -> Text -> IO Update
+mkReplyUpdateByUser factory userId chatId (MessageId msgIdNum) txt =
+    buildUpdate factory $ \uid ->
+        replyMessagePayload uid userId chatId msgIdNum txt
+
 -- | Build a document-message 'Update' (a file upload) from a specific user/chat,
 -- carrying ONLY the file id (no client-declared metadata). The metadata-free
 -- sibling of 'mkDocumentUpdate'; see there when a scenario pre-checks
@@ -323,6 +342,28 @@ textMessagePayload uid (UserId userNum) (ChatId chatNum) txt =
             , "date" .= (0 :: Int)
             , "from" .= userObject userNum
             , "chat" .= chatObject chatNum
+            , "text" .= txt
+            ]
+        ]
+
+-- | JSON for a private-chat text message that replies to a prior message,
+-- wrapped in an 'Update'. The @reply_to_message@ stub carries identity only
+-- (message id, date, chat) — no text or media — which is all a handler needs
+-- to resolve the reply target.
+replyMessagePayload :: Int -> UserId -> ChatId -> Integer -> Text -> Value
+replyMessagePayload uid (UserId userNum) (ChatId chatNum) msgIdNum txt =
+    Object $ mconcat
+        [ "update_id" .= uid
+        , "message" .= object
+            [ "message_id" .= uid
+            , "date" .= (0 :: Int)
+            , "from" .= userObject userNum
+            , "chat" .= chatObject chatNum
+            , "reply_to_message" .= object
+                [ "message_id" .= msgIdNum
+                , "date" .= (0 :: Int)
+                , "chat" .= chatObject chatNum
+                ]
             , "text" .= txt
             ]
         ]

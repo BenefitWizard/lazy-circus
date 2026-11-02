@@ -538,6 +538,7 @@ or any loop that needs distinct ids):
 | `nextUpdateId f` | the next id |
 | `mkTextUpdateByUser f userId chatId txt` | text from a specific user/chat |
 | `mkTextUpdateIn f chatId txt` | text in a specific chat (default user) |
+| `mkReplyUpdateByUser f userId chatId msgId txt` | text from a specific user/chat REPLYING to `msgId`: the update's `message.reply_to_message` stub references the target — identity only (message id, date, chat), no content; handlers must resolve the target by message id |
 | `mkFileUpdate f userId chatId fileId` | a document upload (metadata-free) |
 | `mkDocumentUpdate f userId chatId doc` | a document upload carrying the full `Document` (client-declared name / MIME / size) |
 | `mkDocument fileId` | a minimal `Document` value; attach metadata via record update |

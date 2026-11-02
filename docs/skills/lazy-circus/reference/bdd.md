@@ -184,9 +184,12 @@ question, option texts (projected from the request) and the request's
 `message_thread_id` / `is_anonymous` / `allows_multiple_answers` /
 `allows_revoting` / `shuffle_options` / `close_date` — as `ObsTgPoll`. The dialog
 state folds a consumed poll into `dsLastPoll :: Maybe PollDigest`
-(`pdPollId` / `pdQuestion` / `pdOptions` plus `pdThreadId` / `pdIsAnonymous` /
+(`pdPollId` / `pdMsgId` / `pdQuestion` / `pdOptions` plus `pdThreadId` / `pdIsAnonymous` /
 `pdAllowsMultipleAnswers` / `pdAllowsRevoting` / `pdShuffleOptions` /
-`pdCloseDate`); messages do NOT invalidate the digest. Each digest `Maybe` mirrors
+`pdCloseDate`); messages do NOT invalidate the digest. `pdMsgId` is the
+announcement message's id — the value a consumer's reply-to-the-announcement step
+feeds to `sendReplyByUser` (see [tg-test.md](tg-test.md)) to simulate a member
+replying to the announcement (e.g. an attendance correction). Each digest `Maybe` mirrors
 the matching send-request field: `Nothing` honestly means "left unset in the
 request". `pdCloseDate` is RAW Unix seconds — timezone interpretation stays with
 project steps of the consumer. Note the Telegram server defaults `is_anonymous` to
