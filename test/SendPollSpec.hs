@@ -144,7 +144,7 @@ spec = aroundAll withBotTestApp $
                     expectationFailure $
                         "Expected exactly one OutSendPoll capture with an assigned id, got: " <> show captures
 
-        it "journals ObsTgPoll with the chat id, question, options and mock ids when tcJournal is set" $ \app -> do
+        it "journals ObsTgPoll with the chat id, question, options, mock ids and unset choice flags when tcJournal is set" $ \app -> do
             journal <- newObservationLog :: IO (ObservationLog ())
             let cfg = defaultTestConfig{tcJournal = Just journal}
             (mocks, _) <-
@@ -161,6 +161,9 @@ spec = aroundAll withBotTestApp $
                                 , obsOptions = optionTexts
                                 , obsThreadId = Nothing
                                 , obsIsAnonymous = Just False
+                                , obsAllowsMultipleAnswers = Nothing
+                                , obsAllowsRevoting = Nothing
+                                , obsShuffleOptions = Nothing
                                 , obsCloseDate = Nothing
                                 }
                            ]

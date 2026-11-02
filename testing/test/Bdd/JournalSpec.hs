@@ -208,8 +208,10 @@ preCheckoutAnswer =
         }
 
 -- | A fixed poll observation used as the Eq\/Show baseline of the extended
--- 'ObsTgPoll' shape (message id, poll id, options, thread id, anonymity flag
--- and close date included).
+-- 'ObsTgPoll' shape (message id, poll id, options, thread id, anonymity flag,
+-- the choice flags — multiple answers, re-voting, option shuffling — and
+-- close date included; the choice flags carry MIXED values so the
+-- distinguishes-test can flip each one).
 demoPoll :: Observation ()
 demoPoll =
     ObsTgPoll
@@ -220,6 +222,9 @@ demoPoll =
         , obsOptions = ["Jugglers", "Acrobats"]
         , obsThreadId = Just (MessageThreadId 7)
         , obsIsAnonymous = Just False
+        , obsAllowsMultipleAnswers = Just True
+        , obsAllowsRevoting = Just False
+        , obsShuffleOptions = Just True
         , obsCloseDate = Just 1796040000
         }
 
@@ -527,15 +532,24 @@ spec = aroundAll withJournalApp $ do
                     , obsOptions = ["Jugglers", "Acrobats"]
                     , obsThreadId = Just (MessageThreadId 7)
                     , obsIsAnonymous = Just False
+                    , obsAllowsMultipleAnswers = Just True
+                    , obsAllowsRevoting = Just False
+                    , obsShuffleOptions = Just True
                     , obsCloseDate = Just 1796040000
                     }
 
-        it "Eq distinguishes ObsTgPoll by message id, poll id, options, thread id, anonymity and close date" $ \_app -> do
+        it "Eq distinguishes ObsTgPoll by message id, poll id, options, thread id, anonymity, choice flags and close date" $ \_app -> do
             demoPoll `shouldNotBe` demoPoll{obsMsgId = MessageId 1}
             demoPoll `shouldNotBe` demoPoll{obsPollId = PollId "poll-1"}
             demoPoll `shouldNotBe` demoPoll{obsOptions = ["Акробаты", "Жонглёры"]}
             demoPoll `shouldNotBe` demoPoll{obsThreadId = Just (MessageThreadId 8)}
             demoPoll `shouldNotBe` demoPoll{obsIsAnonymous = Just True}
+            demoPoll `shouldNotBe` demoPoll{obsAllowsMultipleAnswers = Just False}
+            demoPoll `shouldNotBe` demoPoll{obsAllowsMultipleAnswers = Nothing}
+            demoPoll `shouldNotBe` demoPoll{obsAllowsRevoting = Just True}
+            demoPoll `shouldNotBe` demoPoll{obsAllowsRevoting = Nothing}
+            demoPoll `shouldNotBe` demoPoll{obsShuffleOptions = Just False}
+            demoPoll `shouldNotBe` demoPoll{obsShuffleOptions = Nothing}
             demoPoll `shouldNotBe` demoPoll{obsCloseDate = Just 1796040001}
 
         it "Show renders ObsTgPoll field-wise" $ \_app -> do
@@ -546,6 +560,9 @@ spec = aroundAll withJournalApp $ do
                     <> ", obsOptions = [\"Jugglers\",\"Acrobats\"]"
                     <> ", obsThreadId = Just (MessageThreadId 7)"
                     <> ", obsIsAnonymous = Just False"
+                    <> ", obsAllowsMultipleAnswers = Just True"
+                    <> ", obsAllowsRevoting = Just False"
+                    <> ", obsShuffleOptions = Just True"
                     <> ", obsCloseDate = Just 1796040000}"
 
         it "Eq matches equal ObsTgPreCheckoutAnswer observations" $ \_app -> do

@@ -65,29 +65,29 @@ packages:
 - completed:
     name: telegram-bot-api
     pantry-tree:
-      sha256: 257c58bd2d937dce78ca0aae4d1bbfa02cad2c099b3ec3f3c43d0dc7f331506c
+      sha256: a25ec16918b3b7b4a0633624da363a47dd4ec5fcb3e35b2cddd24327c6011949
       size: 19237
-    sha256: b5b80d5c5417c0a3b187c2474ba850a0a1a36c09a3a15a264c59f12a33a9c2f3
-    size: 134562
+    sha256: a15da2cc5723f04f4552e1fa412fb56b8f82f74a8f1ec3a1e5a47db795136f1b
+    size: 134652
     subdir: telegram-bot-api
-    url: https://github.com/BenefitWizard/telegram-bot-simple/archive/4183793bbfd077d1bb87f78ef43d25bbdce242cb.tar.gz
+    url: https://github.com/BenefitWizard/telegram-bot-simple/archive/090bf72d7671bc44f450824556a9602cd354d231.tar.gz
     version: 7.4.5
   original:
     subdir: telegram-bot-api
-    url: https://github.com/BenefitWizard/telegram-bot-simple/archive/4183793bbfd077d1bb87f78ef43d25bbdce242cb.tar.gz
+    url: https://github.com/BenefitWizard/telegram-bot-simple/archive/090bf72d7671bc44f450824556a9602cd354d231.tar.gz
 - completed:
     name: telegram-bot-simple
     pantry-tree:
       sha256: ed323b5116f3214b3018ad03ddb895c7a0959be4a9c52e860564820e72f93842
       size: 1789
-    sha256: b5b80d5c5417c0a3b187c2474ba850a0a1a36c09a3a15a264c59f12a33a9c2f3
-    size: 134562
+    sha256: a15da2cc5723f04f4552e1fa412fb56b8f82f74a8f1ec3a1e5a47db795136f1b
+    size: 134652
     subdir: telegram-bot-simple
-    url: https://github.com/BenefitWizard/telegram-bot-simple/archive/4183793bbfd077d1bb87f78ef43d25bbdce242cb.tar.gz
+    url: https://github.com/BenefitWizard/telegram-bot-simple/archive/090bf72d7671bc44f450824556a9602cd354d231.tar.gz
     version: 0.14.4
   original:
     subdir: telegram-bot-simple
-    url: https://github.com/BenefitWizard/telegram-bot-simple/archive/4183793bbfd077d1bb87f78ef43d25bbdce242cb.tar.gz
+    url: https://github.com/BenefitWizard/telegram-bot-simple/archive/090bf72d7671bc44f450824556a9602cd354d231.tar.gz
 - completed:
     hackage: beam-core-0.11.1.0@sha256:438ee4fb3082ffb6893b9fd8153c05ae77976e39333785cd060f257b0894c6e5,5591
     pantry-tree:

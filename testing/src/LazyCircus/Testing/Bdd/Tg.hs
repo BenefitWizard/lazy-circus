@@ -30,7 +30,10 @@ in their own capture, resolved through
 'LazyCircus.Testing.Updates.userIdForLogin', regardless of the current actor.
 
 Await semantics (one await = one observation): every @Then@ constructor
-except 'botReplyContains', 'pollIsPublic', 'pollIsAnonymous' and
+except 'botReplyContains', 'pollIsPublic', 'pollIsAnonymous', the poll
+choice-flag sextet ('pollAllowsMultipleAnswers', 'pollIsSingleChoice',
+'pollAllowsRevote', 'pollForbidsRevote', 'pollOptionsAreShuffled',
+'pollOptionsAreNotShuffled') and
 'reactionIsBig' performs ONE
 'awaitObservation' whose predicate
 matches ONLY the core @ObsTg*@ constructors — app-specific 'ObsApp' entries
@@ -49,7 +52,12 @@ And-continuation: it re-inspects the last consumed entry via
 without moving the cursor. The publicness pair 'pollIsPublic' and
 'pollIsAnonymous' are fellow And-continuations asserting on the last consumed
 poll's digest ('dsLastPoll') — likewise with NO wait and NO consumption; so
-is 'reactionIsBig' on the last consumed reaction's digest ('dsLastReaction').
+is 'reactionIsBig' on the last consumed reaction's digest ('dsLastReaction'),
+and so is the poll choice-flag sextet ('pollAllowsMultipleAnswers',
+'pollIsSingleChoice', 'pollAllowsRevote', 'pollForbidsRevote',
+'pollOptionsAreShuffled', 'pollOptionsAreNotShuffled') on the last consumed
+poll's digest — each demanding its flag was set EXPLICITLY in the send
+request (an unset flag aborts with the server-default explanation).
 
 The module also exports 'tgTestBootstrap', the canonical @tgTest@-shaped
 'LazyCircus.Testing.Bdd.Runner.ScenarioBootstrap': it executes a BDD
@@ -64,6 +72,12 @@ module LazyCircus.Testing.Bdd.Tg
     , botSendsPoll
     , pollIsPublic
     , pollIsAnonymous
+    , pollAllowsMultipleAnswers
+    , pollIsSingleChoice
+    , pollAllowsRevote
+    , pollForbidsRevote
+    , pollOptionsAreShuffled
+    , pollOptionsAreNotShuffled
     , botReactsTo
     , botReactsWith
     , reactionIsBig
@@ -274,6 +288,249 @@ notAnonymousReason digest = case pdIsAnonymous digest of
     Just False ->
         "the poll \"" <> pdQuestion digest
             <> "\" was sent with is_anonymous = False (a public poll)"
+
+-- | @the poll allows multiple answers@ — And-continuation asserting the last
+-- consumed poll was sent as MULTIPLE-CHOICE: the request set
+-- @allows_multiple_answers@ to 'True' explicitly.
+--
+-- The Telegram server defaults @allows_multiple_answers@ to @False@ when the
+-- request leaves it unset, so a forgotten flag means a single-choice poll in
+-- production — this step catches exactly that (the mock does not simulate the
+-- server-side default; the step checks the request's flag, which is what the
+-- app controls).
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. The poll counts as multiple-choice only when the digest's
+-- 'pdAllowsMultipleAnswers' is @Just True@ — a @Nothing@ (request left the
+-- flag unset) or @Just False@ aborts the DSL with a guard failure explaining
+-- the server default.
+pollAllowsMultipleAnswers :: StepDef TelegramTestScript c (ScenarioState app) a
+pollAllowsMultipleAnswers =
+    thenDef "the poll allows multiple answers" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith (notMultipleAnswersReason digest) (pdAllowsMultipleAnswers digest == Just True)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the consumed poll is not explicitly
+-- multiple-choice (the server defaults @allows_multiple_answers@ to @False@).
+notMultipleAnswersReason :: PollDigest -> Text
+notMultipleAnswersReason digest = case pdAllowsMultipleAnswers digest of
+    Nothing ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" left allows_multiple_answers unset in the send request; the Telegram server"
+            <> " defaults it to False (a single-choice poll), so set sendPollAllowsMultipleAnswers"
+            <> " = Just True to allow multiple answers"
+    Just False ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" was sent with allows_multiple_answers = False (a single-choice poll)"
+
+-- | @the poll is single choice@ — And-continuation asserting the last
+-- consumed poll was sent as SINGLE-CHOICE: the request set
+-- @allows_multiple_answers@ to 'False' explicitly. The strict sibling of
+-- 'pollAllowsMultipleAnswers'.
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. The poll counts as single-choice only when the digest's
+-- 'pdAllowsMultipleAnswers' is @Just False@ — a @Nothing@ (request left the
+-- flag unset) aborts with the explanation that the app never said so
+-- explicitly, even though the server would treat the poll as single-choice by
+-- default.
+pollIsSingleChoice :: StepDef TelegramTestScript c (ScenarioState app) a
+pollIsSingleChoice =
+    thenDef "the poll is single choice" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith (notSingleChoiceReason digest) (pdAllowsMultipleAnswers digest == Just False)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the consumed poll is not explicitly
+-- single-choice.
+notSingleChoiceReason :: PollDigest -> Text
+notSingleChoiceReason digest = case pdAllowsMultipleAnswers digest of
+    Nothing ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" left allows_multiple_answers unset in the send request; the server would treat"
+            <> " it as single-choice by default, but the step requires the explicit"
+            <> " sendPollAllowsMultipleAnswers = Just False"
+    Just True ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" was sent with allows_multiple_answers = True (a multiple-choice poll)"
+
+-- | @the poll allows re-voting@ — And-continuation asserting the last
+-- consumed poll was sent as REVOTABLE: the request set @allows_revoting@ to
+-- 'True' explicitly.
+--
+-- The Telegram server defaults @allows_revoting@ BY POLL TYPE when the
+-- request leaves it unset (@False@ for quizzes, @True@ for regular polls), so
+-- a forgotten flag means the re-vote behaviour silently follows the poll
+-- type — this step demands the app said @True@ on purpose.
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. The poll counts as revotable only when the digest's
+-- 'pdAllowsRevoting' is @Just True@ — a @Nothing@ (request left the flag
+-- unset) or @Just False@ aborts the DSL with a guard failure explaining the
+-- type-dependent server default.
+pollAllowsRevote :: StepDef TelegramTestScript c (ScenarioState app) a
+pollAllowsRevote =
+    thenDef "the poll allows re-voting" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith (notRevotableReason digest) (pdAllowsRevoting digest == Just True)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the consumed poll is not explicitly revotable
+-- (the server defaults @allows_revoting@ by poll type: @False@ for quizzes,
+-- @True@ for regular polls).
+notRevotableReason :: PollDigest -> Text
+notRevotableReason digest = case pdAllowsRevoting digest of
+    Nothing ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" left allows_revoting unset in the send request; the Telegram server defaults"
+            <> " it by poll type (False for quizzes, True for regular polls), so set"
+            <> " sendPollAllowsRevoting = Just True to allow re-voting explicitly"
+    Just False ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" was sent with allows_revoting = False (re-voting forbidden)"
+
+-- | @the poll does not allow re-voting@ — And-continuation asserting the last
+-- consumed poll was sent with re-voting FORBIDDEN: the request set
+-- @allows_revoting@ to 'False' explicitly. The strict sibling of
+-- 'pollAllowsRevote'.
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. The poll counts as non-revotable only when the digest's
+-- 'pdAllowsRevoting' is @Just False@ — a @Nothing@ (request left the flag
+-- unset) aborts with the explanation that the app never said so explicitly,
+-- even though the server would default the flag by poll type.
+pollForbidsRevote :: StepDef TelegramTestScript c (ScenarioState app) a
+pollForbidsRevote =
+    thenDef "the poll does not allow re-voting" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith (notForbiddenRevoteReason digest) (pdAllowsRevoting digest == Just False)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the consumed poll does not explicitly forbid
+-- re-voting.
+notForbiddenRevoteReason :: PollDigest -> Text
+notForbiddenRevoteReason digest = case pdAllowsRevoting digest of
+    Nothing ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" left allows_revoting unset in the send request; the server would default it"
+            <> " by poll type (False for quizzes, True for regular polls), but the step requires"
+            <> " the explicit sendPollAllowsRevoting = Just False"
+    Just True ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" was sent with allows_revoting = True (re-voting allowed)"
+
+-- | @the poll options are shuffled@ — And-continuation asserting the last
+-- consumed poll asked Telegram to SHUFFLE its options: the request set
+-- @shuffle_options@ to 'True' explicitly.
+--
+-- Shuffling is SERVER-SIDE: the mock (and the sent option list) keep the
+-- request order — Telegram randomises the order shown to each viewer. The
+-- step observes the request's flag, which is what the app controls; the
+-- order-sensitive pin of the option texts stays with 'botSendsPoll'.
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. The poll counts as shuffled only when the digest's
+-- 'pdShuffleOptions' is @Just True@ — a @Nothing@ (request left the flag
+-- unset) or @Just False@ aborts the DSL with a guard failure explaining the
+-- server default (options shown in the sent order).
+pollOptionsAreShuffled :: StepDef TelegramTestScript c (ScenarioState app) a
+pollOptionsAreShuffled =
+    thenDef "the poll options are shuffled" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith (notShuffledReason digest) (pdShuffleOptions digest == Just True)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the consumed poll does not explicitly ask for
+-- shuffled options (the server then shows the options in the sent order).
+notShuffledReason :: PollDigest -> Text
+notShuffledReason digest = case pdShuffleOptions digest of
+    Nothing ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" left shuffle_options unset in the send request; the Telegram server then shows"
+            <> " the options in the order they were sent, so set sendPollShuffleOptions = Just True"
+            <> " to shuffle them"
+    Just False ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" was sent with shuffle_options = False (options in the sent order)"
+
+-- | @the poll options are not shuffled@ — And-continuation asserting the last
+-- consumed poll was sent WITHOUT option shuffling: the request set
+-- @shuffle_options@ to 'False' explicitly. The strict sibling of
+-- 'pollOptionsAreShuffled'.
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. The poll counts as unshuffled only when the digest's
+-- 'pdShuffleOptions' is @Just False@ — a @Nothing@ (request left the flag
+-- unset) aborts with the explanation that the app never said so explicitly,
+-- even though the server would show the options in the sent order anyway.
+pollOptionsAreNotShuffled :: StepDef TelegramTestScript c (ScenarioState app) a
+pollOptionsAreNotShuffled =
+    thenDef "the poll options are not shuffled" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noPollYetReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith (notUnshuffledReason digest) (pdShuffleOptions digest == Just False)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the consumed poll does not explicitly pin the
+-- unshuffled option order.
+notUnshuffledReason :: PollDigest -> Text
+notUnshuffledReason digest = case pdShuffleOptions digest of
+    Nothing ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" left shuffle_options unset in the send request; the server would show the"
+            <> " options in the sent order, but the step requires the explicit"
+            <> " sendPollShuffleOptions = Just False"
+    Just True ->
+        "the poll \"" <> pdQuestion digest
+            <> "\" was sent with shuffle_options = True (options shuffled for each viewer)"
 
 -- | @the user sends "$msg"@ — the CURRENT actor sends a text message in the
 -- default test chat. The canonical user-input step: \"the user\" always means

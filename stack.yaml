@@ -50,9 +50,10 @@ extra-deps:
     commit: "0767cd8b37358d051b8405c28bb1f7ff7de5e313"
     subdirs:
       - servant-auth/servant-auth-server
-  # Форк с отправкой документов из памяти (ветка send-document-bytes)
+  # Форк с отправкой документов из памяти и poll-полями
+  # allows_revoting/shuffle_options (ветка send-document-bytes)
   - github: BenefitWizard/telegram-bot-simple
-    commit: 4183793bbfd077d1bb87f78ef43d25bbdce242cb
+    commit: 090bf72d7671bc44f450824556a9602cd354d231
     subdirs:
       - telegram-bot-api
       - telegram-bot-simple

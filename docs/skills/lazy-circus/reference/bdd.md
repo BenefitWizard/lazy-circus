@@ -181,14 +181,18 @@ Conventions (all enforced by Haddock contracts and tests):
 The mocked performer assigns every sent poll the deterministic id
 `PollId "poll-<messageId>"` and journals the full shape — chat, message id, poll id,
 question, option texts (projected from the request) and the request's
-`message_thread_id` / `is_anonymous` / `close_date` — as `ObsTgPoll`. The dialog
+`message_thread_id` / `is_anonymous` / `allows_multiple_answers` /
+`allows_revoting` / `shuffle_options` / `close_date` — as `ObsTgPoll`. The dialog
 state folds a consumed poll into `dsLastPoll :: Maybe PollDigest`
 (`pdPollId` / `pdQuestion` / `pdOptions` plus `pdThreadId` / `pdIsAnonymous` /
+`pdAllowsMultipleAnswers` / `pdAllowsRevoting` / `pdShuffleOptions` /
 `pdCloseDate`); messages do NOT invalidate the digest. Each digest `Maybe` mirrors
 the matching send-request field: `Nothing` honestly means "left unset in the
 request". `pdCloseDate` is RAW Unix seconds — timezone interpretation stays with
 project steps of the consumer. Note the Telegram server defaults `is_anonymous` to
-`True` when the request leaves it unset (unset ≠ public).
+`True`, `allows_multiple_answers` to `False` and `shuffle_options` to "keep the
+sent order" when the request leaves them unset, and defaults `allows_revoting` BY
+POLL TYPE (`False` for quizzes, `True` for regular polls) — unset ≠ unpinned.
 
 Library steps (in `LazyCircus.Testing.Bdd.Tg`, registry-ready):
 
@@ -200,6 +204,9 @@ Then the bot sends a poll "Кого позвать в шапито?"
     | Дрессировщик |
 And the poll is public                         # And-continuation on the digest:
                                                # is_anonymous was set to Just False
+And the poll options are shuffled              # shuffle_options was set to Just True
+And the poll allows re-voting                  # allows_revoting was set to Just True
+And the poll allows multiple answers           # allows_multiple_answers was set to Just True
 When the user votes for "Акробаты" in the poll      # single vote via the quoted capture
 Then the bot replies with "🗳 голос учтён: [1] от 1001"
 When the member "@alice" votes for "Акробаты" in the poll   # a named cast member,
@@ -217,6 +224,25 @@ Then the bot replies with "🗳 голос учтён: [1] от 2000000123"   # 
 - `pollIsAnonymous` (`Then`/And, `the poll is anonymous`) — the strict sibling of
   `pollIsPublic`: requires `Just True` explicitly (an unset flag aborts even though
   the server would treat the poll as anonymous by default).
+- The poll choice-flag sextet (`Then`/And) — same And-continuation shape as the
+  publicness pair, each demanding its flag was set EXPLICITLY in the send request
+  (an unset flag aborts with the server-default explanation):
+  - `pollAllowsMultipleAnswers` (`the poll allows multiple answers`) requires
+    `pdAllowsMultipleAnswers == Just True`; `pollIsSingleChoice`
+    (`the poll is single choice`) requires `Just False` (the server defaults an
+    unset flag to single-choice).
+  - `pollAllowsRevote` (`the poll allows re-voting`) requires
+    `pdAllowsRevoting == Just True`; `pollForbidsRevote`
+    (`the poll does not allow re-voting`) requires `Just False` (an unset flag
+    lets the server decide by poll type: no re-voting for quizzes, re-voting for
+    regular polls).
+  - `pollOptionsAreShuffled` (`the poll options are shuffled`) requires
+    `pdShuffleOptions == Just True`; `pollOptionsAreNotShuffled`
+    (`the poll options are not shuffled`) requires `Just False`. Shuffling is
+    SERVER-side — the mock (and the journaled `pdOptions`) keep the request
+    order, Telegram randomises the order shown to each viewer; the step observes
+    the request's flag, while the order-sensitive pin of the option texts stays
+    with `botSendsPoll`'s table.
 - `userVotesFor` (`When`, `the user votes for "$option" in the poll`) resolves the
   captured option text against the consumed poll's `pdOptions` and feeds one chat-less
   `poll_answer` update via the `sendPollAnswer` DSL op; a table attached to this step is
@@ -240,8 +266,10 @@ voter's user id — the voter-aware ack is what makes the member-vote scenarios
 meaningful) lives in `testing/test/Bdd/PollSpec.hs` — mirror it for your own poll flows.
 The observability example is there too: the `/poll` scenario pins `Just`-valued digest
 fields via `the poll is public` and spec-local digest-pin steps, the `/anonpoll`
-scenario pins the explicit `Just True` and the honest `Nothing`s, and the refusal
-feature proves the publicness steps abort before a poll is consumed.
+scenario pins the explicit `Just True` and the honest `Nothing`s, the `/fancypoll`
+and `/plainpoll` scenarios pin the explicit `Just True` / `Just False` choice flags
+(shuffle, re-voting, multiple answers) through the sextet steps and digest pins, and
+the refusal feature proves the publicness steps abort before a poll is consumed.
 
 ## Telegram Step Dictionary (Reactions)
 

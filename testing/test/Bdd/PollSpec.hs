@@ -35,8 +35,9 @@ member-vote scenarios meaningful: without it the round trip would pass even
 if every vote arrived as the default test user.
 
 This spec is also the blessing ground for the extended 'ObsTgPoll'
-observation shape (id, poll id, options plus the thread id, anonymity flag
-and close date of the send request in the shared journal): the full shape
+observation shape (id, poll id, options plus the thread id, anonymity flag,
+the choice flags — multiple answers, re-voting, option shuffling — and the
+close date of the send request in the shared journal): the full shape
 survives the scenarios below, satisfying the journal's blessing rule.
 
 Coverage: (1) a poll send observed with question AND options from the step
@@ -53,7 +54,12 @@ both hops end-to-end; (6) the observability fields — the @\/poll@ scenario
 pins @Just@-values via the publicness step plus digest pins, the
 @\/anonpoll@ scenario pins the explicit @Just True@ and the honest
 @Nothing@s; (7) the publicness steps' refusal before a poll is consumed
-(the poll IS journaled, just not consumed).
+(the poll IS journaled, just not consumed); (8) the choice-flag
+observability — the @\/fancypoll@ scenario pins the explicit @Just True@
+shuffle\/re-vote\/multiple-answers flags through the choice-step sextet and
+digest pins, the @\/plainpoll@ scenario pins their explicit @Just False@
+siblings, and the @\/anonpoll@ scenario pins the honest @Nothing@s for all
+three flags.
 -}
 module Bdd.PollSpec (spec) where
 
@@ -87,8 +93,14 @@ import LazyCircus.Testing.Bdd.Tg
     , memberTakesStage
     , memberVotesFor
     , memberVotesIn
+    , pollAllowsMultipleAnswers
+    , pollAllowsRevote
+    , pollForbidsRevote
     , pollIsAnonymous
     , pollIsPublic
+    , pollIsSingleChoice
+    , pollOptionsAreNotShuffled
+    , pollOptionsAreShuffled
     , tgTestBootstrap
     , userSends
     , userVotesFor
@@ -125,9 +137,12 @@ import Telegram.Bot.API
     , pollAnswerOptionIds
     , pollAnswerPollId
     , pollAnswerUser
+    , sendPollAllowsMultipleAnswers
+    , sendPollAllowsRevoting
     , sendPollCloseDate
     , sendPollIsAnonymous
     , sendPollMessageThreadId
+    , sendPollShuffleOptions
     , updateMessage
     , userId
     )
@@ -247,9 +262,11 @@ memberCarol = "@carol"
 -- voting as themselves (single-option and table member-vote forms)
 -- acknowledged with THEIR voter ids, the acting-user switch proven
 -- end-to-end (a member takes the stage — @the user ...@ steps act as them;
--- the default user takes it back), and the two observability scenarios (a
+-- the default user takes it back), the two observability scenarios (a
 -- public poll pinned to the announcement topic; an anonymous poll leaving
--- thread and close date unset).
+-- thread and close date unset), and the two choice-flag scenarios (a
+-- @\/fancypoll@ with every choice flag explicitly @True@; a @\/plainpoll@
+-- with every choice flag explicitly @False@).
 pollFeature :: Text
 pollFeature =
     T.unlines $
@@ -332,6 +349,30 @@ pollFeature =
             ++
             [ "    And the poll is anonymous"
             , "    And the poll digest leaves thread and close date unset"
+            , ""
+            , "  Scenario: sends a poll with shuffled, revotable, multiple-choice options"
+            , "    Given the poll bot is awake"
+            , "    When the user sends \"/fancypoll\""
+            , "    Then the bot sends a poll \"" <> pollQuestion <> "\""
+            ]
+            ++ map optionRow pollOptionTexts
+            ++
+            [ "    And the poll options are shuffled"
+            , "    And the poll allows re-voting"
+            , "    And the poll allows multiple answers"
+            , "    And the poll digest carries the choice settings"
+            , ""
+            , "  Scenario: sends a plain poll without shuffling, re-voting or multiple choice"
+            , "    Given the poll bot is awake"
+            , "    When the user sends \"/plainpoll\""
+            , "    Then the bot sends a poll \"" <> pollQuestion <> "\""
+            ]
+            ++ map optionRow pollOptionTexts
+            ++
+            [ "    And the poll options are not shuffled"
+            , "    And the poll does not allow re-voting"
+            , "    And the poll is single choice"
+            , "    And the poll digest pins the plain choice settings"
             ]
 
 -- | @the poll digest carries the announcement settings@ — And-continuation
@@ -366,10 +407,10 @@ digestCarriesAnnouncementSettings =
                 pure (st, Nothing)
 
 -- | @the poll digest leaves thread and close date unset@ — the anonymous
--- sibling pin: 'pdIsAnonymous' is @Just True@ (explicit) while 'pdThreadId'
--- and 'pdCloseDate' are 'Nothing' (the @\/anonpoll@ request leaves them
--- unset), proving the digest's 'Maybe' projection observes the ABSENCE
--- honestly.
+-- sibling pin: 'pdIsAnonymous' is @Just True@ (explicit) while 'pdThreadId',
+-- 'pdCloseDate' AND the three choice flags are 'Nothing' (the @\/anonpoll@
+-- request leaves them all unset), proving the digest's 'Maybe' projection
+-- observes the ABSENCE honestly.
 --
 -- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
 -- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
@@ -394,6 +435,75 @@ digestLeavesAnnouncementSettingsUnset =
                 guardWith
                     ("expected the poll's close date to be Nothing, got: " <> tshow (pdCloseDate digest))
                     (pdCloseDate digest == Nothing)
+                guardWith
+                    ("expected the poll's multiple-answers flag to be Nothing, got: " <> tshow (pdAllowsMultipleAnswers digest))
+                    (pdAllowsMultipleAnswers digest == Nothing)
+                guardWith
+                    ("expected the poll's re-voting flag to be Nothing, got: " <> tshow (pdAllowsRevoting digest))
+                    (pdAllowsRevoting digest == Nothing)
+                guardWith
+                    ("expected the poll's option-shuffle flag to be Nothing, got: " <> tshow (pdShuffleOptions digest))
+                    (pdShuffleOptions digest == Nothing)
+                pure (st, Nothing)
+
+-- | @the poll digest carries the choice settings@ — And-continuation pinning
+-- the three choice flags of the last consumed poll's digest to the explicit
+-- @Just True@ values the @\/fancypoll@ request sets — the same flags the
+-- request is built from, so the pin and the send stay in sync by construction.
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. Each field has its own guard reason rendering expected vs actual.
+digestCarriesChoiceSettings :: StepDef TelegramTestScript c (ScenarioState app) a
+digestCarriesChoiceSettings =
+    thenDef "the poll digest carries the choice settings" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noConsumedPollReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith
+                    ("expected the poll's multiple-answers flag to be Just True, got: " <> tshow (pdAllowsMultipleAnswers digest))
+                    (pdAllowsMultipleAnswers digest == Just True)
+                guardWith
+                    ("expected the poll's re-voting flag to be Just True, got: " <> tshow (pdAllowsRevoting digest))
+                    (pdAllowsRevoting digest == Just True)
+                guardWith
+                    ("expected the poll's option-shuffle flag to be Just True, got: " <> tshow (pdShuffleOptions digest))
+                    (pdShuffleOptions digest == Just True)
+                pure (st, Nothing)
+
+-- | @the poll digest pins the plain choice settings@ — the explicit
+-- @Just False@ sibling pin: every choice flag of the last consumed poll's
+-- digest carries the value the @\/plainpoll@ request set (no shuffling, no
+-- re-voting, single choice).
+--
+-- PRE-CONTRACT: A poll has been consumed by a previous step (e.g.
+-- 'botSendsPoll'), so 'dsLastPoll' holds its digest — the step aborts with an
+-- explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. Each field has its own guard reason rendering expected vs actual.
+digestPinsPlainChoiceSettings :: StepDef TelegramTestScript c (ScenarioState app) a
+digestPinsPlainChoiceSettings =
+    thenDef "the poll digest pins the plain choice settings" $ \_params st ->
+        case dsLastPoll (ssDialog st) of
+            Nothing ->
+                guardWith noConsumedPollReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith
+                    ("expected the poll's multiple-answers flag to be Just False, got: " <> tshow (pdAllowsMultipleAnswers digest))
+                    (pdAllowsMultipleAnswers digest == Just False)
+                guardWith
+                    ("expected the poll's re-voting flag to be Just False, got: " <> tshow (pdAllowsRevoting digest))
+                    (pdAllowsRevoting digest == Just False)
+                guardWith
+                    ("expected the poll's option-shuffle flag to be Just False, got: " <> tshow (pdShuffleOptions digest))
+                    (pdShuffleOptions digest == Just False)
                 pure (st, Nothing)
 
 -- | Guard-failure message when the digest-pin steps run before any poll was
@@ -415,8 +525,16 @@ pollStepRegistry = mkRegistry
     , botSendsPoll
     , pollIsPublic
     , pollIsAnonymous
+    , pollAllowsMultipleAnswers
+    , pollIsSingleChoice
+    , pollAllowsRevote
+    , pollForbidsRevote
+    , pollOptionsAreShuffled
+    , pollOptionsAreNotShuffled
     , digestCarriesAnnouncementSettings
     , digestLeavesAnnouncementSettingsUnset
+    , digestCarriesChoiceSettings
+    , digestPinsPlainChoiceSettings
     , userVotesFor
     , userVotesIn
     , memberVotesFor
@@ -590,6 +708,12 @@ buildPollAction app cfg mocks = do
                 (Just chatId, Just "/anonpoll") ->
                     runWithConfig app cfg mocks $
                         runScenarioProgram (anonPollScenario polls chatId)
+                (Just chatId, Just "/fancypoll") ->
+                    runWithConfig app cfg mocks $
+                        runScenarioProgram (fancyPollScenario polls chatId)
+                (Just chatId, Just "/plainpoll") ->
+                    runWithConfig app cfg mocks $
+                        runScenarioProgram (plainPollScenario polls chatId)
                 _ -> pure ()
 
 -- | The @\/poll@ scenario: sends a NON-anonymous poll (anonymous polls never
@@ -624,6 +748,43 @@ anonPollScenario polls chatId = do
                 Tg.sendPoll
                     (defSendPoll (SomeChatId chatId) pollQuestion pollOptionRequests)
                         { sendPollIsAnonymous = Just True
+                        }
+    runArbitraryIO $ atomically $ registerSpecPoll polls pollId chatId
+
+-- | The @\/fancypoll@ scenario: the same question and options as
+-- 'sendPollScenario', but with every poll CHOICE flag set EXPLICITLY to
+-- 'True' — shuffled options, allowed re-voting and multiple answers (the
+-- flags the choice-observability scenario pins through both the step sextet
+-- and the digest pins).
+fancyPollScenario :: SpecPollRegistry -> ChatId -> ScenarioProgram Script NoServiceLib ()
+fancyPollScenario polls chatId = do
+    (pollId, _) <-
+        evalScript $
+            tgScript pollBotName $
+                Tg.sendPoll
+                    (defSendPoll (SomeChatId chatId) pollQuestion pollOptionRequests)
+                        { sendPollIsAnonymous = Just False
+                        , sendPollAllowsMultipleAnswers = Just True
+                        , sendPollAllowsRevoting = Just True
+                        , sendPollShuffleOptions = Just True
+                        }
+    runArbitraryIO $ atomically $ registerSpecPoll polls pollId chatId
+
+-- | The @\/plainpoll@ scenario: the explicit counterpart of
+-- 'fancyPollScenario' — every choice flag set EXPLICITLY to 'False' (no
+-- option shuffling, no re-voting, single choice), so the strict negative
+-- steps and the @Just False@ digest pins have a request to observe.
+plainPollScenario :: SpecPollRegistry -> ChatId -> ScenarioProgram Script NoServiceLib ()
+plainPollScenario polls chatId = do
+    (pollId, _) <-
+        evalScript $
+            tgScript pollBotName $
+                Tg.sendPoll
+                    (defSendPoll (SomeChatId chatId) pollQuestion pollOptionRequests)
+                        { sendPollIsAnonymous = Just False
+                        , sendPollAllowsMultipleAnswers = Just False
+                        , sendPollAllowsRevoting = Just False
+                        , sendPollShuffleOptions = Just False
                         }
     runArbitraryIO $ atomically $ registerSpecPoll polls pollId chatId
 

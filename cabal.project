@@ -6,9 +6,10 @@ packages:
 
 source-repository-package
     type: git
-    -- Форк с отправкой документов из памяти (ветка send-document-bytes)
+    -- Форк с отправкой документов из памяти и poll-полями
+    -- allows_revoting/shuffle_options (ветка send-document-bytes)
     location: https://github.com/BenefitWizard/telegram-bot-simple.git
-    tag: 4183793bbfd077d1bb87f78ef43d25bbdce242cb
+    tag: 090bf72d7671bc44f450824556a9602cd354d231
     subdir: telegram-bot-simple
 
 source-repository-package

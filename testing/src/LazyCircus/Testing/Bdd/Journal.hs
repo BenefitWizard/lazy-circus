@@ -104,6 +104,21 @@ data Observation app
         -- ^ anonymity flag of the send request ('Nothing' when the request
         -- left @is_anonymous@ unset — the Telegram server then defaults the
         -- poll to anonymous, so the absence itself is observable)
+        , obsAllowsMultipleAnswers :: Maybe Bool
+        -- ^ multiple-answers flag of the send request ('sendPollAllowsMultipleAnswers';
+        -- 'Nothing' when the request left @allows_multiple_answers@ unset — the
+        -- Telegram server then defaults the poll to single-choice, so the
+        -- absence itself is observable)
+        , obsAllowsRevoting :: Maybe Bool
+        -- ^ re-voting flag of the send request ('sendPollAllowsRevoting';
+        -- 'Nothing' when the request left @allows_revoting@ unset — the
+        -- Telegram server then defaults it by poll type ('False' for quizzes,
+        -- 'True' for regular polls), so the absence itself is observable)
+        , obsShuffleOptions :: Maybe Bool
+        -- ^ option-shuffle flag of the send request ('sendPollShuffleOptions';
+        -- 'Nothing' when the request left @shuffle_options@ unset — the
+        -- Telegram server then shows the options in the order they were sent,
+        -- so the absence itself is observable)
         , obsCloseDate :: Maybe Int
         -- ^ close date as RAW Unix seconds from the send request ('Nothing'
         -- when unset); the library keeps the raw value — timezone
@@ -168,7 +183,7 @@ instance Eq app => Eq (Observation app) where
                 && isJust markup1 == isJust markup2
         (ObsTgDocument{obsChatId = chat1, obsFileId = file1}, ObsTgDocument{obsChatId = chat2, obsFileId = file2}) ->
             chat1 == chat2 && file1 == file2
-        (ObsTgPoll{obsChatId = chat1, obsMsgId = msg1, obsPollId = poll1, obsQuestion = question1, obsOptions = options1, obsThreadId = thread1, obsIsAnonymous = anon1, obsCloseDate = close1}, ObsTgPoll{obsChatId = chat2, obsMsgId = msg2, obsPollId = poll2, obsQuestion = question2, obsOptions = options2, obsThreadId = thread2, obsIsAnonymous = anon2, obsCloseDate = close2}) ->
+        (ObsTgPoll{obsChatId = chat1, obsMsgId = msg1, obsPollId = poll1, obsQuestion = question1, obsOptions = options1, obsThreadId = thread1, obsIsAnonymous = anon1, obsAllowsMultipleAnswers = multi1, obsAllowsRevoting = revote1, obsShuffleOptions = shuffle1, obsCloseDate = close1}, ObsTgPoll{obsChatId = chat2, obsMsgId = msg2, obsPollId = poll2, obsQuestion = question2, obsOptions = options2, obsThreadId = thread2, obsIsAnonymous = anon2, obsAllowsMultipleAnswers = multi2, obsAllowsRevoting = revote2, obsShuffleOptions = shuffle2, obsCloseDate = close2}) ->
             chat1 == chat2
                 && msg1 == msg2
                 && poll1 == poll2
@@ -176,6 +191,9 @@ instance Eq app => Eq (Observation app) where
                 && options1 == options2
                 && thread1 == thread2
                 && anon1 == anon2
+                && multi1 == multi2
+                && revote1 == revote2
+                && shuffle1 == shuffle2
                 && close1 == close2
         (ObsTgInvoice{obsChatId = chat1, obsTitle = title1}, ObsTgInvoice{obsChatId = chat2, obsTitle = title2}) ->
             chat1 == chat2 && title1 == title2
@@ -206,7 +224,7 @@ instance Show app => Show (Observation app) where
                 <> "}"
         ObsTgDocument{obsChatId = chat, obsFileId = file} ->
             "ObsTgDocument{obsChatId = " <> show chat <> ", obsFileId = " <> show file <> "}"
-        ObsTgPoll{obsChatId = chat, obsMsgId = msg, obsPollId = pid, obsQuestion = question, obsOptions = options, obsThreadId = thread, obsIsAnonymous = anon, obsCloseDate = close} ->
+        ObsTgPoll{obsChatId = chat, obsMsgId = msg, obsPollId = pid, obsQuestion = question, obsOptions = options, obsThreadId = thread, obsIsAnonymous = anon, obsAllowsMultipleAnswers = multi, obsAllowsRevoting = revote, obsShuffleOptions = shuffle, obsCloseDate = close} ->
             "ObsTgPoll{obsChatId = " <> show chat
                 <> ", obsMsgId = " <> show msg
                 <> ", obsPollId = " <> show pid
@@ -214,6 +232,9 @@ instance Show app => Show (Observation app) where
                 <> ", obsOptions = " <> show options
                 <> ", obsThreadId = " <> show thread
                 <> ", obsIsAnonymous = " <> show anon
+                <> ", obsAllowsMultipleAnswers = " <> show multi
+                <> ", obsAllowsRevoting = " <> show revote
+                <> ", obsShuffleOptions = " <> show shuffle
                 <> ", obsCloseDate = " <> show close
                 <> "}"
         ObsTgInvoice{obsChatId = chat, obsTitle = title} ->
@@ -329,6 +350,9 @@ data PollDigest = PollDigest
     , pdOptions     :: [Text]                -- ^ answer-option texts as sent, in order
     , pdThreadId    :: Maybe MessageThreadId -- ^ target forum topic ('sendPollMessageThreadId'), 'Nothing' when unset
     , pdIsAnonymous :: Maybe Bool            -- ^ anonymity flag ('sendPollIsAnonymous'), 'Nothing' when unset (the server defaults to anonymous)
+    , pdAllowsMultipleAnswers :: Maybe Bool  -- ^ multiple-answers flag ('sendPollAllowsMultipleAnswers'), 'Nothing' when unset (the server defaults to single-choice)
+    , pdAllowsRevoting :: Maybe Bool         -- ^ re-voting flag ('sendPollAllowsRevoting'), 'Nothing' when unset (the server defaults it by poll type: 'False' for quizzes, 'True' for regular polls)
+    , pdShuffleOptions :: Maybe Bool         -- ^ option-shuffle flag ('sendPollShuffleOptions'), 'Nothing' when unset (the server shows options in the sent order)
     , pdCloseDate   :: Maybe Int             -- ^ close date ('sendPollCloseDate') as RAW Unix seconds — timezone interpretation stays with the consumer
     }
     deriving (Eq, Show)
@@ -522,7 +546,8 @@ peekLastConsumed st = case ssLastConsumed st of
 -- observation kinds are interpreted: 'ObsTgMessage' sets 'dsLastReply' from
 -- the message text and 'dsLastKeyboard' from its 'obsMarkup'; 'ObsTgPoll'
 -- sets 'dsLastPoll' from the poll's ids, question and options, mirroring the
--- request's thread id, anonymity flag and close date into the digest;
+-- request's thread id, anonymity flag, choice flags (multiple answers,
+-- re-voting, option shuffling) and close date into the digest;
 -- 'ObsTgReaction' sets 'dsLastReaction' from the target id, the projected
 -- payload texts and the big-animation flag. The three families update their
 -- own fields and leave each other untouched — a message following a poll
@@ -530,7 +555,7 @@ peekLastConsumed st = case ssLastConsumed st of
 updateDialog :: DialogState -> Observation app -> DialogState
 updateDialog ds ObsTgMessage{obsText = txt, obsMarkup = markup} =
     ds{dsLastReply = Just txt, dsLastKeyboard = markup}
-updateDialog ds ObsTgPoll{obsPollId = pid, obsQuestion = question, obsOptions = options, obsThreadId = threadId, obsIsAnonymous = isAnonymous, obsCloseDate = closeDate} =
+updateDialog ds ObsTgPoll{obsPollId = pid, obsQuestion = question, obsOptions = options, obsThreadId = threadId, obsIsAnonymous = isAnonymous, obsAllowsMultipleAnswers = allowsMultipleAnswers, obsAllowsRevoting = allowsRevoting, obsShuffleOptions = shuffleOptions, obsCloseDate = closeDate} =
     ds
         { dsLastPoll =
             Just
@@ -540,6 +565,9 @@ updateDialog ds ObsTgPoll{obsPollId = pid, obsQuestion = question, obsOptions = 
                     , pdOptions = options
                     , pdThreadId = threadId
                     , pdIsAnonymous = isAnonymous
+                    , pdAllowsMultipleAnswers = allowsMultipleAnswers
+                    , pdAllowsRevoting = allowsRevoting
+                    , pdShuffleOptions = shuffleOptions
                     , pdCloseDate = closeDate
                     }
         }
