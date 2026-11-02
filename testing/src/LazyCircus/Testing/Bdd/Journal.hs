@@ -28,6 +28,8 @@ module LazyCircus.Testing.Bdd.Journal
     , defaultAwaitBudgetUs
     , DialogState (..)
     , PollDigest (..)
+    , ReactionDigest (..)
+    , reactionEmojiTexts
     , emptyDialogState
     , ScenarioState (..)
     , newScenarioState
@@ -46,8 +48,9 @@ import Control.Concurrent.STM (retry)
 import Data.List (find)
 
 import Telegram.Bot.API (ChatId, SomeReplyMarkup, UserId)
-import Telegram.Bot.API.Types (FileId, MessageId, MessageThreadId, PollId)
+import Telegram.Bot.API.Types (FileId, MessageId, MessageThreadId, PollId, ReactionType (..))
 
+import LazyCircus.Testing.Orphans ()
 import LazyCircus.Testing.Updates (defaultTestUserId)
 
 -- | One observed side effect of a scenario run, expressed in the testing
@@ -116,6 +119,13 @@ data Observation app
         { obsTargetMsgId :: Maybe MessageId
         -- ^ message the reaction was set on ('Nothing' when the request does
         -- not carry a concrete target message id)
+        , obsReaction :: Maybe [ReactionType]
+        -- ^ reaction list as sent ('Nothing' when the request left @reaction@
+        -- unset — which the Telegram server reads as removing the bot's
+        -- reactions, so the absence itself is observable)
+        , obsIsBig :: Maybe Bool
+        -- ^ big-animation flag of the request ('Nothing' when the request
+        -- left @is_big@ unset)
         }
     | ObsTgEdit
         { obsTargetMsgId :: Maybe MessageId
@@ -147,7 +157,8 @@ data Observation app
 
 -- | Field-wise equality. The opaque 'SomeReplyMarkup' is compared by presence
 -- only (the type exposes no 'Eq'), mirroring how the outgoing mailbox treats
--- markup; all other fields compare exactly.
+-- markup; all other fields compare exactly (the reaction list included — via
+-- the orphan 'Eq' instance of "LazyCircus.Testing.Orphans").
 instance Eq app => Eq (Observation app) where
     a == b = case (a, b) of
         (ObsTgMessage{obsChatId = chat1, obsText = text1, obsMsgId = msg1, obsMarkup = markup1}, ObsTgMessage{obsChatId = chat2, obsText = text2, obsMsgId = msg2, obsMarkup = markup2}) ->
@@ -168,7 +179,10 @@ instance Eq app => Eq (Observation app) where
                 && close1 == close2
         (ObsTgInvoice{obsChatId = chat1, obsTitle = title1}, ObsTgInvoice{obsChatId = chat2, obsTitle = title2}) ->
             chat1 == chat2 && title1 == title2
-        (ObsTgReaction reaction1, ObsTgReaction reaction2) -> reaction1 == reaction2
+        (ObsTgReaction{obsTargetMsgId = target1, obsReaction = reaction1, obsIsBig = big1}, ObsTgReaction{obsTargetMsgId = target2, obsReaction = reaction2, obsIsBig = big2}) ->
+            target1 == target2
+                && reaction1 == reaction2
+                && big1 == big2
         (ObsTgEdit{obsTargetMsgId = target1, obsNewText = text1}, ObsTgEdit{obsTargetMsgId = target2, obsNewText = text2}) ->
             target1 == target2 && text1 == text2
         (ObsTgDelete delete1, ObsTgDelete delete2) -> delete1 == delete2
@@ -204,8 +218,13 @@ instance Show app => Show (Observation app) where
                 <> "}"
         ObsTgInvoice{obsChatId = chat, obsTitle = title} ->
             "ObsTgInvoice{obsChatId = " <> show chat <> ", obsTitle = " <> show title <> "}"
-        ObsTgReaction{obsTargetMsgId = target} ->
-            "ObsTgReaction{obsTargetMsgId = " <> show target <> "}"
+        ObsTgReaction{obsTargetMsgId = target, obsReaction = reaction, obsIsBig = big} ->
+            "ObsTgReaction{obsTargetMsgId = " <> show target
+                <> ", obsReaction = "
+                <> show reaction
+                <> ", obsIsBig = "
+                <> show big
+                <> "}"
         ObsTgEdit{obsTargetMsgId = target, obsNewText = newText} ->
             "ObsTgEdit{obsTargetMsgId = " <> show target <> ", obsNewText = " <> show newText <> "}"
         ObsTgDelete{obsTargetMsgId = target} ->
@@ -293,6 +312,10 @@ data DialogState = DialogState
     , dsLastPoll :: !(Maybe PollDigest)
     -- ^ digest of the last consumed 'ObsTgPoll' ('Nothing' before the first);
     -- NOT reset by later messages — messages and polls update their own fields
+    , dsLastReaction :: !(Maybe ReactionDigest)
+    -- ^ digest of the last consumed 'ObsTgReaction' ('Nothing' before the
+    -- first); NOT reset by later messages — messages and reactions update
+    -- their own fields
     }
 
 -- | Everything the dialog view keeps about a consumed poll: the ids a voting
@@ -310,9 +333,34 @@ data PollDigest = PollDigest
     }
     deriving (Eq, Show)
 
+-- | Everything the dialog view keeps about a consumed reaction: the target
+-- message id plus the reaction payload — the payload texts projected through
+-- 'reactionEmojiTexts' (a BDD step asserts on the TEXT it captured in the
+-- Gherkin document, without knowing which reaction kind carried it) and the
+-- big-animation flag, whose 'Maybe' honestly reflects \"the request left the
+-- field unset\".
+data ReactionDigest = ReactionDigest
+    { rdTargetMsgId :: Maybe MessageId -- ^ message the reaction was set on ('setMessageReactionRequestMessageId')
+    , rdEmojis      :: [Text]          -- ^ reaction payload texts ('reactionEmojiTexts' of 'setMessageReactionRequestReaction'), empty when the request left @reaction@ unset
+    , rdIsBig       :: Maybe Bool      -- ^ big-animation flag ('setMessageReactionRequestIsBig'), 'Nothing' when unset
+    }
+    deriving (Eq, Show)
+
+-- | Project a reaction list to its payload texts: the emoji of an emoji
+-- reaction, the custom emoji id of a custom-emoji reaction. The shared
+-- matching vocabulary of the reaction steps — a step asserts on the payload
+-- text (e.g. @\"👍\"@) regardless of which reaction kind carried it.
+-- POST-CONTRACT: The result has the same length and order as the input.
+reactionEmojiTexts :: [ReactionType] -> [Text]
+reactionEmojiTexts = map payloadOf
+  where
+    -- | payload text of one reaction
+    payloadOf ReactionTypeEmoji{reactionTypeEmojiEmoji = emoji} = emoji
+    payloadOf ReactionTypeCustomEmoji{reactionTypeCustomEmojiCustomEmojiId = customId} = customId
+
 -- | Dialog state before anything has been consumed.
 emptyDialogState :: DialogState
-emptyDialogState = DialogState Nothing Nothing Nothing
+emptyDialogState = DialogState Nothing Nothing Nothing Nothing
 
 -- | Caller-owned consumption state threaded through BDD steps: which journal
 -- entries have already been observed, a derived view of the dialog, and the
@@ -396,9 +444,11 @@ Semantics:
   'AwaitTimeout'. The timeout is the ONLY source of non-determinism.
 * /Dialog/: a matched 'ObsTgMessage' folds into the derived dialog state
   ('dsLastReply' from the message text, 'dsLastKeyboard' from its
-  'obsMarkup'), and a matched 'ObsTgPoll' folds its 'PollDigest' into
-  'dsLastPoll'. Other observations leave the dialog untouched. Convention: one
-  'awaitObservation' on 'ObsTgMessage' corresponds to exactly one bot message.
+  'obsMarkup'), a matched 'ObsTgPoll' folds its 'PollDigest' into
+  'dsLastPoll', and a matched 'ObsTgReaction' folds its 'ReactionDigest' into
+  'dsLastReaction'. Other observations leave the dialog untouched. Convention:
+  one 'awaitObservation' on 'ObsTgMessage' corresponds to exactly one bot
+  message.
 
 PRE-CONTRACT: None. (The state may be freshly allocated; the budget is
 conventionally 'defaultAwaitBudgetUs' — 2 seconds, like TgTest's
@@ -468,13 +518,15 @@ peekLastConsumed st = case ssLastConsumed st of
         entries <- readTVarIO (observationLogEntries (ssLog st))
         pure (find ((== lastN) . sqNumber) entries)
 
--- | Fold one matched observation into the derived dialog state. Two
+-- | Fold one matched observation into the derived dialog state. Three
 -- observation kinds are interpreted: 'ObsTgMessage' sets 'dsLastReply' from
 -- the message text and 'dsLastKeyboard' from its 'obsMarkup'; 'ObsTgPoll'
 -- sets 'dsLastPoll' from the poll's ids, question and options, mirroring the
--- request's thread id, anonymity flag and close date into the digest. The two
--- families update their own fields and leave each other untouched — a
--- message following a poll does not invalidate the poll digest.
+-- request's thread id, anonymity flag and close date into the digest;
+-- 'ObsTgReaction' sets 'dsLastReaction' from the target id, the projected
+-- payload texts and the big-animation flag. The three families update their
+-- own fields and leave each other untouched — a message following a poll
+-- does not invalidate the poll digest.
 updateDialog :: DialogState -> Observation app -> DialogState
 updateDialog ds ObsTgMessage{obsText = txt, obsMarkup = markup} =
     ds{dsLastReply = Just txt, dsLastKeyboard = markup}
@@ -489,6 +541,16 @@ updateDialog ds ObsTgPoll{obsPollId = pid, obsQuestion = question, obsOptions = 
                     , pdThreadId = threadId
                     , pdIsAnonymous = isAnonymous
                     , pdCloseDate = closeDate
+                    }
+        }
+updateDialog ds ObsTgReaction{obsTargetMsgId = target, obsReaction = reaction, obsIsBig = isBig} =
+    ds
+        { dsLastReaction =
+            Just
+                ReactionDigest
+                    { rdTargetMsgId = target
+                    , rdEmojis = maybe [] reactionEmojiTexts reaction
+                    , rdIsBig = isBig
                     }
         }
 updateDialog ds _ = ds

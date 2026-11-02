@@ -83,6 +83,7 @@ module LazyCircus.Testing.TgTest (
     waitForReplyWithKeyboard,
     waitForReplyWithKeyboardIn,
     waitForReaction,
+    waitForReactionWith,
     waitForFile,
     waitForDeletion,
     -- ** Assertions and control
@@ -107,6 +108,7 @@ import Telegram.Bot.API.GettingUpdates (UpdateId, updateUpdateId)
 import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..), PollId)
 import Telegram.Bot.Extra.Headless (feedUpdates, runHeadlessBot)
 
+import LazyCircus.Testing.Bdd.Journal (reactionEmojiTexts)
 import LazyCircus.Testing.Performer
     ( Mocks
     , Mode (..)
@@ -634,6 +636,20 @@ waitForReaction targetId =
         waitForMatching
             (\om -> omKind om == OutSetReaction && omMessageId om == Just targetId)
             ("a reaction on message " <> tshow targetId)
+
+{- | Wait for a reaction with a specific emoji payload: blocks on the outgoing
+mailbox via STM (see 'waitForMatching'; no polling) until the bot sets a
+reaction carrying @emoji@ on the message @targetId@, consuming that capture.
+The emoji is matched against the payload projection ('reactionEmojiTexts'), so
+the same op matches emoji and custom-emoji reactions alike. Use the 'MessageId'
+returned by a @send*@ op (the user message the bot is expected to react to).
+-}
+waitForReactionWith :: MessageId -> Text -> TelegramTestScript ()
+waitForReactionWith targetId emoji =
+    void $
+        waitForMatching
+            (\om -> omKind om == OutSetReaction && omMessageId om == Just targetId && emoji `elem` reactionEmojiTexts (fromMaybe [] (omReaction om)))
+            ("a \"" <> emoji <> "\" reaction on message " <> tshow targetId)
 
 {- | Wait for the bot to delete the message with the given id.
 

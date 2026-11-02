@@ -140,7 +140,7 @@ import RIO.Process (HasProcessContext (..))
 import RIO.Time (NominalDiffTime, getCurrentTime)
 import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
-import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollCloseDate, sendPollIsAnonymous, sendPollMessageThreadId, sendPollOptions, sendPollQuestion, setMessageReactionRequestChatId, setMessageReactionRequestMessageId)
+import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, ReactionType, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollCloseDate, sendPollIsAnonymous, sendPollMessageThreadId, sendPollOptions, sendPollQuestion, setMessageReactionRequestChatId, setMessageReactionRequestIsBig, setMessageReactionRequestMessageId, setMessageReactionRequestReaction)
 import Telegram.Bot.API.Types (File (..), FileId (..), InputFile (..), MessageId (..), PollId (..), inputPollOptionText)
 
 -- | Response factory used by the Telegram mock to derive a reply from one outgoing request.
@@ -185,6 +185,9 @@ data OutgoingMessage = OutgoingMessage
     -- ^ assigned incremental id (sendMessage/sendDocument/sendPoll/sendInvoice) or target id (reaction/edit)
     , omReplyMarkup :: Maybe SomeReplyMarkup
     -- ^ inline keyboard attached to a sent message, if any
+    , omReaction :: Maybe [ReactionType]
+    -- ^ reaction list of a @setMessageReaction@ request ('Nothing' for every
+    -- other operation)
     }
 
 -- | Manual 'Show' for 'OutgoingMessage' because 'SomeReplyMarkup' has no 'Show'
@@ -196,6 +199,7 @@ instance Show OutgoingMessage where
             <> ", omText = " <> show (omText om)
             <> ", omMessageId = " <> show (omMessageId om)
             <> ", omReplyMarkup = " <> maybe "Nothing" (const "(markup)") (omReplyMarkup om)
+            <> ", omReaction = " <> show (omReaction om)
             <> " }"
 
 -- | Telegram mock state used by the test performer.
@@ -503,8 +507,13 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                             , omText = Nothing
                             , omMessageId = Just (setMessageReactionRequestMessageId req)
                             , omReplyMarkup = Nothing
+                            , omReaction = setMessageReactionRequestReaction req
                             }
-                        ObsTgReaction{obsTargetMsgId = Just (setMessageReactionRequestMessageId req)}
+                        ObsTgReaction
+                            { obsTargetMsgId = Just (setMessageReactionRequestMessageId req)
+                            , obsReaction = setMessageReactionRequestReaction req
+                            , obsIsBig = setMessageReactionRequestIsBig req
+                            }
             Real -> timedAndLog "Telegram" "SetMessageReaction" $ TG.setMessageReaction req
     answerCallbackQuery' req = do
         mode <- asks (tcTelegram . testConfig . app)
@@ -525,6 +534,7 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                             , omText = Just (answerPreCheckoutQueryPreCheckoutQueryId req)
                             , omMessageId = Nothing
                             , omReplyMarkup = Nothing
+                            , omReaction = Nothing
                             }
                         ObsTgPreCheckoutAnswer
                             { obsQueryId = answerPreCheckoutQueryPreCheckoutQueryId req
@@ -545,6 +555,7 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                             , omText = Just (editMessageTextText req)
                             , omMessageId = editMessageTextMessageId req
                             , omReplyMarkup = Nothing
+                            , omReaction = Nothing
                             }
                         ObsTgEdit{obsTargetMsgId = editMessageTextMessageId req, obsNewText = editMessageTextText req}
                 pure Nothing
@@ -563,6 +574,7 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                             , omText = Nothing
                             , omMessageId = Just messageId
                             , omReplyMarkup = Nothing
+                            , omReaction = Nothing
                             }
                         ObsTgDelete{obsTargetMsgId = Just messageId}
             Real -> timedAndLog "Telegram" "DeleteMessage" $ TG.deleteMessage chatId messageId
@@ -582,6 +594,7 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                                 , omText = sendDocumentCaption req
                                 , omMessageId = Just mid
                                 , omReplyMarkup = Nothing
+                                , omReaction = Nothing
                                 }
                         )
                         -- journal observation, recorded in the SAME transaction
@@ -610,6 +623,7 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                                 , omText = Just (sendPollQuestion req)
                                 , omMessageId = Just mid
                                 , omReplyMarkup = Nothing
+                                , omReaction = Nothing
                                 }
                         )
                         -- journal observation, recorded in the SAME transaction
@@ -649,6 +663,7 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                                 , omText = Just (sendInvoiceTitle req)
                                 , omMessageId = Just mid
                                 , omReplyMarkup = Nothing
+                                , omReaction = Nothing
                                 }
                         )
                         -- journal observation, recorded in the SAME transaction
@@ -684,6 +699,7 @@ outgoingSendMessage mid chatId text markup =
         , omText = text
         , omMessageId = Just mid
         , omReplyMarkup = markup
+        , omReaction = Nothing
         }
 
 {- | Publish an 'OutgoingMessage' that already carries its own id (a reaction,

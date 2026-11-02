@@ -263,7 +263,7 @@ capturedSendPoll captures = case filter ((== OutSendPoll) . omKind) captures of
     [pollCapture] -> pure pollCapture
     _ -> do
         expectationFailure ("Expected exactly one OutSendPoll capture, got: " <> show captures)
-        pure (OutgoingMessage OutSendPoll Nothing Nothing Nothing Nothing)
+        pure (OutgoingMessage OutSendPoll Nothing Nothing Nothing Nothing Nothing)
 
 -- | Recover the 'PollId' the Telegram mock assigned to a captured @sendPoll@.
 -- The mock derives the id from its message-id counter via 'mockPollId', so

@@ -1,6 +1,6 @@
 cabal-version: 2.0
 
--- This file has been generated from package.yaml by hpack version 0.38.0.
+-- This file has been generated from package.yaml by hpack version 0.39.6.
 --
 -- see: https://github.com/sol/hpack
 
@@ -367,6 +367,7 @@ test-suite lazy-circus-test
       LazyCircus.Testing.Bdd.Runner
       LazyCircus.Testing.Bdd.Step
       LazyCircus.Testing.Bdd.Tg
+      LazyCircus.Testing.Orphans
       LazyCircus.Testing.Performer
       LazyCircus.Testing.TgTest
       LazyCircus.Testing.Updates

@@ -31,6 +31,7 @@ library
       LazyCircus.Testing.Bdd.Runner
       LazyCircus.Testing.Bdd.Step
       LazyCircus.Testing.Bdd.Tg
+      LazyCircus.Testing.Orphans
       LazyCircus.Testing.Performer
       LazyCircus.Testing.TgTest
       LazyCircus.Testing.Updates
@@ -78,6 +79,7 @@ test-suite test
       Bdd.JournalSpec
       Bdd.PatternSpec
       Bdd.PollSpec
+      Bdd.ReactionSpec
       Bdd.RunnerSpec
       Bdd.StepSpec
       Bdd.TgSpec

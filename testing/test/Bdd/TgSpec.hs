@@ -23,6 +23,7 @@ import LazyCircus.App.Service (NoServiceLib (..))
 import LazyCircus.Testing.Bdd.Journal
     ( DialogState (..)
     , Observation (..)
+    , ReactionDigest (..)
     , ScenarioState (..)
     , appendObservation
     , newScenarioState
@@ -36,7 +37,9 @@ import LazyCircus.Testing.Bdd.Tg
     , botRepliesWithKeyboard
     , botRepliesWithMessage
     , botReactsTo
+    , botReactsWith
     , botSendsDocument
+    , reactionIsBig
     )
 import LazyCircus.Testing.Performer (Mocks, TestConfig)
 import LazyCircus.Testing.TgTest
@@ -51,6 +54,7 @@ import Telegram.Bot.API.Types
     ( InlineKeyboardButton (..)
     , InlineKeyboardMarkup (..)
     , MessageId (..)
+    , ReactionType (..)
     )
 
 spec :: Spec
@@ -141,7 +145,7 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
         st0 <- newScenarioState :: IO (ScenarioState ())
         let journal = ssLog st0
         atomically $ do
-            appendObservation journal ObsTgReaction{obsTargetMsgId = Just (MessageId 5)}
+            appendObservation journal (tgReactionWith "👍" Nothing (MessageId 5))
             appendObservation journal ObsTgDelete{obsTargetMsgId = Just (MessageId 6)}
             appendObservation journal ObsTgDocument{obsChatId = Just (ChatId 1), obsFileId = Nothing}
         let script = do
@@ -156,6 +160,101 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
                 -- reactions, deletions and documents are not dialog replies
                 dsLastReply (ssDialog st3) `shouldBe` Nothing
                 isNothing (dsLastKeyboard (ssDialog st3)) `shouldBe` True
+                -- ...but the consumed reaction folded its digest
+                dsLastReaction (ssDialog st3)
+                    `shouldBe` Just
+                        ReactionDigest
+                            { rdTargetMsgId = Just (MessageId 5)
+                            , rdEmojis = ["👍"]
+                            , rdIsBig = Nothing
+                            }
+
+    it "botReactsWith consumes the matching reaction and folds its digest" $ do
+        st0 <- newScenarioState :: IO (ScenarioState ())
+        let journal = ssLog st0
+        atomically $ do
+            appendObservation journal (tgReactionWith "👍" Nothing (MessageId 5))
+            appendObservation journal (tgReactionWith "🔥" (Just True) (MessageId 6))
+        result <- runDialogScript (thenActionWithParams [("$emoji", "🔥")] botReactsWith st0)
+        case result of
+            Left err -> expectationFailure ("step aborted: " <> show err)
+            Right (st1, _) -> do
+                -- only the 🔥 reaction was consumed; the 👍 one stays available
+                ssConsumed st1 `shouldBe` Set.singleton 1
+                dsLastReaction (ssDialog st1)
+                    `shouldBe` Just
+                        ReactionDigest
+                            { rdTargetMsgId = Just (MessageId 6)
+                            , rdEmojis = ["🔥"]
+                            , rdIsBig = Just True
+                            }
+                -- a later bot message does not invalidate the reaction digest
+                atomically (appendObservation journal (tgMsg "plain" (MessageId 0)))
+                result2 <- runDialogScript (thenActionWithParams [("$text", "plain")] botRepliesWithMessage st1)
+                case result2 of
+                    Left err -> expectationFailure ("step aborted: " <> show err)
+                    Right (st2, _) -> do
+                        dsLastReply (ssDialog st2) `shouldBe` Just "plain"
+                        dsLastReaction (ssDialog st2)
+                            `shouldBe` Just
+                                ReactionDigest
+                                    { rdTargetMsgId = Just (MessageId 6)
+                                    , rdEmojis = ["🔥"]
+                                    , rdIsBig = Just True
+                                    }
+        -- no reaction carries the emoji: the step times out and consumes nothing
+        mismatch <- runDialogScript (thenActionWithParams [("$emoji", "🙁")] botReactsWith st0)
+        case mismatch of
+            Left (TgTestGuardFailed reason) -> do
+                reason `shouldSatisfy` ("timed out" `T.isInfixOf`)
+                reason `shouldSatisfy` ("waiting for a \"🙁\" reaction" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a timeout guard, got: " <> show other)
+            Right _ -> expectationFailure "expected the step to time out"
+
+    it "reactionIsBig refuses before a reaction is consumed, then pins the digest" $ do
+        st0 <- newScenarioState :: IO (ScenarioState ())
+        let journal = ssLog st0
+        -- before anything is consumed the continuation aborts instead of waiting
+        tooEarly <- runDialogScript (thenAction reactionIsBig st0)
+        case tooEarly of
+            Left (TgTestGuardFailed reason) ->
+                reason `shouldSatisfy` ("no reaction has been consumed" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+            Right _ -> expectationFailure "expected the continuation to refuse an empty dialog"
+        -- an unset is_big refuses (the honest Nothing)
+        atomically (appendObservation journal (tgReactionWith "👍" Nothing (MessageId 5)))
+        st1 <- expectStepSuccess (runDialogScript (thenAction botReactsTo st0))
+        unset <- runDialogScript (thenAction reactionIsBig st1)
+        case unset of
+            Left (TgTestGuardFailed reason) ->
+                reason `shouldSatisfy` ("left is_big unset" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+            Right _ -> expectationFailure "expected the continuation to refuse an unset is_big"
+        -- an explicitly small animation refuses too
+        atomically (appendObservation journal (tgReactionWith "👎" (Just False) (MessageId 6)))
+        st2 <- expectStepSuccess (runDialogScript (thenAction botReactsTo st1))
+        small <- runDialogScript (thenAction reactionIsBig st2)
+        case small of
+            Left (TgTestGuardFailed reason) ->
+                reason `shouldSatisfy` ("small animation" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+            Right _ -> expectationFailure "expected the continuation to refuse a small animation"
+        -- a consumed big reaction passes: NO wait, NO consumption
+        atomically (appendObservation journal (tgReactionWith "🔥" (Just True) (MessageId 7)))
+        st3 <- expectStepSuccess (runDialogScript (thenAction botReactsTo st2))
+        result <- runDialogScript (thenAction reactionIsBig st3)
+        case result of
+            Left err -> expectationFailure ("continuation aborted: " <> show err)
+            Right (st4, _) -> ssConsumed st4 `shouldBe` ssConsumed st3
+
+    it "reaction observations compare by full structural equality (orphan Eq)" $ do
+        tgReactionWith "👍" Nothing (MessageId 5) `shouldBe` tgReactionWith "👍" Nothing (MessageId 5)
+        tgReactionWith "👍" Nothing (MessageId 5) `shouldNotBe` tgReactionWith "🔥" Nothing (MessageId 5)
+        tgReactionWith "👍" Nothing (MessageId 5) `shouldNotBe` tgReactionWith "👍" (Just True) (MessageId 5)
+        -- the orphan Eq itself: same payload, different type field
+        ReactionTypeEmoji "emoji" "👍" `shouldNotBe` ReactionTypeEmoji "paid" "👍"
+        -- cross-constructor is never equal, even with a shared payload text
+        ReactionTypeEmoji "emoji" "👍" `shouldNotBe` ReactionTypeCustomEmoji "custom_emoji" "👍"
 
     it "a reply that never arrives times out with AwaitTimeout and consumes nothing" $ do
         st0 <- newScenarioState :: IO (ScenarioState ())
@@ -187,6 +286,17 @@ tgMsg txt mid =
         , obsText = txt
         , obsMsgId = mid
         , obsMarkup = Nothing
+        }
+
+-- | A bot reaction observation on the given message with one emoji payload
+-- and the given big-animation flag ('Nothing' = the request left @is_big@
+-- unset).
+tgReactionWith :: Text -> Maybe Bool -> MessageId -> Observation ()
+tgReactionWith emoji isBig mid =
+    ObsTgReaction
+        { obsTargetMsgId = Just mid
+        , obsReaction = Just [ReactionTypeEmoji "emoji" emoji]
+        , obsIsBig = isBig
         }
 
 -- | A bot text-message observation carrying a one-button inline keyboard.

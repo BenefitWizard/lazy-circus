@@ -140,7 +140,8 @@ data Observation app
                     , obsThreadId :: Maybe MessageThreadId
                     , obsIsAnonymous :: Maybe Bool, obsCloseDate :: Maybe Int }
     | ObsTgInvoice  { obsChatId :: Maybe ChatId, obsTitle :: Text }
-    | ObsTgReaction { obsTargetMsgId :: Maybe MessageId }
+    | ObsTgReaction { obsTargetMsgId :: Maybe MessageId
+                    , obsReaction :: Maybe [ReactionType], obsIsBig :: Maybe Bool }
     | ObsTgEdit     { obsTargetMsgId :: Maybe MessageId, obsNewText :: Text }
     | ObsTgDelete   { obsTargetMsgId :: Maybe MessageId }
     | ObsTgPreCheckoutAnswer { obsQueryId :: Text, obsOk :: Bool }
@@ -241,6 +242,55 @@ The observability example is there too: the `/poll` scenario pins `Just`-valued 
 fields via `the poll is public` and spec-local digest-pin steps, the `/anonpoll`
 scenario pins the explicit `Just True` and the honest `Nothing`s, and the refusal
 feature proves the publicness steps abort before a poll is consumed.
+
+## Telegram Step Dictionary (Reactions)
+
+The mocked performer journals every `setMessageReaction` with its full shape —
+the target message id plus the request's `reaction` list and `is_big` flag — as
+`ObsTgReaction`. The dialog state folds a consumed reaction into
+`dsLastReaction :: Maybe ReactionDigest` (`rdTargetMsgId` / `rdEmojis` /
+`rdIsBig`); messages do NOT invalidate the digest. `rdEmojis` holds the PAYLOAD
+TEXTS projected through `reactionEmojiTexts` (the emoji of an emoji reaction,
+the custom emoji id of a custom-emoji one) so Gherkin steps match the text they
+captured without knowing the reaction kind; `rdIsBig`'s `Maybe` mirrors the
+request field: `Nothing` honestly means "left unset".
+
+`ReactionType` (from telegram-bot-api) has no `Eq`, so the testing toolkit
+defines an orphan `Eq` instance in `LazyCircus.Testing.Orphans` (constructor-wise
+record equality; imported via the journal) — `ObsTgReaction`'s `Eq` is therefore
+full structural equality. `Show` comes from the library.
+
+Library steps (in `LazyCircus.Testing.Bdd.Tg`, registry-ready):
+
+```gherkin
+When the user sends "/react"
+Then the bot reacts to a message        # any reaction (target-agnostic)
+Then the bot reacts with "👍"           # payload-matching: consumes a reaction
+                                       # whose emoji projection contains "👍"
+And the reaction is big                 # And-continuation on the digest:
+                                       # is_big was set to Just True
+```
+
+- `botReactsTo` (`Then`, `the bot reacts to a message`) consumes exactly one
+  `ObsTgReaction` on any message — the presence-only form.
+- `botReactsWith` (`Then`, `the bot reacts with "$emoji"`) consumes exactly one
+  `ObsTgReaction` whose emoji projection contains the capture; folds the digest
+  into `dsLastReaction`. Times out with nothing consumed when no reaction
+  carries the emoji.
+- `reactionIsBig` (`Then`/And, `the reaction is big`) — And-continuation asserting
+  the last consumed reaction's `rdIsBig == Just True`; never waits, never
+  consumes. Aborts with the no-consumed-reaction reason when nothing was
+  consumed, and with the unset/small explanation when the flag is `Nothing` or
+  `Just False`.
+- The `tgTest` DSL mirrors the pair: `waitForReaction :: MessageId -> _`
+  (target-only) and `waitForReactionWith :: MessageId -> Text -> _` (target +
+  emoji membership in the payload projection).
+
+A working end-to-end example (bot reacts with 👍 on `/react` leaving `is_big`
+unset, with 🔥 and `is_big = Just True` on `/reactbig`; digest pins for the
+deterministic target — the factory's first user message is always `MessageId 1`
+— plus the is-big refusal feature) lives in `testing/test/Bdd/ReactionSpec.hs` —
+mirror it for your own reaction flows.
 
 ## The Acting User
 

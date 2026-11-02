@@ -81,8 +81,10 @@ import Telegram.Bot.API
     , editMessageTextChatId
     , editMessageTextMessageId
     , editMessageTextText
+    , setMessageReactionRequestIsBig
+    , setMessageReactionRequestReaction
     )
-import Telegram.Bot.API.Types (MessageId (..), MessageThreadId (..), PollId (..))
+import Telegram.Bot.API.Types (MessageId (..), MessageThreadId (..), PollId (..), ReactionType (..))
 
 import LazyCircus.Testing.Updates (defaultTestUserId)
 
@@ -268,8 +270,34 @@ spec = aroundAll withJournalApp $ do
             observed
                 `shouldBe` [ ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "draft", obsMsgId = MessageId 0, obsMarkup = Nothing}
                            , ObsTgEdit{obsTargetMsgId = Just (MessageId 0), obsNewText = "final text"}
-                           , ObsTgReaction{obsTargetMsgId = Just (MessageId 0)}
+                           , ObsTgReaction{obsTargetMsgId = Just (MessageId 0), obsReaction = Nothing, obsIsBig = Nothing}
                            , ObsTgDelete{obsTargetMsgId = Just (MessageId 0)}
+                           ]
+
+        it "journals the reaction payload and big-animation flag of the request" $ \app -> do
+            journal <- newObservationLog :: IO (ObservationLog ())
+            let cfg = defaultTestConfig{tcJournal = Just journal}
+                targetId = MessageId 3
+                reactReq =
+                    (defSetMessageReaction (SomeChatId (ChatId 1)) targetId)
+                        { setMessageReactionRequestReaction = Just [ReactionTypeEmoji "emoji" "👍"]
+                        , setMessageReactionRequestIsBig = Just True
+                        }
+            _ <-
+                runWithDefaultConfig app cfg $
+                    runScenarioProgram $
+                        void $
+                            evalScript $
+                                tgScript "demo-bot" $
+                                    Tg.setMessageReaction reactReq
+
+            observed <- readObservations journal
+            observed
+                `shouldBe` [ ObsTgReaction
+                                { obsTargetMsgId = Just targetId
+                                , obsReaction = Just [ReactionTypeEmoji "emoji" "👍"]
+                                , obsIsBig = Just True
+                                }
                            ]
 
         it "journals ObsAsyncScheduled for a runAsync capture in Mocked mode" $ \app -> do

@@ -316,7 +316,7 @@ capturedOfKind kind captures = case filter ((== kind) . omKind) captures of
     [capture] -> pure capture
     _ -> do
         expectationFailure ("Expected exactly one " <> show kind <> " capture, got: " <> show captures)
-        pure (OutgoingMessage kind Nothing Nothing Nothing Nothing)
+        pure (OutgoingMessage kind Nothing Nothing Nothing Nothing Nothing)
 
 -- | Confirmation text the handler sends on first credit, for the configured
 -- package (mirrors @StarsScenarios.creditText@).

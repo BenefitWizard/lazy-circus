@@ -30,22 +30,26 @@ in their own capture, resolved through
 'LazyCircus.Testing.Updates.userIdForLogin', regardless of the current actor.
 
 Await semantics (one await = one observation): every @Then@ constructor
-except 'botReplyContains', 'pollIsPublic' and 'pollIsAnonymous' performs ONE
+except 'botReplyContains', 'pollIsPublic', 'pollIsAnonymous' and
+'reactionIsBig' performs ONE
 'awaitObservation' whose predicate
 matches ONLY the core @ObsTg*@ constructors — app-specific 'ObsApp' entries
 are skipped over and never consumed. A matched 'ObsTgMessage' folds into
 'ssDialog' ('dsLastReply' from the text, 'dsLastKeyboard' from its markup),
-and a matched 'ObsTgPoll' folds its 'PollDigest' into 'dsLastPoll' (what the vote
+a matched 'ObsTgPoll' folds its 'PollDigest' into 'dsLastPoll' (what the vote
 steps 'userVotesFor'\/'userVotesIn'\/'memberVotesFor'\/'memberVotesIn' vote
 against — the @user@ pair as the current actor ('actingUserId'), the
 @member@ pair as the cast member named in the step's @«@login@»@ capture,
-resolved through 'LazyCircus.Testing.Updates.userIdForLogin').
+resolved through 'LazyCircus.Testing.Updates.userIdForLogin'), and a matched
+'ObsTgReaction' folds its 'ReactionDigest' into 'dsLastReaction' (the target
+id, the projected emoji texts and the big-animation flag).
 'botReplyContains' is the
 And-continuation: it re-inspects the last consumed entry via
 'peekLastConsumed' — NO wait and NO consumption — asserting on @dsLastReply@
 without moving the cursor. The publicness pair 'pollIsPublic' and
 'pollIsAnonymous' are fellow And-continuations asserting on the last consumed
-poll's digest ('dsLastPoll') — likewise with NO wait and NO consumption.
+poll's digest ('dsLastPoll') — likewise with NO wait and NO consumption; so
+is 'reactionIsBig' on the last consumed reaction's digest ('dsLastReaction').
 
 The module also exports 'tgTestBootstrap', the canonical @tgTest@-shaped
 'LazyCircus.Testing.Bdd.Runner.ScenarioBootstrap': it executes a BDD
@@ -61,6 +65,8 @@ module LazyCircus.Testing.Bdd.Tg
     , pollIsPublic
     , pollIsAnonymous
     , botReactsTo
+    , botReactsWith
+    , reactionIsBig
     , botDeletesMessage
     , botSendsDocument
     , userSends
@@ -81,12 +87,14 @@ import LazyCircus.Testing.Bdd.Journal
     , DialogState (..)
     , Observation (..)
     , PollDigest (..)
+    , ReactionDigest (..)
     , ScenarioState (..)
     , Sequenced (..)
     , actingUserId
     , awaitObservation
     , defaultAwaitBudgetUs
     , peekLastConsumed
+    , reactionEmojiTexts
     )
 import LazyCircus.Testing.Bdd.Pattern (StepParams (..), lookupParam)
 import LazyCircus.Testing.Bdd.Runner (ScenarioBootstrap)
@@ -451,12 +459,73 @@ memberVotesIn =
 --
 -- PRE-CONTRACT: None.
 -- POST-CONTRACT: On success exactly one 'ObsTgReaction' has been consumed;
--- the dialog state is untouched (reactions are not dialog replies). Aborts
--- with a timeout reason when none appears within 'defaultAwaitBudgetUs'.
+-- the reaction digest is folded into 'dsLastReaction' (the target id, the
+-- projected emoji texts and the big flag). Aborts with a timeout reason when
+-- none appears within 'defaultAwaitBudgetUs'.
 botReactsTo :: StepDef TelegramTestScript c (ScenarioState app) a
 botReactsTo =
     thenDef "the bot reacts to a message" $ \_params ->
         awaitMatching "a message reaction" isReactionObs
+
+-- | @the bot reacts with "$emoji"@ — the bot set a reaction whose payload
+-- contains the step's quoted emoji capture. The emoji is matched against the
+-- payload projection ('reactionEmojiTexts'), so the same step matches emoji
+-- and custom-emoji reactions alike.
+--
+-- PRE-CONTRACT: The expected emoji appears inside double quotes in the step
+-- text (the pattern's @"$emoji"@ span) — the runner matched the step, so the
+-- capture is present.
+-- POST-CONTRACT: On success exactly one 'ObsTgReaction' carrying the emoji
+-- has been consumed and folded into 'ssDialog' as 'dsLastReaction' — the
+-- 'reactionIsBig' continuation asserts against it. When no unconsumed
+-- matching reaction appears within 'defaultAwaitBudgetUs', the step aborts
+-- with a timeout reason and nothing is consumed.
+botReactsWith :: StepDef TelegramTestScript c (ScenarioState app) a
+botReactsWith =
+    thenDef "the bot reacts with \"$emoji\"" $ \params st -> do
+        let emoji = fromMaybe "" (lookupParam "$emoji" params)
+        awaitMatching ("a \"" <> emoji <> "\" reaction") (isReactionWith emoji) st
+
+-- | @the reaction is big@ — And-continuation asserting the last consumed
+-- reaction was sent as a BIG animation: the request set @is_big@ to 'True'
+-- explicitly.
+--
+-- PRE-CONTRACT: A reaction has been consumed by a previous step (e.g.
+-- 'botReactsWith'), so 'dsLastReaction' holds its digest — the step aborts
+-- with an explanatory reason otherwise.
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. The reaction counts as big only when the digest's 'rdIsBig' is
+-- @Just True@ — a @Nothing@ (request left the flag unset) or @Just False@
+-- aborts the DSL with a guard failure.
+reactionIsBig :: StepDef TelegramTestScript c (ScenarioState app) a
+reactionIsBig =
+    thenDef "the reaction is big" $ \_params st ->
+        case dsLastReaction (ssDialog st) of
+            Nothing ->
+                guardWith noReactionYetReason False
+                    >> pure (st, Nothing)
+            Just digest -> do
+                guardWith (notBigReason digest) (rdIsBig digest == Just True)
+                pure (st, Nothing)
+
+-- | Guard-failure message when the And-continuation runs before any reaction
+-- was consumed.
+noReactionYetReason :: Text
+noReactionYetReason =
+    "no reaction has been consumed yet; a reaction-consuming step (e.g. 'the bot reacts with ...') must run first"
+
+-- | Guard-failure message when the consumed reaction is not big: covers an
+-- explicitly small animation and the unset-flag case alike.
+notBigReason :: ReactionDigest -> Text
+notBigReason digest = case rdIsBig digest of
+    Nothing ->
+        "the reaction on message " <> tshow (rdTargetMsgId digest)
+            <> " left is_big unset in the send request; the step requires the explicit"
+            <> " setMessageReactionRequestIsBig = Just True"
+    Just False ->
+        "the reaction on message " <> tshow (rdTargetMsgId digest)
+            <> " was sent with is_big = False (a small animation)"
 
 -- | @the bot deletes a message@ — the bot deleted a message.
 --
@@ -575,6 +644,13 @@ isKeyboardReply obs = case obs of
 isReactionObs :: Observation app -> Bool
 isReactionObs ObsTgReaction{} = True
 isReactionObs _ = False
+
+-- | Predicate: a reaction whose payload projection contains the given emoji
+-- text (matches emoji and custom-emoji reactions alike).
+isReactionWith :: Text -> Observation app -> Bool
+isReactionWith emoji ObsTgReaction{obsReaction = reactions} =
+    emoji `elem` maybe [] reactionEmojiTexts reactions
+isReactionWith _ _ = False
 
 -- | Predicate: a message deletion.
 isDeleteObs :: Observation app -> Bool
