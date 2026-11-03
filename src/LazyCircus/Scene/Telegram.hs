@@ -16,10 +16,7 @@ module LazyCircus.Scene.Telegram (
   sendDocument,
   sendPoll,
   sendInvoice,
-  sendImportantMessage,
   sendLongMessage,
-  scheduleMessage,
-  scheduleMessages,
   setBotCommands,
   setMessageReaction,
   answerCallbackQuery,
@@ -84,16 +81,7 @@ import LazyCircus.Scene.Telegram.Lang (sendPoll)
 import LazyCircus.Scene.Telegram.Lang (sendInvoice)
 
 
-import LazyCircus.Scene.Telegram.Lang (sendImportantMessage)
-
-
 import LazyCircus.Scene.Telegram.Lang (sendLongMessage)
-
-
-import LazyCircus.Scene.Telegram.Lang (scheduleMessage)
-
-
-import LazyCircus.Scene.Telegram.Lang (scheduleMessages)
 
 
 import LazyCircus.Scene.Telegram.Lang (setBotCommands)

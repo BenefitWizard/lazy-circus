@@ -9,7 +9,6 @@ import LazyCircus.App.Log (HasLogQueue, HasLoggingContext)
 import LazyCircus.LangCode
 import LazyCircus.Scene.Log (handleLogLang)
 import LazyCircus.Scene.Telegram.Lang
-import LazyCircus.Telegram.Types (WithImportance)
 import RIO
 import Telegram.Bot.API (ChatId, MessageId, Response, SendMessageRequest, SetMessageReactionRequest)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
@@ -24,11 +23,10 @@ class (Monad m) => TelegramScriptPerformer m where
   getFile' :: FileId -> m (Response File)
   downloadFile' :: File -> m ByteString
   getBotName' :: m Text
-  sendMessage' :: WithImportance SendMessageRequest -> m (Response Message)
+  sendMessage' :: SendMessageRequest -> m (Response Message)
   sendDocument' :: SendDocumentRequest -> m (Response Message)
   sendPoll' :: SendPollRequest -> m (PollId, Message)
   sendInvoice' :: SendInvoiceRequest -> m (Response Message)
-  scheduleMessages' :: [SendMessageRequest] -> m ()
   setBotCommands' :: HashMap LangCode [(Text, Text)] -> m ()
   setMessageReaction' :: SetMessageReactionRequest -> m ()
   answerCallbackQuery' :: AnswerCallbackQueryRequest -> m ()
@@ -65,9 +63,6 @@ runTelegram = iterM go
   go (SendInvoice req next) = do
     resp <- sendInvoice' req
     next resp
-  go (ScheduleMessages requests next) = do
-    scheduleMessages' requests
-    next
   go (SetBotCommands commands next) = do
     setBotCommands' commands
     next

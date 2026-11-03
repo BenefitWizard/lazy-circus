@@ -118,8 +118,7 @@ runScenarioProgram        :: ScenarioProgram Script sl a -> TestInterpreter sl a
 runScript                 :: Script a -> TestInterpreter sl app a
 runTestInterpreter        :: TestInterpreter sl app a -> RIO (EnvWithMocks sl app) a
 
-readTgRequests            :: Mocks sl -> IO [WithImportance SendMessageRequest]
-readScheduledTgRequests   :: Mocks sl -> IO [SendMessageRequest]
+readTgRequests            :: Mocks sl -> IO [SendMessageRequest]
 readOutgoingMailbox       :: Mocks sl -> IO [OutgoingMessage]      -- destructive drain
 readLog                   :: Mocks sl -> IO [AppLogMsg]
 readLogWithContext        :: Mocks sl -> IO [AppLogMsgWithContext]
@@ -278,7 +277,7 @@ captures side effects; `Real` delegates to production implementations without ca
 
 | Effect | `TestConfig` field | Mocked behavior (default) | Real behavior |
 |---|---|---|---|
-| Telegram `sendMessage` | `tcTelegram` | captures `WithImportance SendMessageRequest` in the `SomeRef` log (`readTgRequests`) AND publishes an `OutSendMessage` to the STM `outgoingMailbox` carrying a fresh incremental `MessageId`; returns the canned/default response stamped with that id | delegates to `TG.sendMessage` via `timedAndLog`; mailbox/request log stay empty |
+| Telegram `sendMessage` | `tcTelegram` | captures the `SendMessageRequest` in the `SomeRef` log (`readTgRequests`); dequeues the next canned response and — if it carries `responseOk = False` — throws the typed `TelegramApiRejected` built from it (mirroring production classification: nothing is published to the mailbox or journal), otherwise publishes an `OutSendMessage` to the STM `outgoingMailbox` carrying a fresh incremental `MessageId` and returns the response stamped with that id | delegates to `TG.sendMessage` via `timedAndLog`; mailbox/request log stay empty |
 | Telegram `sendDocument` | `tcTelegram` | publishes an `OutSendDocument` to the `outgoingMailbox` (with a fresh incremental `MessageId`) and returns the mock `defaultResponse` stamped with that id; not added to the `readTgRequests` log | delegates to `TG.sendDocument` via `timedAndLog` |
 | Telegram `sendPoll` | `tcTelegram` | publishes an `OutSendPoll` to the `outgoingMailbox` (`omText = Just` poll question, fresh incremental `MessageId`) and returns `(PollId, Message)` with poll id `poll-<assigned id>` and the message stamped with that id | delegates to `TG.sendPoll` via `timedAndLog` |
 | Telegram `sendInvoice` | `tcTelegram` | publishes an `OutSendInvoice` to the `outgoingMailbox` (`omChatId = Just` target chat, `omText = Just` invoice title, `omMessageId` = fresh incremental id; the invoice **payload is NOT captured**) and returns the mock `defaultResponse` stamped with that id; not added to the `readTgRequests` log | delegates to `TG.sendInvoice` via `timedAndLog` |
@@ -287,7 +286,6 @@ captures side effects; `Real` delegates to production implementations without ca
 | Telegram `editMessageText` | `tcTelegram` | publishes an `OutEditMessage` to the `outgoingMailbox`; still always returns `Nothing` | delegates to `TG.editMessageText` via `timedAndLog` (returns real response) |
 | Telegram `deleteMessage` | `tcTelegram` | publishes an `OutDeleteMessage` to the `outgoingMailbox` carrying the target `MessageId` | delegates to `TG.deleteMessage` via `timedAndLog` |
 | Telegram `setBotCommands` / `answerCallbackQuery` | `tcTelegram` | no-op (return unit) | delegates to `TG.*` via `timedAndLog` |
-| Telegram scheduled sends | `tcTelegram` | captured in a separate `SomeRef` list (`readScheduledTgRequests`) | delegates to `TG.scheduleMessages` via `timedAndLog` |
 | Telegram missing bot | `tcTelegram` | throws `NoBotConfigured` exactly like production dispatch | same |
 | Telegram `getBotName` | — (always real) | returns the supplied bot name | same |
 | Telegram `getFile` / `downloadFile` | `tcTelegram` | Mocked: serve staged canned downloads by `FileId` (third `createTgMock` argument / `addTgDownloads`); `getFile` reports the canned byte length as `fileFileSize`, `downloadFile` returns the staged bytes; an unstaged `FileId` throws | Real: delegates to `TG.getFile` / `TG.downloadFile` via `timedAndLog` |
@@ -561,7 +559,6 @@ import BotApp (ChatState (..), Model (..))
 import BotHandler (BotHandlerConfig (..), handleScenario)
 import LazyCircus.Testing.Performer (readTgRequests, runScenarioProgram, runWithDefaultMocks)
 import LazyCircus.Testing.Updates (mkTextUpdate)
-import LazyCircus.Telegram.Types (WithImportance (..))
 import Telegram.Bot.API (sendMessageText)
 
 idleModel :: Model
@@ -570,14 +567,20 @@ idleModel = Model Idle emptyConversation
 it "replies to /start with the welcome text" $ \app -> do
     (mocks, newModel) <- runWithDefaultMocks app $
         runScenarioProgram (handleScenario testConfig idleModel (mkTextUpdate "/start"))
-    replies <- map (sendMessageText . importanceValue) <$> readTgRequests mocks
+    replies <- map sendMessageText <$> readTgRequests mocks
     replies `shouldSatisfy` (not . null)
     head replies `shouldSatisfy` ("🎪 Welcome to Lazy Circus Bot!" `Text.isPrefixOf`)
     modelChatState newModel `shouldBe` Idle
-  where
-    importanceValue (Regular a) = a
-    importanceValue (Important a) = a
 ```
+
+Canned `sendMessage` responses (the second `createTgMock` argument) can encode
+rejections: a canned response with `responseOk = False` is classified exactly
+like production and throws `TelegramApiRejected` (error code, description and
+`responseParameters`' `retry_after` survive). This makes the scenario-level
+`sendImportantMessage` retry loop fully testable in Mocked mode: queue a 429
+rejection, run the combinator, assert the parked retry via `readScheduledTimers`,
+then execute it with `fireScheduledTimers` and assert the delivery (see
+`test/ImportantMessageRetrySpec.hs`).
 
 This pattern — drive `handleScenario` with a fake `Update` under the test
 performer, then assert on `readTgRequests` captures and the returned `Model` —

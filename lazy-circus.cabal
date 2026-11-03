@@ -336,6 +336,7 @@ test-suite lazy-circus-test
       ExtraContextKnobSpec
       FileCheckSpec
       HTTPLangSpec
+      ImportantMessageRetrySpec
       LogSpec
       LongTextSpec
       PomlEquivalenceSpec
@@ -351,6 +352,7 @@ test-suite lazy-circus-test
       TenantTransactionSpec
       TestDbSupport
       TestHelpers.Bot
+      TgFailureClassificationSpec
       TgFileOpsSpec
       TgMockMailboxSpec
       TgStarsOpsSpec

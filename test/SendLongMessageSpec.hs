@@ -21,7 +21,6 @@ import LazyCircus.Scenario (ScenarioProgram, evalScript)
 import LazyCircus.Scene.Telegram.Lang qualified as Tg (sendLongMessage)
 import LazyCircus.Script (Script)
 import LazyCircus.Telegram.LongText (splitTelegramText, telegramMessageChunkLimit)
-import LazyCircus.Telegram.Types (WithImportance (..))
 import LazyCircus.Testing.Performer (readTgRequests, runScenarioProgram, runWithDefaultMocks)
 import SimpleServiceLib (AllServices)
 import Telegram.Bot.API
@@ -46,11 +45,6 @@ botTestConfig = defaultDemoConfig{cfgTgToken = Just "123456:test-token"}
 withBotTestApp :: (DefaultApp AllServices -> IO ()) -> IO ()
 withBotTestApp action = withDemoApp botTestConfig $ \app -> action app
 
--- | Unwrap the 'SendMessageRequest' carried by a 'WithImportance' marker.
-importancePayload :: WithImportance SendMessageRequest -> SendMessageRequest
-importancePayload (Regular req) = req
-importancePayload (Important req) = req
-
 -- | Run 'Tg.sendLongMessage' as @demo-bot@ through the scene script language.
 sendLongScenario :: SendMessageRequest -> ScenarioProgram Script serviceLib [Response Message]
 sendLongScenario request =
@@ -70,7 +64,7 @@ spec = aroundAll withBotTestApp $ do
                 runWithDefaultMocks app $
                     runScenarioProgram $ sendLongScenario request
 
-            requests <- map importancePayload <$> readTgRequests mocks
+            requests <- readTgRequests mocks
             let expectedChunks = splitTelegramText longText
             T.length longText `shouldSatisfy` (> telegramMessageChunkLimit)
             map sendMessageText requests `shouldBe` expectedChunks
@@ -93,7 +87,7 @@ spec = aroundAll withBotTestApp $ do
                 runWithDefaultMocks app $
                     runScenarioProgram $ sendLongScenario request
 
-            requests <- map importancePayload <$> readTgRequests mocks
+            requests <- readTgRequests mocks
             map sendMessageText requests `shouldBe` ["short"]
             case map sendMessageParseMode requests of
                 [Just HTML] -> pure ()

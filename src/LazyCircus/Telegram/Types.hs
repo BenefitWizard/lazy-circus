@@ -1,10 +1,8 @@
 module LazyCircus.Telegram.Types (
     TgEmoji(..),
     fromTgEmoji,
-    WithImportance(..),
     BotEnv(..),
     AppWithBotEnv(..),
-    HasTgMessageQueue(..),
     TelegramClientError(..),
     NoPollInResponse(..),
     TelegramApiRejected(..),
@@ -15,8 +13,6 @@ import Network.HTTP.Types (Status)
 import RIO
 import Servant.Client hiding (Response)
 import Telegram.Bot.API (Message, ReactionType (..), Response, Token)
-
-import Telegram.Bot.API.Methods (SendMessageRequest)
 
 -- | Supported Telegram emoji reactions used by bot reply helpers.
 data TgEmoji
@@ -39,35 +35,24 @@ fromTgEmoji emoji =
         , reactionTypeEmojiEmoji = textDisplay emoji
         }
 
--- | Mark deferred Telegram send requests so downstream code can distinguish priority.
-data WithImportance a
-    = Regular a
-    | Important a
-
--- | Runtime bundle for one configured Telegram bot and its deferred message queue.
+-- | Runtime bundle for one configured Telegram bot.
 data BotEnv = BotEnv
     { botToken :: Token
     , botClientEnv :: ClientEnv
     , botName :: Text
-    , botMessageQueue :: TQueue SendMessageRequest
     }
 
--- | Show only identifying bot information for debug output.
+-- | Show only the bot name for debug output; the token inside 'botToken'
+-- must never reach logs or exception text.
+-- LAW: the rendered text contains no token material.
 instance Show BotEnv where
-    show env = "Bot Env for " <> show (botToken env)
+    show env = "Bot Env for " <> show (botName env)
 
 -- | Attach a concrete Telegram bot environment to an arbitrary application environment.
 data AppWithBotEnv app = AppWithBotEnv
     { botEnv :: BotEnv
     , app :: app
     }
-
--- | Capability class that exposes the deferred Telegram send-message queue from an environment.
-class HasTgMessageQueue env where
-    tgMessageQueueL :: Lens' env (TQueue SendMessageRequest)
-
-instance HasTgMessageQueue (AppWithBotEnv app) where
-    tgMessageQueueL = lens (botMessageQueue . botEnv) (\x y -> let be = botEnv x in x{botEnv = be{botMessageQueue = y}})
 
 -- | Wraps a Servant ClientError for typed exception handling in Telegram operations.
 newtype TelegramClientError = TelegramClientError ClientError
@@ -95,14 +80,17 @@ newtype NoPollInResponse = NoPollInResponse (Response Message)
 -- | Enables throwing and catching NoPollInResponse as a typed exception.
 instance Exception NoPollInResponse
 
--- | Telegram API rejected the request: the HTTP transport delivered a 2xx
+-- | Telegram API rejected the request: either the HTTP transport delivered a
+-- non-2xx failure response (e.g. 429 rate limit, 409 conflict), or a 2xx
 -- response whose @ok@ field is @false@ (seen with local Bot API servers and
--- proxies). The cause lives in the carried error code and description.
+-- proxies). The cause lives in the carried error code and description; a 429
+-- additionally carries the server-advised @retry_after@ delay.
 -- Carries only response payload fields — never request URLs, so the bot token
 -- cannot leak through 'Show'.
 data TelegramApiRejected = TelegramApiRejected
     { telegramApiRejectedErrorCode :: Maybe Integer -- ^ Bot API @error_code@ field, if present
     , telegramApiRejectedDescription :: Maybe Text  -- ^ Bot API @description@ field, if present
+    , telegramApiRejectedRetryAfter :: Maybe Int    -- ^ @parameters.retry_after@ seconds, present on 429 responses
     }
     deriving (Show, Eq)
 

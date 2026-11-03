@@ -220,9 +220,9 @@ newDefaultApp config = do
 
     buildRest rwPool mReadOnlyPool = do
         manager <- newTlsManager
-        botEnvsVal <- fmap M.fromList $ forM (cfgBotConfigs config) $ \(name, tokenText) -> do
-            botEnv <- makeBotEnv manager (Token tokenText, name)
-            pure (name, botEnv)
+        botEnvsVal <- fmap M.fromList $ forM (cfgBotConfigs config) $ \(name, tokenText) ->
+            let botEnv = makeBotEnv manager (Token tokenText, name)
+             in pure (name, botEnv)
         aiMethodsVal <- case cfgAiApiKey config of
             Just apiKey -> do
                 let baseUrl = fromMaybe "https://api.deepseek.com" (cfgAiBaseUrl config)

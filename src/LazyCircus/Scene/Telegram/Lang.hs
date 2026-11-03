@@ -13,10 +13,7 @@ module LazyCircus.Scene.Telegram.Lang (
   sendDocument,
   sendPoll,
   sendInvoice,
-  sendImportantMessage,
   sendLongMessage,
-  scheduleMessage,
-  scheduleMessages,
   setBotCommands,
   setMessageReaction,
   answerCallbackQuery,
@@ -31,7 +28,6 @@ import LazyCircus.LangCode
 import LazyCircus.Scene.Log (HasLogLang (..), LogLangF)
 import LazyCircus.Telegram.FileCheck (FileValidationError (..), checkDownloadedBytes, checkFileSize)
 import LazyCircus.Telegram.LongText (splitTelegramText)
-import LazyCircus.Telegram.Types (WithImportance (..))
 import RIO
 import Telegram.Bot.API (ChatId, Message, MessageId, PollId, Response (..), SendMessageRequest, SetMessageReactionRequest, sendMessageText)
 import Telegram.Bot.API.Methods.AnswerCallbackQuery (AnswerCallbackQueryRequest)
@@ -46,11 +42,10 @@ data TelegramScriptF a where
   GetFile :: FileId -> (Response File -> a) -> TelegramScriptF a
   DownloadFile :: File -> (ByteString -> a) -> TelegramScriptF a
   GetBotName :: (Text -> a) -> TelegramScriptF a
-  SendMessage :: (WithImportance SendMessageRequest) -> (Response Message -> a) -> TelegramScriptF a
+  SendMessage :: SendMessageRequest -> (Response Message -> a) -> TelegramScriptF a
   SendDocument :: SendDocumentRequest -> (Response Message -> a) -> TelegramScriptF a
   SendPoll :: SendPollRequest -> ((PollId, Message) -> a) -> TelegramScriptF a
   SendInvoice :: SendInvoiceRequest -> (Response Message -> a) -> TelegramScriptF a
-  ScheduleMessages :: [SendMessageRequest] -> a -> TelegramScriptF a
   SetMessageReaction :: SetMessageReactionRequest -> a -> TelegramScriptF a
   SetBotCommands :: HashMap LangCode [(Text, Text)] -> a -> TelegramScriptF a
   AnswerCallbackQuery :: AnswerCallbackQueryRequest -> a -> TelegramScriptF a
@@ -68,7 +63,6 @@ instance Functor TelegramScriptF where
   fmap f (SendDocument req next) = SendDocument req (f . next)
   fmap f (SendPoll req next) = SendPoll req (f . next)
   fmap f (SendInvoice req next) = SendInvoice req (f . next)
-  fmap f (ScheduleMessages requests next) = ScheduleMessages requests (f next)
   fmap f (SetBotCommands commands next) = SetBotCommands commands (f next)
   fmap f (SetMessageReaction request next) = SetMessageReaction request (f next)
   fmap f (AnswerCallbackQuery req next) = AnswerCallbackQuery req (f next)
@@ -150,19 +144,18 @@ POST-CONTRACT: Produces a script that yields the bot name text supplied by the i
 getBotName :: TelegramScript Text
 getBotName = liftF $ GetBotName id
 
-{- | Lift sending a regular Telegram message into the Telegram script language.
+{- | Lift sending a Telegram message into the Telegram script language: one
+attempt, no delivery policy.
+Delivery policy for important sends (deferred retry on rate limits) is an
+orchestration concern — see the scenario-level combinator
+'LazyCircus.sendImportantMessage'.
 PRE-CONTRACT: The request must be valid for the configured Telegram bot and API endpoint.
-POST-CONTRACT: Produces a script that yields the Telegram API response for a regular message send.
+POST-CONTRACT: Produces a script that yields the Telegram API response for the
+message send; a rejection by Telegram surfaces as a 'LazyCircus.Telegram.Types.TelegramApiRejected'
+exception from the interpreter.
 -}
 sendMessage :: SendMessageRequest -> TelegramScript (Response Message)
-sendMessage request = liftF $ SendMessage (Regular request) id
-
-{- | Lift sending an importance-marked Telegram message into the Telegram script language.
-PRE-CONTRACT: The request must be valid for the configured Telegram bot and any downstream importance handling.
-POST-CONTRACT: Produces a script that yields the Telegram API response for an importance-marked message send.
--}
-sendImportantMessage :: SendMessageRequest -> TelegramScript (Response Message)
-sendImportantMessage request = liftF $ SendMessage (Important request) id
+sendMessage request = liftF $ SendMessage request id
 
 {- | Composite: split the request text with 'splitTelegramText' and send one
 'sendMessage' per chunk, preserving ALL other request fields (parse mode, chat
@@ -200,20 +193,6 @@ POST-CONTRACT: Produces a script that yields the Telegram API response carrying 
 -}
 sendInvoice :: SendInvoiceRequest -> TelegramScript (Response Message)
 sendInvoice req = liftF $ SendInvoice req id
-
-{- | Lift scheduling of a single Telegram message into the Telegram script language.
-PRE-CONTRACT: The request must be valid for the interpreter's deferred-delivery queue.
-POST-CONTRACT: Produces a script that schedules exactly one message and returns unit.
--}
-scheduleMessage :: SendMessageRequest -> TelegramScript ()
-scheduleMessage request = liftF $ ScheduleMessages [request] ()
-
-{- | Lift scheduling of multiple Telegram messages into the Telegram script language.
-PRE-CONTRACT: Each request must be valid for the interpreter's deferred-delivery queue.
-POST-CONTRACT: Produces a script that schedules the provided batch in order and returns unit.
--}
-scheduleMessages :: [SendMessageRequest] -> TelegramScript ()
-scheduleMessages requests = liftF $ ScheduleMessages requests ()
 
 {- | Lift localized Telegram bot command registration into the Telegram script language.
 PRE-CONTRACT: Each language-code entry must contain command and description pairs accepted by the downstream Telegram API.

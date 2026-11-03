@@ -258,6 +258,11 @@ tick = do
         runAsyncAfter interval tick
 ```
 
+The same re-arm shape backs guaranteed Telegram delivery: the `sendImportantMessage`
+combinator (see [telegram.md](telegram.md)) sends once and, on a 429 rejection, re-arms
+itself through `runAsyncAfter` with the server-advised `retry_after` until Telegram
+accepts the message — each attempt an ordinary, observable scenario run.
+
 `castServiceAfter delay req` defers a fire-and-forget service cast with the same one-shot
 timer semantics, but the request never goes through the async worker pool: when the
 deadline fires, `runTimerService` delivers it straight to the service (result discarded).

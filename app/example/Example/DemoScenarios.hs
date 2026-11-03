@@ -32,14 +32,14 @@ import LazyCircus.Scene.DB.Lang
     , rawQuery, withTransaction, withTransactionRLS
     )
 import LazyCircus.Scene.Telegram.Lang
-    ( sendMessage, sendImportantMessage, scheduleMessage
+    ( sendMessage
     , setMessageReaction, editMessageText, getBotName
     )
 import LazyCircus.Scene.Mail.Lang (sendMail, makeMail)
 import LazyCircus.Scene.AI.Lang (ask)
 import LazyCircus.Scene.Log (slogInfo, swithLogCtx)
 
-import LazyCircus (tgScript, mailScript, aiScript, dbScript)
+import LazyCircus (tgScript, mailScript, aiScript, dbScript, sendImportantMessage, sendLater)
 import LazyCircus.AI (mkAIRequest)
 import LazyCircus.AI.POML.Types
     ( POML, cp_, role_, task_, list_, examples_, exampleInput_, exampleOutput_
@@ -210,12 +210,12 @@ telegramScenario mChatId = do
                 let chatIdVal = ChatId chatIdNum
                 let msgReq = defSendMessage (SomeChatId chatIdVal) "Hello from Lazy Circus!"
                 _ <- evalScript $ tgScript "demo-bot" $ sendMessage msgReq
-                -- Send an important message
+                -- Send an important message (deferred retry until delivered on rate limits)
                 let importantReq = defSendMessage (SomeChatId chatIdVal) "Important announcement!"
-                _ <- evalScript $ tgScript "demo-bot" $ sendImportantMessage importantReq
-                -- Schedule a message
+                sendImportantMessage "demo-bot" importantReq
+                -- Send a message later, on the async worker pool
                 let schedReq = defSendMessage (SomeChatId chatIdVal) "Scheduled greeting"
-                evalScript $ tgScript "demo-bot" $ scheduleMessage schedReq
+                sendLater 30 "demo-bot" schedReq
                 -- Set a message reaction
                 let reactionReq = SetMessageReactionRequest
                         { setMessageReactionRequestChatId = SomeChatId chatIdVal

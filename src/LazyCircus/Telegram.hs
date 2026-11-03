@@ -5,22 +5,17 @@
 
 module LazyCircus.Telegram where
 
--- import Lib.Telegram.Types (HasTgMessageQueue (..))
--- import Lib.Telegram.Types qualified as TGTypes
--- import Network.HTTP.Conduit (Manager)
 import Network.HTTP.Types (Status (..), statusIsSuccessful)
 import RIO
 import RIO.HashMap qualified as Map
 import RIO.Text qualified as Text
+import RIO.Time (NominalDiffTime)
 
 import LazyCircus.Telegram.Types
-
--- import Servant
 
 import Data.Aeson
 import LazyCircus.App.Log
 import LazyCircus.LangCode
-import LazyCircus.Telegram.Default
 import LazyCircus.Telegram.Types qualified as TGTypes
 import Network.HTTP.Client hiding (Proxy, responseBody)
 import Network.HTTP.Client qualified as Http.Client
@@ -72,39 +67,40 @@ class HasBotName env where
 instance HasBotName (AppWithBotEnv app) where
     botNameL = lens (botName . botEnv) (\x y -> let be = botEnv x in x{botEnv = be{botName = y}})
 
--- | Build a bot environment with a Telegram client, configured bot name, and deferred message queue.
-makeBotEnv :: Manager -> (Token, Text) -> IO BotEnv
-makeBotEnv manager (token, name) = do
-    queue <- newTQueueIO
-    pure
-        BotEnv
-            { botToken = token
-            , botClientEnv = makeClientEnv manager token
-            , botName = name
-            , botMessageQueue = queue
-            }
+-- | Build a bot environment with a Telegram client and the configured bot name.
+makeBotEnv :: Manager -> (Token, Text) -> BotEnv
+makeBotEnv manager (token, name) =
+    BotEnv
+        { botToken = token
+        , botClientEnv = makeClientEnv manager token
+        , botName = name
+        }
 
 makeClientEnv :: Manager -> Token -> ClientEnv
 makeClientEnv manager token = mkClientEnv manager (botBaseUrl token)
 
+{- | Send a text message via the Telegram Bot API: one attempt, no delivery policy.
+
+Delivery policy (immediate failure vs deferred retry of important sends) is an
+orchestration concern and lives at the scenario level — see
+'LazyCircus.sendImportantMessage' and 'LazyCircus.sendLater'.
+PRE-CONTRACT: The request must contain a valid chat identifier.
+POST-CONTRACT: Returns the Telegram API response for the delivered message.
+A Telegram rejection (any non-2xx Bot API answer, e.g. 429) throws
+'TGTypes.TelegramApiRejected'; a transport-level failure throws
+'TGTypes.TelegramClientError'.
+-}
 sendMessage ::
     ( HasTgClientEnv env
     , MonadIO m
     , MonadReader env m
-    , HasTgMessageQueue env
     ) =>
-    TGTypes.WithImportance SendMessageRequest -> m (TGAPI.Response TGAPI.Message)
-sendMessage (TGTypes.Regular req) = do
+    SendMessageRequest -> m (TGAPI.Response TGAPI.Message)
+sendMessage req = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.sendMessage req) clientEnv
     case mv of
-        Left err -> handleClientError err
-        Right v -> pure v
-sendMessage (TGTypes.Important req) = do
-    clientEnv <- view tgClientEnvL
-    mv <- liftIO $ runClientM (TGAPI.sendMessage req) clientEnv
-    case mv of
-        Left err -> handleTooManyRequests req err >>= handleClientError
+        Left err -> raiseClientError err
         Right v -> pure v
 
 -- | Fetch Telegram file metadata for a previously received file identifier.
@@ -113,7 +109,7 @@ getFile fileId = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.getFile fileId) clientEnv
     case mv of
-        Left err -> throwIO (TGTypes.TelegramClientError err)
+        Left err -> raiseClientError err
         Right v -> pure v
 
 {- | Download the content of a Telegram 'File' previously obtained via 'getFile'.
@@ -164,15 +160,16 @@ setMessageReaction req = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.setMessageReaction req) clientEnv
     case mv of
-        Left err -> throwIO (TGTypes.TelegramClientError err)
+        Left err -> raiseClientError err
         Right _v -> pure ()
 
 -- | Delete a message in a chat via the Telegram Bot API.
--- Fire-and-forget: mirrors 'setMessageReaction' (unit result, transport errors throw).
--- Transport failures throw 'TGTypes.TelegramClientError' — never stringified:
+-- Fire-and-forget: mirrors 'setMessageReaction' (unit result, errors throw).
+-- Transport failures throw typed errors — never stringified:
 -- rendering the underlying 'ClientError' would leak the token-bearing request URL.
 -- PRE-CONTRACT: The chat and message ids must identify a message the bot is allowed to delete.
--- POST-CONTRACT: Returns unit; a transport failure throws.
+-- POST-CONTRACT: Returns unit; a Telegram rejection throws
+-- 'TGTypes.TelegramApiRejected', a transport failure 'TGTypes.TelegramClientError'.
 deleteMessage ::
     ( HasTgClientEnv env
     , MonadIO m
@@ -183,18 +180,8 @@ deleteMessage chatId messageId = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.deleteMessage chatId messageId) clientEnv
     case mv of
-        Left err -> throwIO (TGTypes.TelegramClientError err)
-        Right _v -> pure ()
-
-scheduleMessages ::
-    ( MonadIO m
-    , MonadReader env m
-    , HasTgMessageQueue env
-    ) =>
-    [SendMessageRequest] -> m ()
-scheduleMessages requests = do
-    mq <- view tgMessageQueueL
-    atomically $ mapM_ (writeTQueue mq) requests
+        Left err -> raiseClientError err
+        Right _ -> pure ()
 
 setBotCommands ::
     ( HasBotName env
@@ -213,7 +200,7 @@ setBotCommands commands = do
     forM_ reqs $ \setCommandRequest -> do
         mv <- liftIO $ runClientM (TGAPI.setMyCommands setCommandRequest) clientEnv
         case mv of
-            Left err -> throwIO (TGTypes.TelegramClientError err)
+            Left err -> raiseClientError err
             Right _ -> pure ()
   where
     botCommandFromPair (command, description) =
@@ -229,7 +216,7 @@ answerCallbackQuery req = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.answerCallbackQuery req) clientEnv
     case mv of
-        Left err -> throwIO (TGTypes.TelegramClientError err)
+        Left err -> raiseClientError err
         Right _v -> pure ()
 
 -- | Answer a Telegram pre-checkout query via the Telegram Bot API.
@@ -247,7 +234,7 @@ answerPreCheckoutQuery req = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.answerPreCheckoutQuery req) clientEnv
     case mv of
-        Left err -> throwIO (TGTypes.TelegramClientError err)
+        Left err -> raiseClientError err
         Right _v -> pure ()
 
 editMessageText ::
@@ -266,6 +253,8 @@ editMessageText req = do
 -- | Send a document file via the Telegram Bot API.
 -- PRE-CONTRACT: The request must contain a valid chat identifier and an accessible document source.
 -- POST-CONTRACT: Returns the Telegram API response for the document send.
+-- A Telegram rejection (any non-2xx Bot API answer) throws 'TGTypes.TelegramApiRejected';
+-- a transport-level failure throws 'TGTypes.TelegramClientError'.
 sendDocument ::
     ( HasTgClientEnv env
     , MonadIO m
@@ -276,13 +265,15 @@ sendDocument req = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.sendDocument req) clientEnv
     case mv of
-        Left err -> handleClientError err
+        Left err -> raiseClientError err
         Right v -> pure v
 
 -- | Send an invoice via the Telegram Bot API, including Telegram Stars (XTR) invoices.
 -- PRE-CONTRACT: The request must contain a valid chat identifier; for Stars payments
 --   its provider token must be empty and its currency @XTR@ (see "LazyCircus.Telegram.Stars").
 -- POST-CONTRACT: Returns the Telegram API response carrying the invoice message.
+-- A Telegram rejection (any non-2xx Bot API answer) throws 'TGTypes.TelegramApiRejected';
+-- a transport-level failure throws 'TGTypes.TelegramClientError'.
 sendInvoice ::
     ( HasTgClientEnv env
     , MonadIO m
@@ -293,7 +284,7 @@ sendInvoice req = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.sendInvoice req) clientEnv
     case mv of
-        Left err -> handleClientError err
+        Left err -> raiseClientError err
         Right v -> pure v
 
 -- | Outcome of classifying a delivered @sendPoll@ Bot API response.
@@ -312,64 +303,148 @@ data PollResponse
 --   preserving the full response.
 classifyPollResponse :: TGAPI.Response Message -> PollResponse
 classifyPollResponse resp
-    | not (responseOk resp) =
-        PollRejected
-            TelegramApiRejected
-                { telegramApiRejectedErrorCode = responseErrorCode resp
-                , telegramApiRejectedDescription = responseDescription resp
-                }
+    | not (responseOk resp) = PollRejected (responseRejection resp)
     | Just poll <- TGAPI.messagePoll (responseResult resp) =
         PollExtracted (TGAPI.pollId poll, responseResult resp)
     | otherwise = PollMissing resp
 
+{- | Pure classification of a delivered Bot API response whose @ok@ field is
+@false@ into the typed rejection.
+PRE-CONTRACT: None.
+POST-CONTRACT: Preserves the response's error code, description and
+@parameters.retry_after@.
+-}
+responseRejection :: TGAPI.Response a -> TelegramApiRejected
+responseRejection resp =
+    TelegramApiRejected
+        { telegramApiRejectedErrorCode = responseErrorCode resp
+        , telegramApiRejectedDescription = responseDescription resp
+        , telegramApiRejectedRetryAfter = responseParameters resp >>= retryAfterSeconds
+        }
+  where
+    -- | Unwrap the @retry_after@ payload of a rejection response, if present.
+    retryAfterSeconds params = case TGAPI.responseParametersRetryAfter params of
+        Just (TGAPI.Seconds n) -> Just n
+        Nothing -> Nothing
+
 -- | Send a native poll via the Telegram Bot API and extract the poll from the response.
 -- PRE-CONTRACT: The request must contain a valid chat identifier and 2-10 answer options.
 -- POST-CONTRACT: Returns the unique poll identifier together with the sent message.
---   Transport failures always throw 'TGTypes.TelegramClientError' — no 409/429 leniency,
---   unlike 'sendDocument';
---   the three-way outcome of a delivered response is decided purely by
---   'classifyPollResponse': a 2xx response with @ok=false@ throws
---   'TGTypes.TelegramApiRejected' carrying the API error code and description;
---   an @ok=true@ response whose message carries no poll throws
---   'TGTypes.NoPollInResponse'.
+--   Transport failures throw 'TGTypes.TelegramClientError'; a delivered response
+--   is decided purely by 'classifyPollResponse': a response with @ok=false@
+--   throws 'TGTypes.TelegramApiRejected' carrying the API error code,
+--   description and @retry_after@; an @ok=true@ response whose message carries
+--   no poll throws 'TGTypes.NoPollInResponse'.
 sendPoll :: SendPollRequest -> RIO (AppWithBotEnv app) (PollId, Message)
 sendPoll req = do
     clientEnv <- view tgClientEnvL
     mv <- liftIO $ runClientM (TGAPI.sendPoll req) clientEnv
     case mv of
-        Left err -> throwIO (TGTypes.TelegramClientError err)
+        Left err -> raiseClientError err
         Right resp -> case classifyPollResponse resp of
             PollRejected rejection -> throwIO rejection
             PollMissing noPoll -> throwIO (TGTypes.NoPollInResponse noPoll)
             PollExtracted result -> pure result
 
--- glog $ AppLogMsg $ "Setting commands for bot " <> botName
-
 -- Error handling
 
-handleTooManyRequests ::
-    (MonadIO m, HasTgMessageQueue env, MonadReader env m) =>
-    TGAPI.SendMessageRequest -> ClientError -> m ClientError
-handleTooManyRequests originalRequest err@(FailureResponse _ r) = case r of
-    -- too many requests, we can schedule the message for later
-    SC.Response{responseStatusCode = Status{statusCode = 429}} -> do
-        scheduleMessages [originalRequest]
-        pure err
-    _ -> pure err
-handleTooManyRequests _ err = pure err
+-- | Error-shaped body of a Bot API failure response:
+-- @{"ok":false,"error_code":...,"description":...,"parameters":{"retry_after":N}}@.
+-- This shape is intentionally not 'TGAPI.Response': a real failure body carries
+-- no @result@ field, and the generic 'FromJSON' of 'TGAPI.Response' requires
+-- @responseResult@, so decoding a failure body into it always fails.
+data TgErrorBody = TgErrorBody
+    { tgebErrorCode :: Maybe Integer -- ^ Bot API @error_code@ field, if present
+    , tgebDescription :: Maybe Text -- ^ Bot API @description@ field, if present
+    , tgebParameters :: Maybe TgErrorParameters -- ^ Bot API @parameters@ object, if present
+    }
 
-handleClientError :: (MonadIO m) => ClientError -> m (TGAPI.Response TGAPI.Message)
-handleClientError err@(FailureResponse _ r) = case r of
-    -- bad parsing of our message, we can log and ignore it
-    -- should be never occur on production
-    SC.Response{responseStatusCode = Status{statusCode = 409}} ->
-        pure $ defaultResponse (Just 409) defaultMessage
-    -- too many requests
-    -- it was scheduled for later if was needed
-    -- we can return default response with 429 status code
-    SC.Response{responseStatusCode = Status{statusCode = 429}, responseBody = body} ->
-        let mResponse = decode body
-         in pure $ fromMaybe (defaultResponse (Just 429) defaultMessage) mResponse
-    -- unknown shit happens, lets crash
-    _ -> throwIO (TGTypes.TelegramClientError err)
-handleClientError err = throwIO (TGTypes.TelegramClientError err)
+-- | The @parameters@ object of a Bot API failure body.
+newtype TgErrorParameters = TgErrorParameters
+    { tgepRetryAfter :: Maybe Int -- ^ @retry_after@ seconds, present on 429 responses
+    }
+
+-- | Decodes the error shape of a Bot API failure body.
+instance FromJSON TgErrorBody where
+    parseJSON = withObject "TgErrorBody" $ \o ->
+        TgErrorBody
+            <$> o .:? "error_code"
+            <*> o .:? "description"
+            <*> o .:? "parameters"
+
+-- | Decodes the @parameters@ object of a Bot API failure body.
+instance FromJSON TgErrorParameters where
+    parseJSON = withObject "TgErrorParameters" $ \o ->
+        TgErrorParameters <$> o .:? "retry_after"
+
+{- | Classify a servant client failure from a Telegram API call into the typed
+exception it should surface as, and throw it.
+
+A 'FailureResponse' — Telegram answered with a non-2xx HTTP status — throws
+'TGTypes.TelegramApiRejected' parsed from the error-shaped body by
+'classifyFailureBody'; any other transport-level failure (connection error,
+decode failure of a successful response) throws 'TGTypes.TelegramClientError'.
+PRE-CONTRACT: None.
+POST-CONTRACT: Never returns normally.
+-}
+raiseClientError :: (MonadIO m) => ClientError -> m a
+raiseClientError err@(FailureResponse _ resp) =
+    throwIO $
+        classifyFailureBody
+            (statusCode (responseStatusCode resp))
+            (responseBody resp)
+raiseClientError err = throwIO (TGTypes.TelegramClientError err)
+
+{- | Pure classification of a Bot API failure-response body into the typed
+rejection.
+PRE-CONTRACT: None.
+POST-CONTRACT: Always produces a 'TelegramApiRejected'. When the body decodes
+as the error shape, its @error_code@, @description@ and
+@parameters.retry_after@ are preserved (a missing @error_code@ falls back to
+the HTTP status); when the body is not decodable (empty body, an HTML error
+page from an intermediary), the rejection carries just the HTTP status. Only
+response material is inspected — never the request — so the bot token cannot
+leak.
+-}
+classifyFailureBody :: Int -> LByteString -> TelegramApiRejected
+classifyFailureBody fallbackStatus body =
+    case decode body of
+        Just errBody ->
+            TelegramApiRejected
+                { telegramApiRejectedErrorCode = tgebErrorCode errBody <|> Just (fromIntegral fallbackStatus)
+                , telegramApiRejectedDescription = tgebDescription errBody
+                , telegramApiRejectedRetryAfter = tgebParameters errBody >>= tgepRetryAfter
+                }
+        Nothing ->
+            TelegramApiRejected
+                { telegramApiRejectedErrorCode = Just (fromIntegral fallbackStatus)
+                , telegramApiRejectedDescription = Nothing
+                , telegramApiRejectedRetryAfter = Nothing
+                }
+
+-- | HTTP status code of a Bot API rate-limit rejection.
+rateLimitStatusCode :: Integer
+rateLimitStatusCode = 429
+
+-- | Safety margin added to the server-advised @retry_after@ to absorb clock skew.
+retryDelayMargin :: NominalDiffTime
+retryDelayMargin = 1
+
+-- | Delay applied when a rate limit arrives without @parameters.retry_after@.
+defaultRetryDelay :: NominalDiffTime
+defaultRetryDelay = 1
+
+{- | Delay to wait before retrying a rate-limited send, when the rejection is a
+rate limit at all.
+PRE-CONTRACT: None.
+POST-CONTRACT: 'Just' the advised delay (@retry_after@ plus 'retryDelayMargin',
+or 'defaultRetryDelay' when absent) exactly when the rejection's error code is
+'rateLimitStatusCode'; 'Nothing' for every other rejection — the API does not
+advise retrying a malformed request or a server error, so that decision stays
+with the caller.
+-}
+rateLimitRetryDelay :: TelegramApiRejected -> Maybe NominalDiffTime
+rateLimitRetryDelay rej
+    | telegramApiRejectedErrorCode rej == Just rateLimitStatusCode =
+        Just $ maybe defaultRetryDelay ((retryDelayMargin +) . fromIntegral) (telegramApiRejectedRetryAfter rej)
+    | otherwise = Nothing

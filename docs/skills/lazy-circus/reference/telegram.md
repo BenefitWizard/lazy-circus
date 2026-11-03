@@ -37,8 +37,6 @@ Main operations:
 | `sendDocument` | `Response Message` |
 | `sendInvoice` | `Response Message` — Stars (XTR) invoice |
 | `answerPreCheckoutQuery` | `()` — pre-checkout answer (10 s Bot API deadline) |
-| `sendImportantMessage` | `Response Message` |
-| `scheduleMessage` / `scheduleMessages` | `()` |
 | `setBotCommands` | `()` |
 | `setMessageReaction` | `()` |
 | `answerCallbackQuery` | `()` |
@@ -54,9 +52,6 @@ sendLongMessage      :: SendMessageRequest -> TelegramScript [Response Message]
 sendDocument         :: SendDocumentRequest -> TelegramScript (Response Message)
 sendInvoice          :: SendInvoiceRequest -> TelegramScript (Response Message)
 answerPreCheckoutQuery :: AnswerPreCheckoutQueryRequest -> TelegramScript ()
-sendImportantMessage :: SendMessageRequest -> TelegramScript (Response Message)
-scheduleMessage      :: SendMessageRequest -> TelegramScript ()
-scheduleMessages     :: [SendMessageRequest] -> TelegramScript ()
 setBotCommands       :: HashMap LangCode [(Text, Text)] -> TelegramScript ()
 setMessageReaction   :: SetMessageReactionRequest -> TelegramScript ()
 answerCallbackQuery  :: AnswerCallbackQueryRequest -> TelegramScript ()
@@ -82,10 +77,50 @@ notifyUser chatId = do
 
 Behavior details from the production interpreter:
 
-- `sendImportantMessage` can schedule the message when Telegram returns HTTP 429
-- scheduled messages go into the bot queue
+- the scene language is pure transport — one attempt per operation, no delivery
+  policy; a Telegram rejection throws the typed `TelegramApiRejected` (carrying
+  `error_code`, `description` and, on 429, `parameters.retry_after` as
+  `telegramApiRejectedRetryAfter` seconds), a transport-level failure
+  (connection, decode) throws `TelegramClientError`
+- delivery policy lives one level up, in the scenario combinators
+  `sendImportantMessage` / `sendLater` (see next section)
 - `editMessageText` returns `Nothing` on client error instead of throwing
-- `deleteMessage` is fire-and-forget `()`; transport failures throw the typed `TelegramClientError`
+- `deleteMessage` is fire-and-forget `()`; rejections/transport failures throw
+  the typed errors like every other operation
+
+## Delivery Combinators (scenario level)
+
+Module `LazyCircus` (they wrap `tgScript`, so they take the bot name and run in
+`ScenarioProgram`, not in `TelegramScript`):
+
+```haskell
+sendImportantMessage :: Text -> SendMessageRequest -> ScenarioProgram Script sl ()
+sendLater            :: NominalDiffTime -> Text -> SendMessageRequest -> ScenarioProgram Script sl ()
+```
+
+- `sendImportantMessage botName req` — one attempt now; if Telegram
+  rate-limits it (429), parks exactly one deferred retry through `runAsyncAfter`
+  with the server-advised `retry_after` (+1 s margin, default 1 s without it) and
+  returns immediately — the calling scenario never blocks. Each retry re-runs the
+  logic with a fresh `retry_after`, so delivery repeats until Telegram accepts
+  the message. Any non-rate-limit rejection rethrows to the caller (important
+  delivery is retried against flood limits, not against malformed requests).
+  Requires the timer service + async worker pool in production; pending retries
+  are dropped on shutdown (not persisted) and run without the original scenario's
+  log context. Every attempt is a full scenario run — visible in timing logs and,
+  in tests, in the journal and `readTgRequests`.
+- `sendLater delay botName req` — deferred send on the async worker pool (one-shot
+  timer). The scenario-level replacement of the removed scene-level
+  `scheduleMessage`/`scheduleMessages`: deferred sends stay observable (timing
+  logs, journal, mock timers via `readScheduledTimers`/`fireScheduledTimers`).
+
+```haskell
+-- important notification: retries on flood limits until delivered
+sendImportantMessage "demo-bot" $ defSendMessage (SomeChatId chatId) "Payment receipt"
+
+-- digest in an hour, non-blocking
+sendLater 3600 "demo-bot" $ defSendMessage (SomeChatId chatId) "Your digest"
+```
 
 ## File Downloads
 
@@ -287,6 +322,8 @@ with `fireScheduledTimers` (see [testing.md](testing.md)).
 - Is the download size limit explicit (`downloadCheckedFile` rather than raw `downloadFileById`)?
 - Is text that may exceed `telegramMessageChunkLimit` split before sending — via `sendLongMessage` (preserves the other request fields), or manually one `sendMessage` per `splitTelegramText` chunk?
 - Are only size rejects handled as `Left` (`FileValidationError`)? Transport errors are exceptions — guarded with `runSafely`.
+- Must the message be delivered despite flood limits? Use the scenario-level `sendImportantMessage` (deferred retry on 429); a plain `sendMessage` is one attempt whose `TelegramApiRejected` the scenario must handle (or deliberately drop).
+- Is deferred sending expressed with `sendLater` / `runAsyncAfter` (observable, timer-serviced) rather than ad-hoc queues or worker loops?
 - Is periodic chat-action refresh implemented with the re-arm pattern (`runAsyncAfter` tick that re-schedules itself) instead of a `forever`/`threadDelay` worker loop?
 - Do chat-less payment updates (`pre_checkout_query`) route before the chat-id gate and outside per-chat serialisation (10-second answer deadline)?
 - Is Stars-payment crediting idempotent by charge id at the DB layer (`UNIQUE` + `ON CONFLICT DO NOTHING` + `RETURNING`), with the confirmation send guarded so it cannot roll back the credit?

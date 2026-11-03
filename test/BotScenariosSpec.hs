@@ -18,14 +18,14 @@ import BotScenarios
 import Common
 import Control.Exception qualified as E
 import DemoEnv (DemoConfig(..), defaultDemoConfig, withDemoApp)
-import LazyCircus (tgScript)
+import LazyCircus (sendLater, tgScript)
 import LazyCircus.AI (conversationFromTurns, emptyConversation, unConversation)
 import LazyCircus.App.Log (AppLogMsg(..), AppLogMsgWithContext(..), LoggingContext(..))
 import LazyCircus.Testing.Performer
     ( readLog
     , readLogWithContext
     , readScheduledScenarios
-    , readScheduledTgRequests
+    , readScheduledTimers
     , readSentMails
     , readTgRequests
     , runScenarioProgram
@@ -36,8 +36,7 @@ import LazyCircus.App.Default (DefaultApp)
 import SimpleServiceLib (AllServices)
 import LazyCircus.Performer.Default (NoBotConfigured(..))
 import LazyCircus.Scenario (evalScript)
-import LazyCircus.Scene.Telegram.Lang (getBotName, scheduleMessage, sendDocument, sendMessage)
-import LazyCircus.Telegram.Types (WithImportance(..))
+import LazyCircus.Scene.Telegram.Lang (getBotName, sendDocument, sendMessage)
 import Network.Mail.Mime (Address(..))
 import OpenAI.V1.Chat.Completions qualified as Chat
 import RIO
@@ -46,7 +45,7 @@ import RIO.Map qualified as M
 import RIO.Vector qualified as V
 import Data.Text qualified as T
 import Test.Hspec
-import Telegram.Bot.API (ChatId(..), Response(..), SomeChatId(..), defSendMessage)
+import Telegram.Bot.API (ChatId(..), Response(..), SomeChatId(..), defSendMessage, sendMessageText)
 import Telegram.Bot.API.Methods.SendDocument (defSendDocument, DocumentFile(..))
 import Telegram.Bot.API.Types (FileId(..), InputFile(..))
 
@@ -287,27 +286,34 @@ spec = do
 
     aroundAll withBotTestApp $ do
         describe "Telegram capture" $ do
-            it "captures immediate and scheduled Telegram requests for configured bots" $ \app -> do
+            it "captures immediate Telegram requests and deferred sends for configured bots" $ \app -> do
                 let immediateRequest = defSendMessage (SomeChatId $ ChatId 777) "Hello from tests"
-                    scheduledRequest = defSendMessage (SomeChatId $ ChatId 777) "Later from tests"
+                    deferredRequest = defSendMessage (SomeChatId $ ChatId 777) "Later from tests"
 
                 (mocks, botName) <- runWithDefaultMocks app $ do
                     runScenarioProgram $ do
                         resolvedBotName <- evalScript $ tgScript "demo-bot" getBotName
                         _ <- evalScript $ tgScript "demo-bot" $ sendMessage immediateRequest
-                        evalScript $ tgScript "demo-bot" $ scheduleMessage scheduledRequest
+                        sendLater 30 "demo-bot" deferredRequest
                         pure resolvedBotName
 
                 botName `shouldBe` "demo-bot"
 
                 tgRequests <- readTgRequests mocks
-                case tgRequests of
-                    [Regular _request] -> pure ()
-                    [_] -> expectationFailure "Expected captured request with Regular importance"
-                    _ -> expectationFailure "Expected exactly one immediate Telegram request"
+                map sendMessageText tgRequests `shouldBe` ["Hello from tests"]
 
-                scheduledRequests <- readScheduledTgRequests mocks
-                length scheduledRequests `shouldBe` 1
+                scheduledTimers <- readScheduledTimers mocks
+                length scheduledTimers `shouldBe` 1
+
+            it "sendDocument returns canned response from mock" $ \app -> do
+                let docRequest =
+                        defSendDocument
+                            (SomeChatId $ ChatId 777)
+                            (MakeDocumentFile $ InputFileId $ FileId "test-file-id")
+                (_, resp) <- runWithDefaultMocks app $ do
+                    runScenarioProgram $
+                        evalScript $ tgScript "demo-bot" $ sendDocument docRequest
+                responseOk resp `shouldBe` True
 
             it "sendDocument returns canned response from mock" $ \app -> do
                 let docRequest =

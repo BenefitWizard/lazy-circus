@@ -64,7 +64,6 @@ module LazyCircus.Testing.Performer (
     runInsideWithDefaultConfig,
     discardMocks,
     readTgRequests,
-    readScheduledTgRequests,
     readOutgoingMailbox,
     readLog,
     readLogWithContext,
@@ -127,7 +126,7 @@ import LazyCircus.Testing.Bdd.Journal
     )
 import LazyCircus.Telegram qualified as TG
 import LazyCircus.Telegram.Default qualified as TGDefault
-import LazyCircus.Telegram.Types (AppWithBotEnv (..), WithImportance (..))
+import LazyCircus.Telegram.Types (AppWithBotEnv (..))
 import Network.Mail.Mime (Address, Mail)
 import OpenAI.V1 qualified as V1
 import OpenAI.V1.Chat.Completions qualified as Chat
@@ -140,11 +139,11 @@ import RIO.Process (HasProcessContext (..))
 import RIO.Time (NominalDiffTime, getCurrentTime)
 import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
-import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, ReactionType, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollCloseDate, sendPollIsAnonymous, sendPollMessageThreadId, sendPollOptions, sendPollQuestion, sendPollAllowsMultipleAnswers, sendPollAllowsRevoting, sendPollShuffleOptions, setMessageReactionRequestChatId, setMessageReactionRequestIsBig, setMessageReactionRequestMessageId, setMessageReactionRequestReaction)
+import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, ReactionType, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseOk, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollCloseDate, sendPollIsAnonymous, sendPollMessageThreadId, sendPollOptions, sendPollQuestion, sendPollAllowsMultipleAnswers, sendPollAllowsRevoting, sendPollShuffleOptions, setMessageReactionRequestChatId, setMessageReactionRequestIsBig, setMessageReactionRequestMessageId, setMessageReactionRequestReaction)
 import Telegram.Bot.API.Types (File (..), FileId (..), InputFile (..), MessageId (..), PollId (..), inputPollOptionText)
 
 -- | Response factory used by the Telegram mock to derive a reply from one outgoing request.
-type OnSendMessageRequest = WithImportance SendMessageRequest -> Response Message
+type OnSendMessageRequest = SendMessageRequest -> Response Message
 
 -- | Discriminator tagging which Telegram operation produced an 'OutgoingMessage' capture.
 data OutgoingKind
@@ -206,10 +205,8 @@ instance Show OutgoingMessage where
 data TgMock = TgMock
     { sendMessageResponses :: SomeRef [OnSendMessageRequest]
     -- ^ queued canned responses consumed by 'sendMessage'
-    , sendMessageRequests :: SomeRef [WithImportance SendMessageRequest]
-    -- ^ captured outgoing immediate Telegram sends
-    , scheduledMessageRequests :: SomeRef [SendMessageRequest]
-    -- ^ captured deferred Telegram sends requested via 'scheduleMessages'
+    , sendMessageRequests :: SomeRef [SendMessageRequest]
+    -- ^ captured outgoing immediate Telegram sends (one entry per attempt)
     , downloadableFiles :: SomeRef (HashMap Text ByteString)
     -- ^ canned file content keyed by the file id text, served by mocked
     -- 'getFile'' (metadata) and 'downloadFile'' (content); inject via
@@ -464,9 +461,13 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
         case mode of
             Mocked -> do
                 logTgRequests [request]
+                resp <- dequeueTgResponse request
+                -- Mirror the production classifier: a canned response with
+                -- responseOk = False is a rejection, not a delivered message —
+                -- nothing is published to the mailbox or journal.
+                unless (responseOk resp) $ throwIO (TG.responseRejection resp)
                 tg <- askTgMock
-                let req = importancePayload request
-                    chatId = someChatIdToChatId (sendMessageChatId req)
+                let chatId = someChatIdToChatId (sendMessageChatId request)
                 cfg <- asks (testConfig . app)
                 assignedId <- liftIO $
                     publishWithFreshId tg cfg
@@ -475,19 +476,13 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                             outgoingSendMessage
                                 mid
                                 chatId
-                                (Just (sendMessageText req))
-                                (sendMessageReplyMarkup req)
+                                (Just (sendMessageText request))
+                                (sendMessageReplyMarkup request)
                         )
                         -- journal observation, recorded in the SAME transaction
-                        (\mid -> ObsTgMessage{obsChatId = chatId, obsText = sendMessageText req, obsMsgId = mid, obsMarkup = sendMessageReplyMarkup req})
-                resp <- dequeueTgResponse request
+                        (\mid -> ObsTgMessage{obsChatId = chatId, obsText = sendMessageText request, obsMsgId = mid, obsMarkup = sendMessageReplyMarkup request})
                 pure (stampMessageId assignedId resp)
             Real -> timedAndLog "Telegram" "SendMessage" $ TG.sendMessage request
-    scheduleMessages' = \requests -> do
-        mode <- asks (tcTelegram . testConfig . app)
-        case mode of
-            Mocked -> logScheduledTgRequests requests
-            Real -> timedAndLog "Telegram" "ScheduleMessages" $ TG.scheduleMessages requests
     setBotCommands' cmd = do
         mode <- asks (tcTelegram . testConfig . app)
         case mode of
@@ -938,7 +933,6 @@ createTgMock :: Response Message -> Maybe [OnSendMessageRequest] -> [(FileId, By
 createTgMock fallback queuedResponses downloadableContent = do
     responseQueue <- newSomeRef $ fromMaybe [] queuedResponses
     requestLog <- newSomeRef []
-    scheduledLog <- newSomeRef []
     downloadsRef <- newSomeRef (HM.fromList [(fileIdText fid, bytes) | (fid, bytes) <- downloadableContent])
     mailbox <- newTBQueueIO outgoingMailboxSize
     msgIdCounter <- newTVarIO 0
@@ -946,7 +940,6 @@ createTgMock fallback queuedResponses downloadableContent = do
         TgMock
             { sendMessageResponses = responseQueue
             , sendMessageRequests = requestLog
-            , scheduledMessageRequests = scheduledLog
             , downloadableFiles = downloadsRef
             , defaultResponse = fallback
             , outgoingMailbox = mailbox
@@ -1131,14 +1124,10 @@ discardMocks :: RIO (App.DefaultApp serviceLib) (Mocks serviceLib, a) -> RIO (Ap
 discardMocks action = snd <$> action
 
 -- | Read captured immediate Telegram send requests in call order.
--- POST-CONTRACT: Result is ordered earliest-first (call order).
-readTgRequests :: Mocks serviceLib -> IO [WithImportance SendMessageRequest]
+-- POST-CONTRACT: Result is ordered earliest-first (call order); rejected
+-- attempts (canned @ok = False@ responses) are captured here too.
+readTgRequests :: Mocks serviceLib -> IO [SendMessageRequest]
 readTgRequests testMocks = reverse <$> readSomeRef (sendMessageRequests $ tgMock testMocks)
-
--- | Read captured scheduled Telegram requests in call order.
--- POST-CONTRACT: Result is ordered earliest-first (call order).
-readScheduledTgRequests :: Mocks serviceLib -> IO [SendMessageRequest]
-readScheduledTgRequests testMocks = reverse <$> readSomeRef (scheduledMessageRequests $ tgMock testMocks)
 
 -- | Drain and return every 'OutgoingMessage' currently in the mailbox, earliest-first.
 --
@@ -1295,16 +1284,10 @@ selectDbPool ReadOnly env = fromMaybe primary maybeReadOnly
     maybeReadOnly = App.pgDbPoolReadOnly app
 
 -- | Append immediate Telegram requests to the mock log while preserving external read order.
-logTgRequests :: [WithImportance SendMessageRequest] -> TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib app)) ()
+logTgRequests :: [SendMessageRequest] -> TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib app)) ()
 logTgRequests requests = do
     telegramMock <- asks (tgMock . mocks . app)
     modifySomeRef (sendMessageRequests telegramMock) (reverse requests <>)
-
--- | Append scheduled Telegram requests to the mock log while preserving external read order.
-logScheduledTgRequests :: [SendMessageRequest] -> TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib app)) ()
-logScheduledTgRequests requests = do
-    telegramMock <- asks (tgMock . mocks . app)
-    modifySomeRef (scheduledMessageRequests telegramMock) (reverse requests <>)
 
 -- | Append one outgoing mail to the mock log.
 logMailSend :: Mail -> TestInterpreter serviceLib app ()
@@ -1323,7 +1306,7 @@ journalObservation :: TestConfig app -> Observation app -> IO ()
 journalObservation cfg obs = traverse_ (\logRef -> atomically (appendObservation logRef obs)) (tcJournal cfg)
 
 -- | Return the next queued Telegram response or fall back to the default response.
-dequeueTgResponse :: WithImportance SendMessageRequest -> TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib app)) (Response Message)
+dequeueTgResponse :: SendMessageRequest -> TestPerformer (AppWithBotEnv (EnvWithMocks serviceLib app)) (Response Message)
 dequeueTgResponse request = do
     telegramMock <- asks (tgMock . mocks . app)
     queuedResponses <- readSomeRef $ sendMessageResponses telegramMock
@@ -1394,11 +1377,6 @@ assistantContentText completion =
     case Chat.choices completion V.!? 0 of
         Nothing -> ""
         Just choice -> fromMaybe "" (Chat.assistant_content (Chat.message choice))
-
--- | Unwrap the 'SendMessageRequest' carried by a 'WithImportance' marker.
-importancePayload :: WithImportance SendMessageRequest -> SendMessageRequest
-importancePayload (Regular req) = req
-importancePayload (Important req) = req
 
 -- | Extract the numeric 'ChatId' from a 'SomeChatId' when it targets a chat (not a @username).
 someChatIdToChatId :: SomeChatId -> Maybe ChatId

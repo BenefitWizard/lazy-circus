@@ -40,7 +40,6 @@ import LazyCircus.Testing.Updates
     , mkTextUpdateIn
     , newUpdateFactory
     )
-import LazyCircus.Telegram.Types (WithImportance (..))
 import PollRegistry (PollRegistry, lookupPollChat, newPollRegistry)
 import SimpleServiceLib (AllServices)
 import Telegram.Bot.API (ChatId (..), SendMessageRequest, Update, sendMessageText)
@@ -252,7 +251,7 @@ runHandlerWithRegistry app pollRegistry model update = do
 -- POST-CONTRACT: Result is ordered earliest-first (matching 'readTgRequests').
 capturedReplies :: Mocks serviceLib -> IO [Text]
 capturedReplies mocks =
-    map (sendMessageText . importanceValue) <$> readTgRequests mocks
+    map sendMessageText <$> readTgRequests mocks
 
 -- | Extract the single @sendPoll@ capture from drained outgoing-mailbox traffic.
 -- PRE-CONTRACT: The captures come from a step that sent at most one poll.
@@ -275,10 +274,6 @@ capturedPollId :: OutgoingMessage -> IO PollId
 capturedPollId pollCapture = case omMessageId pollCapture of
     Just mid -> pure (mockPollId mid)
     Nothing -> do
-        expectationFailure ("OutSendPoll capture has no assigned message id: " <> show pollCapture)
+        expectationFailure ("OutgoingPoll capture has no assigned message id: " <> show pollCapture)
         pure (PollId "")
 
--- | Unwrap a 'WithImportance' payload, discarding the importance marker.
-importanceValue :: WithImportance a -> a
-importanceValue (Regular a) = a
-importanceValue (Important a) = a

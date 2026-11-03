@@ -54,7 +54,7 @@ mkDbFreeApp botName = do
     jwk <- genJWK (OctGenParam 256)
     processCtx <- mkDefaultProcessContext
     aiEnv <- getClientEnv "http://127.0.0.1:1"
-    botEnv <- makeBotEnv manager (Token "123456:test-token", botName)
+    let botEnv = makeBotEnv manager (Token "123456:test-token", botName)
     pure App
         { logFunc = mkLogFunc (\_ _ _ _ -> pure ())
         , genLogFunc = mkGLogFunc (\_ _ -> pure ())
