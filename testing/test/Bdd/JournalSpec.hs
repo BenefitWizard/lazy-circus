@@ -16,6 +16,7 @@ with the outgoing mailbox contents, plus coverage of the @runAsync@ and
 module Bdd.JournalSpec (spec) where
 
 import RIO
+import RIO.Map qualified as Map
 import RIO.Set qualified as Set
 import RIO.Vector qualified as V
 import Test.Hspec
@@ -530,6 +531,24 @@ spec = aroundAll withJournalApp $ do
                 Right (_, st2) -> do
                     ssConsumed st2 `shouldBe` Set.singleton 0
                     actingUserId st2 `shouldBe` UserId 2000000123
+
+    describe "ssNamedMessages (the scenario's message names)" $ do
+        it "seeds a fresh scenario state with an empty name map" $ \_app -> do
+            st0 <- newScenarioState :: IO (ScenarioState ())
+            ssNamedMessages st0 `shouldBe` Map.empty
+
+        it "SURVIVES an await like the acting user (non-derived state)" $ \_app -> do
+            st0 <- newScenarioState :: IO (ScenarioState ())
+            let st1 = st0{ssNamedMessages = Map.fromList [("message 1", MessageId 1)]}
+            -- the name map is non-derived state: a wait consumes an
+            -- observation (record-update on the state) and must carry it over
+            atomically $ appendObservation (ssLog st1) (tgMsg "hi" (MessageId 0))
+            result <- awaitObservation defaultAwaitBudgetUs st1 (isTextReply "hi") "the reply"
+            case result of
+                Left err -> expectationFailure ("expected a match, timed out: " <> show err)
+                Right (_, st2) -> do
+                    ssConsumed st2 `shouldBe` Set.singleton 0
+                    ssNamedMessages st2 `shouldBe` Map.fromList [("message 1", MessageId 1)]
 
     describe "Observation Eq and Show for the Stars constructors" $ do
         it "Eq matches equal ObsTgInvoice observations" $ \_app -> do

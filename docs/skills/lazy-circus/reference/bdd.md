@@ -323,6 +323,63 @@ deterministic target — the factory's first user message is always `MessageId 1
 — plus the is-big refusal feature) lives in `testing/test/Bdd/ReactionSpec.hs` —
 mirror it for your own reaction flows.
 
+## Telegram Step Dictionary (Named Messages)
+
+A scenario cannot compute a user message's id itself: `message_id` mirrors the
+update factory's `update_id`, and the counter depends on how many updates the
+scenario has already fed the bot. So the state carries a name map —
+`ssNamedMessages :: Map Text MessageId`, a non-derived `ScenarioState` field
+like `ssActingUser`: bound only by an explicit naming step, survives every
+`awaitObservation`, resets per scenario. The mocked performer journals every
+`deleteMessage` as `ObsTgDelete` with its target (`obsTargetMsgId`), so a
+deletion can be checked against a NAME, not just observed.
+
+Library steps (in `LazyCircus.Testing.Bdd.Tg`, registry-ready):
+
+```gherkin
+When the user sends "/tick" as "message 1"   # send from the acting user AND
+                                              # bind "message 1" -> the sent
+                                              # message's assigned MessageId
+Then the bot deletes the "message 1"         # strict: consumes a deletion
+                                              # targeting EXACTLY that message
+Then the bot deletes a message               # target-agnostic sibling: any
+                                              # deletion passes
+```
+
+- `userSendsAs` (`When`, `the user sends "$msg" as "$name"`) — `userSends`
+  plus a name: feeds the text-message update from `actingUserId` in
+  `defaultTestChatId` and records name → assigned `MessageId` in
+  `ssNamedMessages`. A name binds ONCE per scenario: a rebind aborts with a
+  guard failure listing the bound names (in a BDD document a name is written
+  once, and a collision is almost always a copy-paste typo that silent
+  shadowing would hide). The plain `the user sends "$msg"` pattern requires
+  the step text to END after the message, so the two patterns never collide.
+- `botDeletesNamedMessage` (`Then`, `the bot deletes the "$name"`) consumes
+  exactly one `ObsTgDelete` whose `obsTargetMsgId` equals the named id —
+  deletions of other targets scanned past stay available to later waits
+  (consumed-set semantics). An unknown name aborts IMMEDIATELY (no waiting)
+  with the known names; a wrong target (or nothing) times out with a reason
+  carrying the expected name, its id and the bound names. The strict sibling
+  `botDeletesMessage` (`Then`, `the bot deletes a message`) accepts any
+  deletion — keep it for flows that genuinely do not care about the target.
+
+Caveats worth knowing:
+
+- Selective waiting cannot catch EXTRA deletions: if the bot deleted both the
+  named message and (wrongly) a neighbour, the named step finds its match and
+  passes. Full strictness is a post-scenario verifier concern — assert the
+  journal holds no unconsumed `ObsTgDelete` entries beyond the expected ones
+  (the `ScenarioVerifier` receives the full journal snapshot).
+- The named check matches the numeric id only. User messages get ids from the
+  update factory (1, 2, ...), bot messages from the mock's own counter — the
+  two id spaces overlap numerically, so a name pins a number, not an origin.
+
+A working end-to-end example (a `/tick` bot deleting the named command, two
+names distinguished in one scenario, plus the wrong-target refusal feature
+where the bot deletes `MessageId 2` instead of the named command and the step
+times out) lives in `testing/test/Bdd/NamedMessagesSpec.hs` — mirror it for
+your own deletion flows.
+
 ## The Acting User
 
 Every user-named input step acts as the state's CURRENT actor

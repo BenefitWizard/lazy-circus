@@ -9,8 +9,9 @@ dialog monad is 'TelegramTestScript' (the @tgTest@ DSL — a parameter-free
 reader over the test runtime with an IO escape), and the threaded state is
 'ScenarioState' (the observation journal's consumed set plus the derived
 dialog view). @Then@ constructors build 'thenDef' entries, @When@
-constructors ('userSends', 'memberTakesStage', 'defaultUserTakesStage',
-'userVotesFor', 'userVotesIn', 'memberVotesFor', 'memberVotesIn') build
+constructors ('userSends', 'userSendsAs', 'memberTakesStage',
+'defaultUserTakesStage', 'userVotesFor', 'userVotesIn', 'memberVotesFor',
+'memberVotesIn') build
 'whenDef' entries, so
 document steps — including @And@\/@But@ continuations, which inherit the
 previous step's keyword during parsing — select them. The expected values are
@@ -28,6 +29,15 @@ and resets per scenario). The member-named steps ('memberVotesFor'\/
 'memberVotesIn') are explicit shorthands: they always act as the login named
 in their own capture, resolved through
 'LazyCircus.Testing.Updates.userIdForLogin', regardless of the current actor.
+
+Named messages: 'userSendsAs' sends a user message AND binds the step's name
+capture to the 'MessageId' the update factory assigned it (the state's
+'ssNamedMessages'); the strict deletion step 'botDeletesNamedMessage' consumes
+an 'ObsTgDelete' whose target is EXACTLY the named message, while the
+target-agnostic sibling 'botDeletesMessage' accepts any deletion. A name binds
+once per scenario (a rebind aborts listing the bound names), the binding
+survives every 'awaitObservation', and a step naming an unknown name aborts
+immediately (no waiting) with the known ones.
 
 Await semantics (one await = one observation): every @Then@ constructor
 except 'botReplyContains', 'pollIsPublic', 'pollIsAnonymous', the poll
@@ -82,8 +92,10 @@ module LazyCircus.Testing.Bdd.Tg
     , botReactsWith
     , reactionIsBig
     , botDeletesMessage
+    , botDeletesNamedMessage
     , botSendsDocument
     , userSends
+    , userSendsAs
     , memberTakesStage
     , defaultUserTakesStage
     , userVotesFor
@@ -94,6 +106,8 @@ module LazyCircus.Testing.Bdd.Tg
     ) where
 
 import RIO
+import RIO.Map (Map)
+import RIO.Map qualified as Map
 import RIO.Text qualified as T
 
 import LazyCircus.Testing.Bdd.Journal
@@ -124,7 +138,7 @@ import LazyCircus.Testing.TgTest
     , tgTestWithMocks
     )
 import LazyCircus.Testing.Updates (defaultTestChatId, userIdForLogin)
-import Telegram.Bot.API (Update, UserId)
+import Telegram.Bot.API (MessageId, Update, UserId)
 import Test.Hspec (expectationFailure)
 
 -- | @the bot replies with "$text"@ — the bot's reply equals the step's quoted
@@ -550,6 +564,37 @@ userSends =
         _ <- sendMessageByUser (actingUserId st) defaultTestChatId msg
         pure (st, Nothing)
 
+-- | @the user sends "$msg" as "$name"@ — 'userSends', plus a name: the
+-- CURRENT actor sends a text message in the default test chat and the step
+-- binds its name capture to the 'MessageId' the update factory assigned the
+-- message, so a later step can demand THIS exact message as a target (e.g.
+-- 'botDeletesNamedMessage').
+--
+-- PRE-CONTRACT: The message text and the name appear inside double quotes in
+-- the step text (the pattern's @"$msg"@ and @"$name"@ spans) — the runner
+-- matched the step, so the captures are present. The name must not be bound
+-- yet in this scenario — a rebind aborts the DSL with a guard failure listing
+-- the bound names and their ids (a name is an identifier: in a BDD document a
+-- name is normally written once, and a collision is almost always a copy-paste
+-- typo that silent shadowing would hide).
+-- POST-CONTRACT: One text-message update has been fed to the bot from
+-- 'actingUserId' of the threaded state in 'defaultTestChatId', and
+-- 'ssNamedMessages' of the returned state maps the name to the message's
+-- assigned 'MessageId'. On a rebind NOTHING is sent and the state passes
+-- through unchanged.
+userSendsAs :: StepDef TelegramTestScript c (ScenarioState app) a
+userSendsAs =
+    whenDef "the user sends \"$msg\" as \"$name\"" $ \params st -> do
+        let msg = fromMaybe "" (lookupParam "$msg" params)
+            name = fromMaybe "" (lookupParam "$name" params)
+        case Map.lookup name (ssNamedMessages st) of
+            Just boundId ->
+                guardWith (nameAlreadyBoundReason name boundId (ssNamedMessages st)) False
+                    >> pure (st, Nothing)
+            Nothing -> do
+                (_, mid) <- sendMessageByUser (actingUserId st) defaultTestChatId msg
+                pure (st{ssNamedMessages = Map.insert name mid (ssNamedMessages st)}, Nothing)
+
 -- | @the member "$login" takes the stage@ — every subsequent user-named input
 -- step acts as the named cast member (resolved through
 -- 'LazyCircus.Testing.Updates.userIdForLogin'). The multi-actor switch: one
@@ -795,6 +840,71 @@ botDeletesMessage =
     thenDef "the bot deletes a message" $ \_params ->
         awaitMatching "a message deletion" isDeleteObs
 
+-- | @the bot deletes the "$name"@ — the bot deleted exactly the message bound
+-- to the name by an earlier 'userSendsAs' in the same scenario. The strict
+-- sibling of 'botDeletesMessage': the deletion's target
+-- ('obsTargetMsgId') must equal the named message's id, so a bot that deleted
+-- the WRONG message (the classic off-by-one of mock id arithmetic) refuses
+-- instead of passing on the first deletion it sees.
+--
+-- PRE-CONTRACT: The name appears inside double quotes in the step text (the
+-- pattern's @"$name"@ span) — the runner matched the step, so the capture is
+-- present. The name is bound by an earlier 'userSendsAs' of the same scenario
+-- — an unknown name aborts IMMEDIATELY (no waiting) with the known names.
+-- POST-CONTRACT: On success exactly one 'ObsTgDelete' whose 'obsTargetMsgId'
+-- is the named id has been consumed; deletions of other targets scanned past
+-- stay available to later waits (consumed-set semantics), and a 'Nothing'
+-- target never matches. When the bot deletes something else or nothing within
+-- 'defaultAwaitBudgetUs', the step aborts with a timeout reason carrying the
+-- expected name, its id and the bound names, and nothing is consumed.
+botDeletesNamedMessage :: StepDef TelegramTestScript c (ScenarioState app) a
+botDeletesNamedMessage =
+    thenDef "the bot deletes the \"$name\"" $ \params st -> do
+        let name = fromMaybe "" (lookupParam "$name" params)
+        case Map.lookup name (ssNamedMessages st) of
+            Nothing ->
+                guardWith (unknownMessageNameReason name (ssNamedMessages st)) False
+                    >> pure (st, Nothing)
+            Just mid -> do
+                result <-
+                    liftIO $
+                        awaitObservation
+                            defaultAwaitBudgetUs
+                            st
+                            (isDeleteOf mid)
+                            ("the deletion of \"" <> name <> "\" (message " <> tshow mid <> ")")
+                case result of
+                    Right (_, st') -> pure (st', Nothing)
+                    Left timedOut ->
+                        guardWith (renderTimeout timedOut <> "; " <> knownNamesReason (ssNamedMessages st)) False
+                            >> pure (st, Nothing)
+
+-- | Guard-failure message when a naming step would rebind an already-bound
+-- name: names the existing binding and lists every bound name.
+nameAlreadyBoundReason :: Text -> MessageId -> Map Text MessageId -> Text
+nameAlreadyBoundReason name boundId named =
+    "the message name \""
+        <> name
+        <> "\" is already bound (to "
+        <> tshow boundId
+        <> "); a name binds once per scenario — bound names: "
+        <> tshow (Map.keys named)
+
+-- | Guard-failure message when a step names a message name no 'userSendsAs'
+-- bound in this scenario: names the binding step and lists the known names.
+unknownMessageNameReason :: Text -> Map Text MessageId -> Text
+unknownMessageNameReason name named =
+    "the message name \""
+        <> name
+        <> "\" is not bound in this scenario; bind it with 'the user sends \"...\" as \""
+        <> name
+        <> "\"' first — bound names: "
+        <> tshow (Map.keys named)
+
+-- | Timeout-reason suffix listing the scenario's bound message names.
+knownNamesReason :: Map Text MessageId -> Text
+knownNamesReason named = "bound message names: " <> tshow (Map.keys named)
+
 -- | @the bot sends a document@ — the bot sent a document.
 --
 -- PRE-CONTRACT: None.
@@ -913,6 +1023,12 @@ isReactionWith _ _ = False
 isDeleteObs :: Observation app -> Bool
 isDeleteObs ObsTgDelete{} = True
 isDeleteObs _ = False
+
+-- | Predicate: a deletion of exactly the given message (a 'Nothing' target
+-- never matches).
+isDeleteOf :: MessageId -> Observation app -> Bool
+isDeleteOf mid ObsTgDelete{obsTargetMsgId = target} = target == Just mid
+isDeleteOf _ _ = False
 
 -- | Predicate: a document the bot sent.
 isDocumentObs :: Observation app -> Bool

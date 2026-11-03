@@ -41,6 +41,8 @@ module LazyCircus.Testing.Bdd.Journal
     ) where
 
 import RIO
+import RIO.Map (Map)
+import RIO.Map qualified as Map
 import RIO.Set (Set)
 import RIO.Set qualified as Set
 
@@ -404,9 +406,16 @@ data ScenarioState app = ScenarioState
     , ssActingUser :: !(Maybe UserId)
     -- ^ the user the user-input steps (e.g. 'LazyCircus.Testing.Bdd.Tg.userSends',
     -- 'LazyCircus.Testing.Bdd.Tg.userVotesFor') currently act as — set by the
-    -- takes-the-stage steps ('Nothing' = the 'defaultTestUserId'). The ONLY
-    -- non-derived field: it changes when a step sets it, not from observations,
-    -- and survives every 'awaitObservation' (record update).
+    -- takes-the-stage steps ('Nothing' = the 'defaultTestUserId'). A non-derived
+    -- field: it changes when a step sets it, not from observations, and
+    -- survives every 'awaitObservation' (record update).
+    , ssNamedMessages :: !(Map Text MessageId)
+    -- ^ message names bound to the ids of the user messages that carried them:
+    -- name → the 'MessageId' the update factory assigned the message sent by
+    -- 'LazyCircus.Testing.Bdd.Tg.userSendsAs' (the only binding step). Like
+    -- 'ssActingUser', a non-derived field: it changes only when a step sets it,
+    -- survives every 'awaitObservation' (record update), and resets per
+    -- scenario ('freshScenarioState' seeds the empty map).
     }
 
 -- | 'sqNumber' of the highest journal entry consumed so far ('Nothing' when
@@ -424,8 +433,9 @@ actingUserId = fromMaybe defaultTestUserId . ssActingUser
 
 -- | Allocate a fresh journal together with a fresh scenario state observing it.
 -- POST-CONTRACT: The state's 'ssConsumed' is empty (nothing consumed), its
--- journal is empty, its dialog state is 'emptyDialogState', and it acts as the
--- default test user ('ssActingUser' is 'Nothing').
+-- journal is empty, its dialog state is 'emptyDialogState', it acts as the
+-- default test user ('ssActingUser' is 'Nothing'), and no message names are
+-- bound ('ssNamedMessages' is empty).
 newScenarioState :: IO (ScenarioState app)
 newScenarioState = freshScenarioState <$> newObservationLog
 
@@ -433,8 +443,9 @@ newScenarioState = freshScenarioState <$> newObservationLog
 -- journal is shared (e.g. configured via @tcJournal@) or appended to from
 -- other threads.
 -- POST-CONTRACT: The state's 'ssConsumed' is empty (nothing consumed), its
--- dialog state is 'emptyDialogState' and it acts as the default test user
--- ('ssActingUser' is 'Nothing'); the journal is not touched.
+-- dialog state is 'emptyDialogState', it acts as the default test user
+-- ('ssActingUser' is 'Nothing') and no message names are bound
+-- ('ssNamedMessages' is empty); the journal is not touched.
 freshScenarioState :: ObservationLog app -> ScenarioState app
 freshScenarioState logRef =
     ScenarioState
@@ -442,6 +453,7 @@ freshScenarioState logRef =
         , ssLog = logRef
         , ssDialog = emptyDialogState
         , ssActingUser = Nothing
+        , ssNamedMessages = Map.empty
         }
 
 {- | Wait for the next UNCONSUMED journal entry that satisfies the predicate,

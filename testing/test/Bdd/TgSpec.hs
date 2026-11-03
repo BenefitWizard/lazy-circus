@@ -15,6 +15,7 @@ would observe it.
 module Bdd.TgSpec (spec) where
 
 import RIO
+import RIO.Map qualified as Map
 import RIO.Set qualified as Set
 import RIO.Text qualified as T
 import Test.Hspec
@@ -33,6 +34,7 @@ import LazyCircus.Testing.Bdd.Pattern (ParamName, ParamValue, StepParams (..))
 import LazyCircus.Testing.Bdd.Step (StepDef (..))
 import LazyCircus.Testing.Bdd.Tg
     ( botDeletesMessage
+    , botDeletesNamedMessage
     , botReplyContains
     , botRepliesWithKeyboard
     , botRepliesWithMessage
@@ -40,6 +42,7 @@ import LazyCircus.Testing.Bdd.Tg
     , botReactsWith
     , botSendsDocument
     , reactionIsBig
+    , userSendsAs
     )
 import LazyCircus.Testing.Performer (Mocks, TestConfig)
 import LazyCircus.Testing.TgTest
@@ -274,6 +277,95 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
             Left err -> expectationFailure ("the timed-out wait consumed the message: " <> show err)
             Right (st1, _) -> ssConsumed st1 `shouldBe` Set.singleton 0
 
+    it "userSendsAs binds the sent message's id to the name and refuses a rebind" $ do
+        st0 <- newScenarioState :: IO (ScenarioState ())
+        result <-
+            runDialogScript (thenActionWithParams [("$msg", "/tick"), ("$name", "message 1")] userSendsAs st0)
+        case result of
+            Left err -> expectationFailure ("step aborted: " <> show err)
+            Right (st1, _) -> do
+                -- a fresh update factory starts at update_id = 1 and the
+                -- message id mirrors it, so the first sent message is MessageId 1
+                ssNamedMessages st1 `shouldBe` Map.fromList [("message 1", MessageId 1)]
+                -- a second binding of the same name: guard failure listing the
+                -- bound names; the state passes through unchanged
+                rebind <-
+                    runDialogScript
+                        (thenActionWithParams [("$msg", "/again"), ("$name", "message 1")] userSendsAs st1)
+                case rebind of
+                    Left (TgTestGuardFailed reason) -> do
+                        reason `shouldSatisfy` ("already bound" `T.isInfixOf`)
+                        reason `shouldSatisfy` ("\"message 1\"" `T.isInfixOf`)
+                    Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+                    Right _ -> expectationFailure "expected the rebind to refuse"
+                -- a DIFFERENT name still binds after a refusal (each
+                -- runDialogScript is its own tgTest run with a fresh factory,
+                -- so this run's first message is MessageId 1 again)
+                second <-
+                    runDialogScript
+                        (thenActionWithParams [("$msg", "/tock"), ("$name", "message 2")] userSendsAs st1)
+                case second of
+                    Left err -> expectationFailure ("step aborted: " <> show err)
+                    Right (st2, _) ->
+                        ssNamedMessages st2
+                            `shouldBe` Map.fromList [("message 1", MessageId 1), ("message 2", MessageId 1)]
+
+    it "botDeletesNamedMessage consumes exactly the named message's deletion" $ do
+        st0 <- newScenarioState :: IO (ScenarioState ())
+        let journal = ssLog st0
+            named = st0{ssNamedMessages = Map.fromList [("m1", MessageId 6)]}
+        atomically $ do
+            appendObservation journal (tgDelete (MessageId 6))
+            appendObservation journal (tgDelete (MessageId 9))
+        result <- runDialogScript (thenActionWithParams [("$name", "m1")] botDeletesNamedMessage named)
+        case result of
+            Left err -> expectationFailure ("step aborted: " <> show err)
+            Right (st1, _) -> do
+                -- only the deletion of the NAMED target was consumed; the
+                -- foreign-target deletion scanned past stays available
+                ssConsumed st1 `shouldBe` Set.singleton 0
+                leftover <- runDialogScript (thenAction botDeletesMessage st1)
+                case leftover of
+                    Left err -> expectationFailure ("step aborted: " <> show err)
+                    Right (st2, _) -> ssConsumed st2 `shouldBe` Set.fromList [0, 1]
+
+    it "botDeletesNamedMessage refuses an unknown name immediately, listing known names" $ do
+        st0 <- newScenarioState :: IO (ScenarioState ())
+        let journal = ssLog st0
+            named = st0{ssNamedMessages = Map.fromList [("known", MessageId 3)]}
+        -- a deletion IS journaled: had the step waited, it would have found
+        -- something — the refusal reason proves it refused on the NAME instead
+        atomically (appendObservation journal (tgDelete (MessageId 3)))
+        result <- runDialogScript (thenActionWithParams [("$name", "nope")] botDeletesNamedMessage named)
+        case result of
+            Left (TgTestGuardFailed reason) -> do
+                reason `shouldSatisfy` ("is not bound" `T.isInfixOf`)
+                reason `shouldSatisfy` ("\"known\"" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+            Right _ -> expectationFailure "expected the unknown name to refuse"
+        -- the refusal mutated nothing: the journaled deletion is intact
+        readObservations journal `shouldReturn` [tgDelete (MessageId 3)]
+
+    it "a wrong-target deletion times out naming the expected message" $ do
+        st0 <- newScenarioState :: IO (ScenarioState ())
+        let journal = ssLog st0
+            named = st0{ssNamedMessages = Map.fromList [("m1", MessageId 7)]}
+        -- the bot deleted SOMETHING ELSE (target 9): the step must refuse
+        atomically (appendObservation journal (tgDelete (MessageId 9)))
+        result <- runDialogScript (thenActionWithParams [("$name", "m1")] botDeletesNamedMessage named)
+        case result of
+            Left (TgTestGuardFailed reason) -> do
+                reason `shouldSatisfy` ("timed out" `T.isInfixOf`)
+                reason `shouldSatisfy` ("deletion of \"m1\"" `T.isInfixOf`)
+                reason `shouldSatisfy` ("bound message names" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a timeout guard, got: " <> show other)
+            Right _ -> expectationFailure "expected the wrong-target deletion to refuse"
+        -- the refused wait consumed nothing: the foreign deletion is still matchable
+        retry <- runDialogScript (thenAction botDeletesMessage named)
+        case retry of
+            Left err -> expectationFailure ("the refused wait consumed the deletion: " <> show err)
+            Right (st1, _) -> ssConsumed st1 `shouldBe` Set.singleton 0
+
 --------------------------------------------------------------------------------
 -- Fixtures and harness
 --------------------------------------------------------------------------------
@@ -298,6 +390,10 @@ tgReactionWith emoji isBig mid =
         , obsReaction = Just [ReactionTypeEmoji "emoji" emoji]
         , obsIsBig = isBig
         }
+
+-- | A deletion observation targeting the given message.
+tgDelete :: MessageId -> Observation ()
+tgDelete mid = ObsTgDelete{obsTargetMsgId = Just mid}
 
 -- | A bot text-message observation carrying a one-button inline keyboard.
 tgKeyboardMsg :: Text -> MessageId -> Observation ()
