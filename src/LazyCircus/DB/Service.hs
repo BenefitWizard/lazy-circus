@@ -24,6 +24,14 @@ class (IsInDb db table) => HasCreateService db table where
 -- runCreate :: (MonadIO m) => Connection -> PgDB db -> [table Maybe] -> m [table Identity]
 -- runCreate conn db inptTable = runInsertDebug conn (generateInsert db inptTable)
 
+{- | Capability class for tables that support upsert
+(INSERT ... ON CONFLICT DO UPDATE). The conflict target (primary or
+unique key) is fixed by the instance; the DO UPDATE branch applies the
+sparse patch, so @Nothing@ fields keep the stored values.
+-}
+class (HasCreateService db table) => HasUpsertService db table where
+    generateUpsert :: PgDB db -> table Maybe -> SqlInsert Postgres table
+
 -- | Capability class for tables that support lookup identifiers, select builders, and a default find runner.
 class (IsInDb db table) => HasReadService db table where
     type LId table = result | result -> table

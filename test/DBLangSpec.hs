@@ -115,6 +115,90 @@ spec = aroundAll withFreshTestDb $ do
             length updated `shouldBe` 2
             map circusActAudienceReaction updated `shouldBe` [Just "cheers", Just "cheers"]
 
+        it "upsert inserts a new row and returns it" $ \env -> do
+            beforeRows <- queryActs env
+
+            upserted <- expectJust "upsertScript" =<< runDbScript simpleDb ReadWrite upsertScript env
+
+            circusId upserted `shouldBe` 7
+            circusActName upserted `shouldBe` "Acrobats"
+            circusActDescription upserted `shouldBe` "Flying trapeze"
+            circusActAudienceReaction upserted `shouldBe` Just "wow"
+
+            afterRows <- queryActs env
+            length afterRows `shouldBe` length beforeRows + 1
+            last afterRows
+                `shouldBe` TestRow (circusActId upserted) "Acrobats" 7 "Flying trapeze" (Just "wow")
+
+        it "upsert updates only provided fields on conflict" $ \env -> do
+            created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
+            beforeRows <- queryActs env
+
+            upserted <-
+                expectJust "upsertScript" =<<
+                runDbScript simpleDb ReadWrite (upsert (conflictPatch (circusActId created))) env
+
+            circusActId upserted `shouldBe` circusActId created
+            circusId upserted `shouldBe` 7
+            circusActName upserted `shouldBe` "Acrobats"
+            circusActDescription upserted `shouldBe` "New finale"
+            circusActAudienceReaction upserted `shouldBe` Nothing
+
+            afterRows <- queryActs env
+            length afterRows `shouldBe` length beforeRows
+
+        it "upsertMany mixes inserts and updates" $ \env -> do
+            created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
+            beforeRows <- queryActs env
+
+            affected <-
+                runDbScript
+                    simpleDb
+                    ReadWrite
+                    (upsertMany [secondCircusActMaybe, conflictPatch (circusActId created)])
+                    env
+
+            length affected `shouldBe` 2
+            map circusActName affected `shouldSatisfy` elem "Jugglers"
+            map circusActName affected `shouldSatisfy` elem "Acrobats"
+
+            afterRows <- queryActs env
+            length afterRows `shouldBe` length beforeRows + 1
+            let updatedRows = filter (\r -> testRowId r == circusActId created) afterRows
+            testRowDescription <$> listToMaybe updatedRows `shouldBe` Just "New finale"
+
+        it "upsert conflicts on the charge id, not the primary key" $ \env -> do
+            first <-
+                expectJust "first upsert" =<<
+                runDbScript simpleDb ReadWrite (upsert (starsPaymentUpsert "chg-42" (Just 10))) env
+            second <-
+                expectJust "second upsert" =<<
+                runDbScript simpleDb ReadWrite (upsert (starsPaymentUpsert "chg-42" (Just 25))) env
+
+            starsPaymentId second `shouldBe` starsPaymentId first
+            starsPaymentStars second `shouldBe` Just 25
+            starsPaymentTelegramPaymentChargeId second `shouldBe` "chg-42"
+
+            rows <-
+                runDbScript
+                    simpleDb
+                    ReadWrite
+                    ( rawQuery
+                        (Query "SELECT id, telegram_payment_charge_id, user_id, stars, currency_amount, invoice_payload, created_at FROM stars_payments")
+                        []
+                    )
+                    env
+            rows `shouldBe` [second]
+
+        it "upsert works inside withTransactionRLS" $ \env -> do
+            let script = withTransactionRLS (rlsCircusId 7) $ do
+                    mAct <- upsert circusActMaybe
+                    forM mAct $ \act -> upsert (conflictPatch (circusActId act))
+
+            res <- runDbScript simpleDb ReadWrite script env
+
+            fmap circusActDescription (join res) `shouldBe` Just "New finale"
+
         it "rawQuery reads rows from the same database" $ \env -> do
             _ <- runDbScript simpleDb ReadWrite createScript env
 
@@ -135,6 +219,9 @@ spec = aroundAll withFreshTestDb $ do
 
             runDbScript simpleDb ReadOnly (updateCircusAct updatePatch (circusActId created)) env
                 `shouldThrow` isReadOnlyViolation
+
+        it "ReadOnly rejects upsert operations" $ \env ->
+            runDbScript simpleDb ReadOnly upsertScript env `shouldThrow` isReadOnlyViolation
 
         it "ReadOnly rejects delete operations" $ \env -> do
             created <- expectJust "createScript" =<< runDbScript simpleDb ReadWrite createScript env
@@ -250,6 +337,35 @@ spec = aroundAll withFreshTestDb $ do
 
 createScript :: DBScript SimpleDb (Maybe CircusAct)
 createScript = create circusActMaybe
+
+upsertScript :: DBScript SimpleDb (Maybe CircusAct)
+upsertScript = upsert circusActMaybe
+
+-- | Upsert patch for an existing row: keeps unspecified fields, clears the reaction.
+-- circusId is Just because Postgres validates the would-be INSERT row (NOT NULL,
+-- RLS WITH CHECK) even when the row conflicts and takes the DO UPDATE branch.
+conflictPatch :: Int32 -> CircusActT Maybe
+conflictPatch actId =
+    CircusAct
+        { circusActId = Just actId
+        , circusActName = Nothing
+        , circusId = Just 7
+        , circusActDescription = Just "New finale"
+        , circusActAudienceReaction = Just Nothing
+        }
+
+-- | Upsert row for a stars payment keyed by the telegram charge id.
+starsPaymentUpsert :: Text -> Maybe Int32 -> StarsPaymentT Maybe
+starsPaymentUpsert chargeId stars =
+    StarsPayment
+        { starsPaymentId = Nothing
+        , starsPaymentTelegramPaymentChargeId = Just chargeId
+        , starsPaymentUserId = Just (Just 111)
+        , starsPaymentStars = Just stars
+        , starsPaymentCurrencyAmount = Nothing
+        , starsPaymentInvoicePayload = Nothing
+        , starsPaymentCreatedAt = Nothing
+        }
 
 circusActMaybe :: CircusActT Maybe
 circusActMaybe =

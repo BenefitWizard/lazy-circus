@@ -8,6 +8,7 @@
 module Common where
 
 import Database.Beam
+import Database.Beam.Backend.SQL.BeamExtensions (conflictingFields, insertOnConflict, onConflictUpdateSet)
 import Database.Beam.Postgres (Postgres)
 import Database.PostgreSQL.Simple.FromRow (FromRow)
 import LazyCircus.DB.Service
@@ -123,17 +124,18 @@ instance HasCreateService SimpleDb CircusActT where
     generateInsert db rows =
         insert (_circusActs db) $
             insertExpressions $
-                map
-                    ( \r ->
-                        CircusAct
-                            { circusActId = maybe default_ val_ (circusActId r)
-                            , circusId = maybe default_ val_ (circusId r)
-                            , circusActName = maybe (val_ "") val_ (circusActName r)
-                            , circusActDescription = maybe (val_ "") val_ (circusActDescription r)
-                            , circusActAudienceReaction = maybe nothing_ (maybe nothing_ (just_ . val_)) (circusActAudienceReaction r)
-                            }
-                    )
-                    rows
+                map mkCircusActValues rows
+
+-- | Builds insert expressions for one circus act row, mapping @Nothing@ onto column defaults.
+mkCircusActValues :: CircusActT Maybe -> CircusActT (QExpr Postgres s)
+mkCircusActValues r =
+    CircusAct
+        { circusActId = maybe default_ val_ (circusActId r)
+        , circusId = maybe default_ val_ (circusId r)
+        , circusActName = maybe (val_ "") val_ (circusActName r)
+        , circusActDescription = maybe (val_ "") val_ (circusActDescription r)
+        , circusActAudienceReaction = maybe nothing_ (maybe nothing_ (just_ . val_)) (circusActAudienceReaction r)
+        }
 
 instance HasReadService SimpleDb CircusActT where
     type LId CircusActT = CircusActId
@@ -151,6 +153,61 @@ instance HasUpdateService SimpleDb CircusActT where
             ]
 
 instance HasDeleteService SimpleDb CircusActT
+
+-- LAW: the conflict target is the primary key; the DO UPDATE branch reuses
+-- 'generateAssigment', so upsert patches share the sparse-patch semantics of update.
+instance HasUpsertService SimpleDb CircusActT where
+    generateUpsert db patch =
+        insertOnConflict
+            (_circusActs db)
+            (insertExpressions [mkCircusActValues patch])
+            (conflictingFields primaryKey)
+            (onConflictUpdateSet (\fields _ -> generateAssigment db patch fields))
+
+-- LAW: getTargetTable returns the starsPayments entity from the schema.
+instance IsInDb SimpleDb StarsPaymentT where
+    getTargetTable = _starsPayments
+
+instance HasCreateService SimpleDb StarsPaymentT where
+    generateInsert db rows =
+        insert (_starsPayments db) $
+            insertExpressions $
+                map mkStarsPaymentValues rows
+
+-- | Builds insert expressions for one stars payment row, mapping @Nothing@ onto column defaults.
+mkStarsPaymentValues :: StarsPaymentT Maybe -> StarsPaymentT (QExpr Postgres s)
+mkStarsPaymentValues r =
+    StarsPayment
+        { starsPaymentId = maybe default_ val_ (starsPaymentId r)
+        , starsPaymentTelegramPaymentChargeId = maybe (val_ "") val_ (starsPaymentTelegramPaymentChargeId r)
+        , starsPaymentUserId = maybe nothing_ (maybe nothing_ (just_ . val_)) (starsPaymentUserId r)
+        , starsPaymentStars = maybe nothing_ (maybe nothing_ (just_ . val_)) (starsPaymentStars r)
+        , starsPaymentCurrencyAmount = maybe nothing_ (maybe nothing_ (just_ . val_)) (starsPaymentCurrencyAmount r)
+        , starsPaymentInvoicePayload = maybe nothing_ (maybe nothing_ (just_ . val_)) (starsPaymentInvoicePayload r)
+        , starsPaymentCreatedAt = maybe nothing_ (maybe nothing_ (just_ . val_)) (starsPaymentCreatedAt r)
+        }
+
+-- LAW: the conflict target is the unique telegram_payment_charge_id (the idempotency
+-- key), not the primary key; the DO UPDATE branch applies the sparse patch, leaving
+-- the conflict key and the primary key untouched.
+instance HasUpsertService SimpleDb StarsPaymentT where
+    generateUpsert db patch =
+        insertOnConflict
+            (_starsPayments db)
+            (insertExpressions [mkStarsPaymentValues patch])
+            (conflictingFields starsPaymentTelegramPaymentChargeId)
+            -- Updates only the @Just@ fields of the patch; @Nothing@ keeps the stored value.
+            ( onConflictUpdateSet
+                ( \fields _ ->
+                    mconcat
+                        [ maybe mempty (\v -> starsPaymentUserId fields <-. val_ v) (starsPaymentUserId patch)
+                        , maybe mempty (\v -> starsPaymentStars fields <-. val_ v) (starsPaymentStars patch)
+                        , maybe mempty (\v -> starsPaymentCurrencyAmount fields <-. val_ v) (starsPaymentCurrencyAmount patch)
+                        , maybe mempty (\v -> starsPaymentInvoicePayload fields <-. val_ v) (starsPaymentInvoicePayload patch)
+                        , maybe mempty (\v -> starsPaymentCreatedAt fields <-. val_ v) (starsPaymentCreatedAt patch)
+                        ]
+                )
+            )
 
 -- | RLS context keyed by the circus domain tenant column @circus_id@,
 -- matching the @circus_acts_circus_rls@ policy in 'migration'.

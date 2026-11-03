@@ -9,6 +9,17 @@ and this project adheres to the
 ## Unreleased
 
 ### Added
+- `upsert` / `upsertMany` in `LazyCircus.Scene.DB` (`INSERT ... ON CONFLICT DO UPDATE
+  ... RETURNING`): the conflict key is fixed per table by a new `HasUpsertService`
+  capability class in `LazyCircus.DB.Service` (primary key or a unique key, e.g. an
+  idempotency key); on the conflict branch the `table Maybe` patch is sparse exactly
+  like `update` (`Nothing` keeps the stored value), on the insert branch `Nothing`
+  takes the column default like `create`. A write operation — blocked in `ReadOnly`.
+  Postgres validates the would-be INSERT row (NOT NULL, RLS `WITH CHECK`) before
+  conflict resolution, so patches must carry `Just` values for NOT NULL columns
+  without database defaults even when the row already exists. `upsertMany` runs one
+  statement per row; wrap in `withTransaction` for atomic batches.
+  `DBScriptPerformer` gained an `upsert'` method (breaking for external instances).
 - Step argument tables in the Gherkin parser: `| ... |` rows directly after a step attach
   to it as `gherkinStepTable :: Maybe [[Text]]` (rows in document order, no width check;
   rows are consumed greedily, so a plain text line after a table row is a parse error;

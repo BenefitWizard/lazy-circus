@@ -13,6 +13,8 @@ module LazyCircus.Scene.DB.Lang (
     createMany,
     createAsIs,
     createManyAsIs,
+    upsert,
+    upsertMany,
     delete,
     update,
     updateMany,
@@ -38,6 +40,7 @@ import LazyCircus.DB.Service (
     HasDeleteService,
     HasReadService,
     HasUpdateService,
+    HasUpsertService,
     LId,
     )
 import LazyCircus.DB.Types
@@ -78,6 +81,7 @@ data DBLangF db a where
     Update :: (HasUpdateService db table) => table Maybe -> LId table -> ([table Identity] -> a) -> DBLangF db a
     UpdateMany :: (HasUpdateService db table) => table Maybe -> [LId table] -> ([table Identity] -> a) -> DBLangF db a
     Create :: (HasCreateService db table) => [table Maybe] -> ([table Identity] -> a) -> DBLangF db a
+    Upsert :: (HasUpsertService db table) => [table Maybe] -> ([table Identity] -> a) -> DBLangF db a
     Delete :: (HasDeleteService db table) => LId table -> a -> DBLangF db a
     CreateAsIs :: (HasCreateService db table) => [table Identity] -> ([table Identity] -> a) -> DBLangF db a
     Find :: (HasReadService db table) => LId table -> ([table Identity] -> a) -> DBLangF db a
@@ -89,6 +93,7 @@ data DBLangF db a where
 
 instance Functor (DBLangF db) where
     fmap f (Create table next) = Create table (f . next)
+    fmap f (Upsert table next) = Upsert table (f . next)
     fmap f (Delete lid next) = Delete lid (f next)
     fmap f (CreateAsIs table next) = CreateAsIs table (f . next)
     fmap f (Update table lid next) = Update table lid (f . next)
@@ -137,6 +142,23 @@ POST-CONTRACT: Produces a script that returns all inserted rows.
 -}
 createManyAsIs :: (HasCreateService db table) => [table Identity] -> F (DBLangF db) [table Identity]
 createManyAsIs tables = liftFC $ CreateAsIs tables id
+
+{- | Lifts a single upsert request into the database script language.
+The row is inserted, or — when it conflicts on the instance-defined key — the
+stored row is updated with the sparse patch: @Nothing@ keeps the stored value,
+@Just value@ assigns it, and @Just Nothing@ assigns SQL NULL for a nullable column.
+PRE-CONTRACT: The target table must provide an upsert service for the selected database.
+POST-CONTRACT: Produces a script that returns the affected row (inserted or updated), or Nothing when the database returns no rows.
+-}
+upsert :: (HasUpsertService db table) => table Maybe -> F (DBLangF db) (Maybe (table Identity))
+upsert table = liftFC $ Upsert [table] listToMaybe
+
+{- | Lifts a batched upsert request into the database script language.
+PRE-CONTRACT: The target table must provide an upsert service for the selected database.
+POST-CONTRACT: Produces a script that returns every affected row, both inserted and updated.
+-}
+upsertMany :: (HasUpsertService db table) => [table Maybe] -> F (DBLangF db) [table Identity]
+upsertMany tables = liftFC $ Upsert tables id
 
 {- | Lifts an update request for a single lookup key into the database script language.
 PRE-CONTRACT: The target table must provide an update service for the selected database.

@@ -27,11 +27,13 @@ import LazyCircus.DB.Service
     , HasDeleteService
     , HasReadService
     , HasUpdateService
+    , HasUpsertService
     , LId
     , generateAssigment
     , generateFiltration
     , generateInsert
     , generateSelect
+    , generateUpsert
     , getTargetTable
     )
 import LazyCircus.DB.Types (PgDB)
@@ -49,6 +51,7 @@ class HasDbConnection env where
 class (Monad m) => DBScriptPerformer m where
     create' :: (HasCreateService db table) => PgDB db -> DbMode -> [table Maybe] -> m [table Identity]
     createAsIs' :: (HasCreateService db table) => PgDB db -> DbMode -> [table Identity] -> m [table Identity]
+    upsert' :: (HasUpsertService db table) => PgDB db -> DbMode -> [table Maybe] -> m [table Identity]
     find' :: (HasReadService db table) => PgDB db -> DbMode -> LId table -> m [table Identity]
 
     {- | Interprets a locking lookup that reads rows matching a lookup key and acquires a row lock on them.
@@ -81,6 +84,11 @@ instance
     createAsIs' db _mode tables = timedAndLog "DB" "CreateAsIs" $ do
         conn <- view dbConnectionL
         liftIO $ runBeamPostgres conn $ runInsertReturningList (generateInsert db (map identityToMaybe tables))
+
+    upsert' db _mode tables = timedAndLog "DB" "Upsert" $ do
+        conn <- view dbConnectionL
+        liftIO $ runBeamPostgres conn $
+            fmap concat $ traverse (runInsertReturningList . generateUpsert db) tables
 
     find' db _mode lid = timedAndLog "DB" "Find" $ do
         conn <- view dbConnectionL
@@ -170,6 +178,10 @@ runDB db mode = iterM go
     go (CreateAsIs tables next) = do
         ensureReadWrite mode
         result <- createAsIs' db mode tables
+        next result
+    go (Upsert tables next) = do
+        ensureReadWrite mode
+        result <- upsert' db mode tables
         next result
     go (Find lid next) = do
         result <- find' db mode lid

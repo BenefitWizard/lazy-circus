@@ -33,6 +33,7 @@ To make a Beam table usable through `DBScript`, implement the service typeclasse
 | `HasReadService db table` | define lookup id, select, and filtration |
 | `HasUpdateService db table` | define update assignments |
 | `HasDeleteService db table` | optional if default delete is enough |
+| `HasUpsertService db table` | optional, define upsert: conflict key + DO UPDATE patch |
 
 ### Canonical Pattern
 
@@ -75,7 +76,21 @@ instance HasUpdateService MyDb MyTableT where
             [ maybe mempty (\v -> myTableName row <-. val_ v) (myTableName patch)
             ]
 
+instance HasUpsertService MyDb MyTableT where
+    generateUpsert db patch =
+        insertOnConflict
+            (_myTableEntity db)
+            (insertExpressions [mkRow patch])
+            (conflictingFields primaryKey)
+            (onConflictUpdateSet (\fields _ -> generateAssigment db patch fields))
+
 instance HasDeleteService MyDb MyTableT
+```
+
+`generateUpsert` needs the on-conflict helpers from an explicit import:
+
+```haskell
+import Database.Beam.Backend.SQL.BeamExtensions (conflictingFields, insertOnConflict, onConflictUpdateSet)
 ```
 
 ### Important Details
@@ -110,6 +125,21 @@ CircusAct
     , circusActAudienceReaction = Just Nothing
     }
 ```
+
+#### Upsert Conflict Keys And The Insert-Row Trap
+
+The conflict key lives in the `HasUpsertService` instance, not in the call site —
+`conflictingFields primaryKey` for the primary key, or `conflictingFields <uniqueColumn>`
+for a unique key (the demo `StarsPaymentT` upserts on `telegram_payment_charge_id`, an
+idempotency key). The DO UPDATE branch usually just reuses `generateAssigment`, so upsert
+patches share the sparse semantics of `update` patches.
+
+Because the same `table Maybe` record also feeds the INSERT branch (via the `generateInsert`
+values builder), Postgres validates the would-be INSERT row — NOT NULL constraints, RLS
+`WITH CHECK` — before conflict resolution, even when the row exists and takes the DO UPDATE
+branch. A patch that leaves a NOT NULL column without a database default as `Nothing` fails
+with `23502` (or `42501` under RLS). Keep such columns `Just` in upsert patches; `Nothing`
+still means "keep the stored value" on the conflict branch.
 
 #### `HasDeleteService` Often Needs No Custom Code
 

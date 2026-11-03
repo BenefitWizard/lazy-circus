@@ -34,6 +34,7 @@ Main operations:
 | `findLocked` | `Maybe row` while acquiring a row lock |
 | `findAllLocked` | `[row]` while acquiring a row lock |
 | `update` / `updateMany` | updated rows (sparse patch — see below) |
+| `upsert` / `upsertMany` | inserted-or-updated rows (sparse patch — see below) |
 | `delete` | `()` |
 | `runQuery` | Beam query result |
 | `rawQuery` | decoded SQL rows |
@@ -52,6 +53,8 @@ findLocked         :: HasReadService  db table => LockSpec -> LId table -> DBScr
 findAllLocked      :: HasReadService  db table => LockSpec -> LId table -> DBScript db [table Identity]
 update             :: HasUpdateService db table => table Maybe -> LId table   -> DBScript db [table Identity]
 updateMany         :: HasUpdateService db table => table Maybe -> [LId table] -> DBScript db [table Identity]
+upsert             :: HasUpsertService db table => table Maybe -> DBScript db (Maybe (table Identity))
+upsertMany         :: HasUpsertService db table => [table Maybe] -> DBScript db [table Identity]
 delete             :: HasDeleteService db table => LId table -> DBScript db ()
 runQuery           :: (PgDB db -> Pg b) -> DBScript db b
 rawQuery           :: FromRow b => Query -> [Action] -> DBScript db [b]
@@ -89,6 +92,9 @@ Important DB semantics:
 - `create` and `createAsIs` use `listToMaybe`; if the interpreter returns `[]`, they yield `Nothing`
 - write operations are blocked in `ReadOnly` mode by `DbReadOnlyViolation`
 - `update` / `updateMany` patches are sparse `table Maybe` records: `Nothing` leaves the column untouched, `Just value` assigns it, and for a nullable column `Just Nothing` assigns SQL `NULL` (`Just (Just x)` assigns `x`). The returned list holds the actually updated rows; `[]` means nothing matched — a wrong key OR an RLS policy filtering the row out — and is NOT an error. See [extension.md](extension.md#partial-updates-use-table-maybe) for the instance side (`generateAssigment`).
+- `upsert` / `upsertMany` run `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. The conflict key is fixed per table by its `HasUpsertService` instance — the primary key or a unique key (e.g. an idempotency key). On the conflict branch the patch is sparse exactly like `update` (`Nothing` keeps the stored value); on the insert branch `Nothing` takes the column default, like `create`. RETURNING yields every affected row, inserted or updated. A write operation: blocked in `ReadOnly` mode.
+- POSTGRES TRAP (upsert): the would-be INSERT row is fully validated BEFORE conflict resolution — NOT NULL constraints and RLS `WITH CHECK` apply to it even when the row conflicts and takes the DO UPDATE branch. A patch that leaves a NOT NULL column without a database default as `Nothing` fails with `23502` (or `42501` under RLS) even though the row already exists. Carry `Just` values for every such column.
+- `upsertMany` executes one `INSERT ... ON CONFLICT` statement per row on the script's connection (a single statement cannot carry per-row patches); wrap in `withTransaction` when a batch must be atomic.
 - `withTransactionRLS` applies `SET LOCAL rls.<key> = ?` inside the transaction; the context is built directly, e.g. `RLSContext [("circus_id", "42")]`, and contexts combine with `<>` / `mempty`
 
 Narrowing a result list to its only expected element is done by the pure helper
