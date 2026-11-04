@@ -30,6 +30,16 @@ and resets per scenario). The member-named steps ('memberVotesFor'\/
 in their own capture, resolved through
 'LazyCircus.Testing.Updates.userIdForLogin', regardless of the current actor.
 
+Active thread: the user-input text steps ('userSends', 'userSendsAs') address
+the CURRENT forum topic — the state's 'actingThreadId', i.e. the main chat
+(the update carries no @message_thread_id@) until a moves-to-the-thread step
+('dialogMovesToThread' \/ 'dialogReturnsToMainChat') moves the dialog into a
+topic (the state's 'ssThreadId' field; like 'ssActingUser' it survives every
+'awaitObservation' and resets per scenario, and it composes with the acting
+user — switching actors does not move the chat). The reply-location checks
+('botRepliesInThread' \/ 'botRepliesInMainThread') assert where the LAST
+CONSUMED bot message went, via its 'obsThreadId'.
+
 Named messages: 'userSendsAs' sends a user message AND binds the step's name
 capture to the 'MessageId' the update factory assigned it (the state's
 'ssNamedMessages'); the strict deletion step 'botDeletesNamedMessage' consumes
@@ -98,10 +108,14 @@ module LazyCircus.Testing.Bdd.Tg
     , userSendsAs
     , memberTakesStage
     , defaultUserTakesStage
+    , dialogMovesToThread
+    , dialogReturnsToMainChat
     , userVotesFor
     , userVotesIn
     , memberVotesFor
     , memberVotesIn
+    , botRepliesInThread
+    , botRepliesInMainThread
     , tgTestBootstrap
     ) where
 
@@ -118,6 +132,7 @@ import LazyCircus.Testing.Bdd.Journal
     , ReactionDigest (..)
     , ScenarioState (..)
     , Sequenced (..)
+    , actingThreadId
     , actingUserId
     , awaitObservation
     , defaultAwaitBudgetUs
@@ -133,12 +148,13 @@ import LazyCircus.Testing.TgTest
     , TgTestConfig (..)
     , guardWith
     , sendPollAnswerByUser
-    , sendMessageByUser
+    , sendMessageByUserInThread
     , tgeDescription
     , tgTestWithMocks
     )
 import LazyCircus.Testing.Updates (defaultTestChatId, userIdForLogin)
 import Telegram.Bot.API (MessageId, Update, UserId)
+import Telegram.Bot.API.Types (MessageThreadId (..))
 import Test.Hspec (expectationFailure)
 
 -- | @the bot replies with "$text"@ — the bot's reply equals the step's quoted
@@ -185,6 +201,63 @@ botReplyContains =
             Nothing ->
                 guardWith "nothing has been consumed yet; a reply-consuming step must run first" False
                     >> pure (st, Nothing)
+
+-- | @the bot replies in the thread "$thread"@ — And-continuation asserting
+-- the LAST CONSUMED bot message was sent to the forum topic with the step's
+-- quoted numeric id (its 'obsThreadId' matches). The outgoing counterpart of
+-- 'dialogMovesToThread'.
+--
+-- PRE-CONTRACT: The thread id appears inside double quotes in the step text
+-- (the pattern's @"$thread"@ span) — the runner matched the step, so the
+-- capture is present; it must parse as an integer (the step aborts with an
+-- explanatory reason otherwise). A previous step has already consumed an
+-- 'ObsTgMessage' (checked — the step aborts with an explanatory reason
+-- otherwise).
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. On a mismatch (or when the last consumed entry is not a bot
+-- message) the DSL aborts with a guard failure.
+botRepliesInThread :: StepDef TelegramTestScript c (ScenarioState app) a
+botRepliesInThread =
+    thenDef "the bot replies in the thread \"$thread\"" $ \params st ->
+        case readMaybe (T.unpack (fromMaybe "" (lookupParam "$thread" params))) of
+            Nothing ->
+                guardWith (badThreadReason (fromMaybe "" (lookupParam "$thread" params))) False
+                    >> pure (st, Nothing)
+            Just n ->
+                assertLastReplyThread (Just (MessageThreadId n)) st
+
+-- | @the bot replies in the main chat@ — And-continuation asserting the LAST
+-- CONSUMED bot message was sent WITHOUT a @message_thread_id@ (its
+-- 'obsThreadId' is 'Nothing'). The reset counterpart of 'botRepliesInThread'.
+--
+-- PRE-CONTRACT: A previous step has already consumed an 'ObsTgMessage'
+-- (checked — the step aborts with an explanatory reason otherwise).
+-- POST-CONTRACT: NEVER waits and NEVER consumes: the journal, the consumed
+-- set and the dialog state pass through untouched whether the assertion holds
+-- or not. On a mismatch (or when the last consumed entry is not a bot
+-- message) the DSL aborts with a guard failure.
+botRepliesInMainThread :: StepDef TelegramTestScript c (ScenarioState app) a
+botRepliesInMainThread =
+    thenDef "the bot replies in the main chat" $ \_params st ->
+        assertLastReplyThread Nothing st
+
+-- | Shared body of the reply-location checks: re-inspect the LAST CONSUMED
+-- journal entry (NO wait, NO consumption) and demand its 'obsThreadId' equal
+-- the expected location.
+assertLastReplyThread :: Maybe MessageThreadId -> ScenarioState app -> TelegramTestScript (ScenarioState app, Maybe a)
+assertLastReplyThread expected st = do
+    lastEntry <- liftIO (peekLastConsumed st)
+    case lastEntry of
+        Just (Sequenced _ ObsTgMessage{obsThreadId = actual}) -> do
+            guardWith (wrongReplyThread expected actual) (actual == expected)
+            pure (st, Nothing)
+        Just (Sequenced _ _) ->
+            guardWith "the last consumed observation is not a bot message" False
+                >> pure (st, Nothing)
+        Nothing ->
+            guardWith "nothing has been consumed yet; a reply-consuming step must run first" False
+                >> pure (st, Nothing)
 
 -- | @the bot replies with a keyboard@ — the bot's reply carries reply
 -- markup (an inline or reply keyboard).
@@ -547,21 +620,25 @@ notUnshuffledReason digest = case pdShuffleOptions digest of
             <> "\" was sent with shuffle_options = True (options shuffled for each viewer)"
 
 -- | @the user sends "$msg"@ — the CURRENT actor sends a text message in the
--- default test chat. The canonical user-input step: \"the user\" always means
--- the state's 'actingUserId' ('defaultTestUserId' until a 'memberTakesStage'
--- step puts a cast member on stage).
+-- default test chat, to the CURRENT forum topic. The canonical user-input
+-- step: \"the user\" always means the state's 'actingUserId'
+-- ('defaultTestUserId' until a 'memberTakesStage' step puts a cast member on
+-- stage), and \"the chat\" means 'actingThreadId' (the main chat — the update
+-- carries no @message_thread_id@ — until a 'dialogMovesToThread' step moves
+-- the dialog into a topic).
 --
 -- PRE-CONTRACT: The message text appears inside double quotes in the step
 -- text (the pattern's @"$msg"@ span) — the runner matched the step, so the
 -- capture is present.
 -- POST-CONTRACT: One text-message update has been fed to the bot from
--- 'actingUserId' of the threaded state in 'defaultTestChatId'; the scenario
--- state passes through unchanged.
+-- 'actingUserId' of the threaded state in 'defaultTestChatId', addressed to
+-- 'actingThreadId' of that state (a forum-topic post when a thread is set);
+-- the scenario state passes through unchanged.
 userSends :: StepDef TelegramTestScript c (ScenarioState app) a
 userSends =
     whenDef "the user sends \"$msg\"" $ \params st -> do
         let msg = fromMaybe "" (lookupParam "$msg" params)
-        _ <- sendMessageByUser (actingUserId st) defaultTestChatId msg
+        _ <- sendMessageByUserInThread (actingUserId st) defaultTestChatId (actingThreadId st) msg
         pure (st, Nothing)
 
 -- | @the user sends "$msg" as "$name"@ — 'userSends', plus a name: the
@@ -578,10 +655,10 @@ userSends =
 -- name is normally written once, and a collision is almost always a copy-paste
 -- typo that silent shadowing would hide).
 -- POST-CONTRACT: One text-message update has been fed to the bot from
--- 'actingUserId' of the threaded state in 'defaultTestChatId', and
--- 'ssNamedMessages' of the returned state maps the name to the message's
--- assigned 'MessageId'. On a rebind NOTHING is sent and the state passes
--- through unchanged.
+-- 'actingUserId' of the threaded state in 'defaultTestChatId', addressed to
+-- 'actingThreadId' of that state, and 'ssNamedMessages' of the returned state
+-- maps the name to the message's assigned 'MessageId'. On a rebind NOTHING is
+-- sent and the state passes through unchanged.
 userSendsAs :: StepDef TelegramTestScript c (ScenarioState app) a
 userSendsAs =
     whenDef "the user sends \"$msg\" as \"$name\"" $ \params st -> do
@@ -592,7 +669,7 @@ userSendsAs =
                 guardWith (nameAlreadyBoundReason name boundId (ssNamedMessages st)) False
                     >> pure (st, Nothing)
             Nothing -> do
-                (_, mid) <- sendMessageByUser (actingUserId st) defaultTestChatId msg
+                (_, mid) <- sendMessageByUserInThread (actingUserId st) defaultTestChatId (actingThreadId st) msg
                 pure (st{ssNamedMessages = Map.insert name mid (ssNamedMessages st)}, Nothing)
 
 -- | @the member "$login" takes the stage@ — every subsequent user-named input
@@ -626,6 +703,47 @@ defaultUserTakesStage :: StepDef TelegramTestScript c (ScenarioState app) a
 defaultUserTakesStage =
     whenDef "the default user takes the stage" $ \_params st ->
         pure (st{ssActingUser = Nothing}, Nothing)
+
+-- | @the dialog moves to the thread "$thread"@ — every subsequent user-input
+-- step addresses the forum topic with the captured numeric id: the fed updates
+-- carry @message_thread_id@ (and render as forum-topic posts — a
+-- supergroup-with-@is_forum@ chat, @is_topic_message@ — see
+-- 'LazyCircus.Testing.Updates.mkTextUpdateByUserInThread'). The thread
+-- counterpart of 'memberTakesStage': one step changes WHERE \"the user\"
+-- writes, so every input verb stays single-form. Composes with the acting
+-- user — moving the thread does not change who acts, and switching actors does
+-- not move the thread.
+--
+-- PRE-CONTRACT: The thread id appears inside double quotes in the step text
+-- (the pattern's @"$thread"@ span) — the runner matched the step, so the
+-- capture is present; it must parse as an integer (the step aborts with an
+-- explanatory reason otherwise).
+-- POST-CONTRACT: 'ssThreadId' of the threaded state is set to the parsed
+-- 'MessageThreadId' — 'userSends'\/'userSendsAs' (and any spec-local step
+-- reading 'actingThreadId') address that topic until
+-- 'dialogReturnsToMainChat' resets it or the scenario ends (a fresh state
+-- starts with 'Nothing').
+dialogMovesToThread :: StepDef TelegramTestScript c (ScenarioState app) a
+dialogMovesToThread =
+    whenDef "the dialog moves to the thread \"$thread\"" $ \params st ->
+        case readMaybe (T.unpack (fromMaybe "" (lookupParam "$thread" params))) of
+            Nothing ->
+                guardWith (badThreadReason (fromMaybe "" (lookupParam "$thread" params))) False
+                    >> pure (st, Nothing)
+            Just n -> pure (st{ssThreadId = Just (MessageThreadId n)}, Nothing)
+
+-- | @the dialog returns to the main chat@ — resets the active thread to
+-- 'Nothing' (updates carry no @message_thread_id@ again), undoing a previous
+-- 'dialogMovesToThread'.
+--
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: 'ssThreadId' of the threaded state is 'Nothing' — user-input
+-- steps address the main chat again; the state passes through otherwise
+-- unchanged.
+dialogReturnsToMainChat :: StepDef TelegramTestScript c (ScenarioState app) a
+dialogReturnsToMainChat =
+    whenDef "the dialog returns to the main chat" $ \_params st ->
+        pure (st{ssThreadId = Nothing}, Nothing)
 
 -- | @the user votes for "$option" in the poll@ — the CURRENT actor votes for
 -- exactly the step's quoted capture in the last consumed poll.
@@ -990,6 +1108,23 @@ renderTimeout err =
 missingFragment :: Text -> Text -> Text
 missingFragment fragment txt =
     "the last reply " <> tshow txt <> " does not contain " <> tshow fragment
+
+-- | Failure message when a thread capture does not parse as an integer.
+badThreadReason :: Text -> Text
+badThreadReason raw =
+    "the thread capture " <> tshow raw <> " does not parse as an integer thread id"
+
+-- | Failure message when the last reply went to a different topic than
+-- demanded.
+wrongReplyThread :: Maybe MessageThreadId -> Maybe MessageThreadId -> Text
+wrongReplyThread expected actual =
+    "the last reply was sent to " <> renderThread actual
+        <> ", expected " <> renderThread expected
+
+-- | Human name of a reply location: @the main chat@ or @thread \<n\>@.
+renderThread :: Maybe MessageThreadId -> Text
+renderThread Nothing = "the main chat"
+renderThread (Just (MessageThreadId n)) = "thread " <> tshow n
 
 --------------------------------------------------------------------------------
 -- Predicates (core ObsTg* only, never ObsApp)

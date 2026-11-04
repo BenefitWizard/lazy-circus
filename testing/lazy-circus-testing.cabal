@@ -84,6 +84,7 @@ test-suite test
       Bdd.RunnerSpec
       Bdd.StepSpec
       Bdd.TgSpec
+      Bdd.ThreadSpec
       LazyCircus.Testing.SmokeSpec
       LazyCircus.Testing.TgTestSpec
       LazyCircus.Testing.UpdatesSpec

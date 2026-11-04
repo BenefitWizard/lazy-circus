@@ -36,6 +36,7 @@ module LazyCircus.Testing.Bdd.Journal
     , freshScenarioState
     , ssLastConsumed
     , actingUserId
+    , actingThreadId
     , awaitObservation
     , peekLastConsumed
     ) where
@@ -73,6 +74,10 @@ data Observation app
         , obsMsgId :: MessageId
         -- ^ incremental mock id assigned to the sent message (matches the id
         -- published to the outgoing mailbox for the same effect)
+        , obsThreadId :: Maybe MessageThreadId
+        -- ^ target forum topic of the send request
+        -- (@sendMessageMessageThreadId@; 'Nothing' when the request left
+        -- @message_thread_id@ unset — the message went to the main chat)
         , obsMarkup :: Maybe SomeReplyMarkup
         -- ^ reply markup attached to the message, when the send carried one.
         -- The markup type is opaque: equality sees only its presence (see the
@@ -178,10 +183,11 @@ data Observation app
 -- the orphan 'Eq' instance of "LazyCircus.Testing.Orphans").
 instance Eq app => Eq (Observation app) where
     a == b = case (a, b) of
-        (ObsTgMessage{obsChatId = chat1, obsText = text1, obsMsgId = msg1, obsMarkup = markup1}, ObsTgMessage{obsChatId = chat2, obsText = text2, obsMsgId = msg2, obsMarkup = markup2}) ->
+        (ObsTgMessage{obsChatId = chat1, obsText = text1, obsMsgId = msg1, obsThreadId = thread1, obsMarkup = markup1}, ObsTgMessage{obsChatId = chat2, obsText = text2, obsMsgId = msg2, obsThreadId = thread2, obsMarkup = markup2}) ->
             chat1 == chat2
                 && text1 == text2
                 && msg1 == msg2
+                && thread1 == thread2
                 && isJust markup1 == isJust markup2
         (ObsTgDocument{obsChatId = chat1, obsFileId = file1}, ObsTgDocument{obsChatId = chat2, obsFileId = file2}) ->
             chat1 == chat2 && file1 == file2
@@ -218,10 +224,11 @@ instance Eq app => Eq (Observation app) where
 -- the performer's 'OutgoingMessage').
 instance Show app => Show (Observation app) where
     show obs = case obs of
-        ObsTgMessage{obsChatId = chat, obsText = text, obsMsgId = msg, obsMarkup = markup} ->
+        ObsTgMessage{obsChatId = chat, obsText = text, obsMsgId = msg, obsThreadId = thread, obsMarkup = markup} ->
             "ObsTgMessage{obsChatId = " <> show chat
                 <> ", obsText = " <> show text
                 <> ", obsMsgId = " <> show msg
+                <> ", obsThreadId = " <> show thread
                 <> ", obsMarkup = " <> maybe "Nothing" (const "(markup)") markup
                 <> "}"
         ObsTgDocument{obsChatId = chat, obsFileId = file} ->
@@ -409,6 +416,12 @@ data ScenarioState app = ScenarioState
     -- takes-the-stage steps ('Nothing' = the 'defaultTestUserId'). A non-derived
     -- field: it changes when a step sets it, not from observations, and
     -- survives every 'awaitObservation' (record update).
+    , ssThreadId :: !(Maybe MessageThreadId)
+    -- ^ the forum topic the user-input steps (e.g. 'LazyCircus.Testing.Bdd.Tg.userSends')
+    -- address — set by the moves-to-the-thread steps ('Nothing' = the main
+    -- chat, the update carries no @message_thread_id@). Like 'ssActingUser', a
+    -- non-derived field: it changes when a step sets it, not from observations,
+    -- and survives every 'awaitObservation' (record update).
     , ssNamedMessages :: !(Map Text MessageId)
     -- ^ message names bound to the ids of the user messages that carried them:
     -- name → the 'MessageId' the update factory assigned the message sent by
@@ -431,11 +444,18 @@ ssLastConsumed = Set.lookupMax . ssConsumed
 actingUserId :: ScenarioState app -> UserId
 actingUserId = fromMaybe defaultTestUserId . ssActingUser
 
+-- | The forum topic the user-input steps currently address: 'ssThreadId' when
+-- a moves-to-the-thread step set it, 'Nothing' (the main chat) otherwise.
+-- Convenience view — read this instead of pattern-matching 'ssThreadId'.
+actingThreadId :: ScenarioState app -> Maybe MessageThreadId
+actingThreadId = ssThreadId
+
 -- | Allocate a fresh journal together with a fresh scenario state observing it.
 -- POST-CONTRACT: The state's 'ssConsumed' is empty (nothing consumed), its
 -- journal is empty, its dialog state is 'emptyDialogState', it acts as the
--- default test user ('ssActingUser' is 'Nothing'), and no message names are
--- bound ('ssNamedMessages' is empty).
+-- default test user ('ssActingUser' is 'Nothing'), addresses the main chat
+-- ('ssThreadId' is 'Nothing'), and no message names are bound
+-- ('ssNamedMessages' is empty).
 newScenarioState :: IO (ScenarioState app)
 newScenarioState = freshScenarioState <$> newObservationLog
 
@@ -444,8 +464,9 @@ newScenarioState = freshScenarioState <$> newObservationLog
 -- other threads.
 -- POST-CONTRACT: The state's 'ssConsumed' is empty (nothing consumed), its
 -- dialog state is 'emptyDialogState', it acts as the default test user
--- ('ssActingUser' is 'Nothing') and no message names are bound
--- ('ssNamedMessages' is empty); the journal is not touched.
+-- ('ssActingUser' is 'Nothing'), addresses the main chat ('ssThreadId' is
+-- 'Nothing') and no message names are bound ('ssNamedMessages' is empty); the
+-- journal is not touched.
 freshScenarioState :: ObservationLog app -> ScenarioState app
 freshScenarioState logRef =
     ScenarioState
@@ -453,6 +474,7 @@ freshScenarioState logRef =
         , ssLog = logRef
         , ssDialog = emptyDialogState
         , ssActingUser = Nothing
+        , ssThreadId = Nothing
         , ssNamedMessages = Map.empty
         }
 

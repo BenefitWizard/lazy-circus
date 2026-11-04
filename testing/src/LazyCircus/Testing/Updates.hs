@@ -39,9 +39,12 @@ module LazyCircus.Testing.Updates (
     -- * Stateful builders (incremental update_id)
     mkTextUpdateByUser,
     mkTextUpdateIn,
+    mkTextUpdateByUserInThread,
     mkReplyUpdateByUser,
+    mkReplyUpdateByUserInThread,
     mkFileUpdate,
     mkDocumentUpdate,
+    mkDocumentUpdateByUserInThread,
     mkCallbackQueryUpdate,
     mkPollAnswerUpdate,
     mkPreCheckoutQueryUpdateByUser,
@@ -55,12 +58,18 @@ module LazyCircus.Testing.Updates (
     ) where
 
 import Data.Aeson (Value (Object), fromJSON, object, (.=))
-import Data.Aeson.Types (Result (..))
+import Data.Aeson.Types (Pair, Result (..))
 import Data.Bits qualified as Bits
 import RIO
 import RIO.Text qualified as T
 import Telegram.Bot.API (ChatId (..), Update, UserId (..))
-import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..), PollId (..))
+import Telegram.Bot.API.Types
+    ( Document (..)
+    , FileId (..)
+    , MessageId (..)
+    , MessageThreadId (..)
+    , PollId (..)
+    )
 
 -- | Build a minimal 'Update' carrying a single text message in a private chat.
 -- Used to exercise command routing and dialog logic without a live Telegram connection.
@@ -200,13 +209,27 @@ nextUpdateId (UpdateFactory ref) = atomicModifyIORef' ref (\n -> (n + 1, n))
 -- if the constructed JSON fails to parse (a bug in this helper).
 mkTextUpdateByUser :: UpdateFactory -> UserId -> ChatId -> Text -> IO Update
 mkTextUpdateByUser factory userId chatId txt =
-    buildUpdate factory $ \uid ->
-        textMessagePayload uid userId chatId txt
+    mkTextUpdateByUserInThread factory userId chatId Nothing txt
 
 -- | Build a text-message 'Update' in a specific chat from the 'defaultTestUserId'.
 mkTextUpdateIn :: UpdateFactory -> ChatId -> Text -> IO Update
 mkTextUpdateIn factory chatId txt =
     mkTextUpdateByUser factory defaultTestUserId chatId txt
+
+-- | Build a text-message 'Update' from a specific user in a specific chat,
+-- optionally addressed to a forum topic: a 'Just' thread renders the message
+-- the way Telegram reports a forum post — @chat.type = "supergroup"@ with
+-- @is_forum = true@, plus @message_thread_id@ and @is_topic_message = true@.
+-- 'Nothing' produces the plain private-chat payload of 'mkTextUpdateByUser'.
+-- PRE-CONTRACT: None.
+-- POST-CONTRACT: Returns a valid 'Update' with a fresh @update_id@ whose
+-- @message.message_thread_id@ equals the supplied thread when 'Just' (and whose
+-- chat is a forum supergroup then), or 'error' if the constructed JSON fails
+-- to parse (a bug in this helper).
+mkTextUpdateByUserInThread :: UpdateFactory -> UserId -> ChatId -> Maybe MessageThreadId -> Text -> IO Update
+mkTextUpdateByUserInThread factory userId chatId thread txt =
+    buildUpdate factory $ \uid ->
+        textMessagePayload uid userId chatId thread txt
 
 -- | Build a text-message 'Update' from a specific user in a specific chat,
 -- replying to the given 'MessageId': the produced @message.reply_to_message@
@@ -222,9 +245,23 @@ mkTextUpdateIn factory chatId txt =
 -- whose @message.text@ equals the supplied text, or 'error' if the constructed
 -- JSON fails to parse (a bug in this helper).
 mkReplyUpdateByUser :: UpdateFactory -> UserId -> ChatId -> MessageId -> Text -> IO Update
-mkReplyUpdateByUser factory userId chatId (MessageId msgIdNum) txt =
+mkReplyUpdateByUser factory userId chatId targetMsgId txt =
+    mkReplyUpdateByUserInThread factory userId chatId Nothing targetMsgId txt
+
+-- | Thread-aware variant of 'mkReplyUpdateByUser': when the thread is 'Just',
+-- the message (NOT the embedded @reply_to_message@ stub) is rendered as a
+-- forum-topic post — @message_thread_id@, @is_topic_message = true@ and the
+-- forum-super-group chat — exactly as in 'mkTextUpdateByUserInThread'. The
+-- stub stays identity-only either way.
+-- PRE-CONTRACT: @targetMsgId@ must identify a message in @chatId@.
+-- POST-CONTRACT: Returns a valid 'Update' with a fresh @update_id@ whose
+-- @message.reply_to_message.message_id@ equals the supplied 'MessageId' and
+-- whose @message.message_thread_id@ equals the supplied thread when 'Just';
+-- 'error' if the constructed JSON fails to parse (a bug in this helper).
+mkReplyUpdateByUserInThread :: UpdateFactory -> UserId -> ChatId -> Maybe MessageThreadId -> MessageId -> Text -> IO Update
+mkReplyUpdateByUserInThread factory userId chatId thread (MessageId msgIdNum) txt =
     buildUpdate factory $ \uid ->
-        replyMessagePayload uid userId chatId msgIdNum txt
+        replyMessagePayload uid userId chatId thread msgIdNum txt
 
 -- | Build a document-message 'Update' (a file upload) from a specific user/chat,
 -- carrying ONLY the file id (no client-declared metadata). The metadata-free
@@ -265,8 +302,19 @@ mkDocument fid =
 -- metadata fields equal the supplied 'Document''s, or 'error' on parse failure.
 mkDocumentUpdate :: UpdateFactory -> UserId -> ChatId -> Document -> IO Update
 mkDocumentUpdate factory userId chatId doc =
+    mkDocumentUpdateByUserInThread factory userId chatId Nothing doc
+
+-- | Thread-aware variant of 'mkDocumentUpdate' — the message is rendered as a
+-- forum-topic post when the thread is 'Just', exactly as in
+-- 'mkTextUpdateByUserInThread' (document metadata is preserved either way).
+-- PRE-CONTRACT: 'documentThumbnail' is ignored — test updates never carry one.
+-- POST-CONTRACT: Returns a valid 'Update' whose @message.document@ equals the
+-- supplied 'Document' and whose @message.message_thread_id@ equals the supplied
+-- thread when 'Just'; 'error' on parse failure.
+mkDocumentUpdateByUserInThread :: UpdateFactory -> UserId -> ChatId -> Maybe MessageThreadId -> Document -> IO Update
+mkDocumentUpdateByUserInThread factory userId chatId thread doc =
     buildUpdate factory $ \uid ->
-        fileMessagePayload uid userId chatId doc
+        fileMessagePayload uid userId chatId thread doc
 
 -- | Build a @callback_query@ 'Update' from a specific user/chat, referencing the
 -- given 'MessageId' (the message the inline keyboard is attached to) and
@@ -332,56 +380,64 @@ buildUpdate factory mkPayload = do
         Success u -> pure u
         Error err -> error $ "buildUpdate: failed to parse Update: " <> err
 
--- | JSON for a private-chat text message wrapped in an 'Update'.
-textMessagePayload :: Int -> UserId -> ChatId -> Text -> Value
-textMessagePayload uid (UserId userNum) (ChatId chatNum) txt =
+-- | JSON for a private-chat text message wrapped in an 'Update'. When a thread
+-- is supplied the message is rendered as a forum-topic post
+-- (see 'chatField' and 'threadFields').
+textMessagePayload :: Int -> UserId -> ChatId -> Maybe MessageThreadId -> Text -> Value
+textMessagePayload uid (UserId userNum) (ChatId chatNum) thread txt =
     Object $ mconcat
         [ "update_id" .= uid
-        , "message" .= object
+        , "message" .= (object $
             [ "message_id" .= uid
             , "date" .= (0 :: Int)
             , "from" .= userObject userNum
-            , "chat" .= chatObject chatNum
-            , "text" .= txt
             ]
+                <> chatField chatNum thread
+                <> threadFields thread
+                <> ["text" .= txt])
         ]
 
 -- | JSON for a private-chat text message that replies to a prior message,
 -- wrapped in an 'Update'. The @reply_to_message@ stub carries identity only
 -- (message id, date, chat) — no text or media — which is all a handler needs
 -- to resolve the reply target.
-replyMessagePayload :: Int -> UserId -> ChatId -> Integer -> Text -> Value
-replyMessagePayload uid (UserId userNum) (ChatId chatNum) msgIdNum txt =
+replyMessagePayload :: Int -> UserId -> ChatId -> Maybe MessageThreadId -> Integer -> Text -> Value
+replyMessagePayload uid (UserId userNum) (ChatId chatNum) thread msgIdNum txt =
     Object $ mconcat
         [ "update_id" .= uid
-        , "message" .= object
+        , "message" .= (object $
             [ "message_id" .= uid
             , "date" .= (0 :: Int)
             , "from" .= userObject userNum
-            , "chat" .= chatObject chatNum
-            , "reply_to_message" .= object
-                [ "message_id" .= msgIdNum
-                , "date" .= (0 :: Int)
-                , "chat" .= chatObject chatNum
-                ]
-            , "text" .= txt
             ]
+                <> chatField chatNum thread
+                <> [ "reply_to_message" .= object
+                        [ "message_id" .= msgIdNum
+                        , "date" .= (0 :: Int)
+                        , "chat" .= chatObject chatNum
+                        ]
+                   ]
+                <> threadFields thread
+                <> ["text" .= txt])
         ]
 
 -- | JSON for a private-chat document message wrapped in an 'Update'. The
 -- document object preserves the client-declared metadata; absent fields are
--- omitted (Telegram omits optional fields rather than sending nulls).
-fileMessagePayload :: Int -> UserId -> ChatId -> Document -> Value
-fileMessagePayload uid (UserId userNum) (ChatId chatNum) doc =
+-- omitted (Telegram omits optional fields rather than sending nulls). When a
+-- thread is supplied the message is rendered as a forum-topic post
+-- (see 'chatField' and 'threadFields').
+fileMessagePayload :: Int -> UserId -> ChatId -> Maybe MessageThreadId -> Document -> Value
+fileMessagePayload uid (UserId userNum) (ChatId chatNum) thread doc =
     Object $ mconcat
         [ "update_id" .= uid
-        , "message" .= object
+        , "message" .= (object $
             [ "message_id" .= uid
             , "date" .= (0 :: Int)
             , "from" .= userObject userNum
-            , "chat" .= chatObject chatNum
-            , "document" .= documentObject doc
             ]
+                <> chatField chatNum thread
+                <> threadFields thread
+                <> ["document" .= documentObject doc])
         ]
 
 -- | JSON object for a 'Document', preserving the client-declared metadata.
@@ -493,4 +549,31 @@ chatObject chatNum =
     object
         [ "id" .= chatNum
         , "type" .= ("private" :: Text)
+        ]
+
+-- | The @chat@ field of a message payload: a plain private chat when no thread
+-- is supplied, a forum supergroup when one is (Telegram only reports
+-- @message_thread_id@ on forum supergroups, so the thread forces the
+-- realistic chat shape).
+chatField :: Integer -> Maybe MessageThreadId -> [Pair]
+chatField chatNum Nothing = ["chat" .= chatObject chatNum]
+chatField chatNum (Just _) = ["chat" .= forumChatObject chatNum]
+
+-- | The @message_thread_id@ / @is_topic_message@ fields of a forum-topic
+-- message; empty for a main-chat message (Telegram omits unset optional
+-- fields).
+threadFields :: Maybe MessageThreadId -> [Pair]
+threadFields Nothing = []
+threadFields (Just (MessageThreadId n)) =
+    [ "message_thread_id" .= n
+    , "is_topic_message" .= True
+    ]
+
+-- | JSON object for a forum supergroup chat with the given numeric id.
+forumChatObject :: Integer -> Value
+forumChatObject chatNum =
+    object
+        [ "id" .= chatNum
+        , "type" .= ("supergroup" :: Text)
+        , "is_forum" .= True
         ]

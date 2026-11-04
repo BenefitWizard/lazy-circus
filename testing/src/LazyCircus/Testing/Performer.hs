@@ -139,7 +139,7 @@ import RIO.Process (HasProcessContext (..))
 import RIO.Time (NominalDiffTime, getCurrentTime)
 import RIO.Vector qualified as V
 import Servant.Client (mkClientEnv, runClientM)
-import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, ReactionType, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseOk, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollCloseDate, sendPollIsAnonymous, sendPollMessageThreadId, sendPollOptions, sendPollQuestion, sendPollAllowsMultipleAnswers, sendPollAllowsRevoting, sendPollShuffleOptions, setMessageReactionRequestChatId, setMessageReactionRequestIsBig, setMessageReactionRequestMessageId, setMessageReactionRequestReaction)
+import Telegram.Bot.API (AnswerPreCheckoutQueryRequest, ChatId, DocumentFile (..), Message, MessageId, ReactionType, Response, SendInvoiceRequest, SendMessageRequest, SomeChatId (..), SomeReplyMarkup, answerPreCheckoutQueryOk, answerPreCheckoutQueryPreCheckoutQueryId, editMessageTextChatId, editMessageTextMessageId, editMessageTextText, messageMessageId, messagePoll, pollId, responseOk, responseResult, sendDocumentCaption, sendDocumentChatId, sendDocumentDocument, sendInvoiceChatId, sendInvoiceTitle, sendMessageChatId, sendMessageMessageThreadId, sendMessageReplyMarkup, sendMessageText, sendPollChatId, sendPollCloseDate, sendPollIsAnonymous, sendPollMessageThreadId, sendPollOptions, sendPollQuestion, sendPollAllowsMultipleAnswers, sendPollAllowsRevoting, sendPollShuffleOptions, setMessageReactionRequestChatId, setMessageReactionRequestIsBig, setMessageReactionRequestMessageId, setMessageReactionRequestReaction)
 import Telegram.Bot.API.Types (File (..), FileId (..), InputFile (..), MessageId (..), PollId (..), inputPollOptionText)
 
 -- | Response factory used by the Telegram mock to derive a reply from one outgoing request.
@@ -480,7 +480,7 @@ instance TelegramScriptPerformer (TestPerformer (AppWithBotEnv (EnvWithMocks ser
                                 (sendMessageReplyMarkup request)
                         )
                         -- journal observation, recorded in the SAME transaction
-                        (\mid -> ObsTgMessage{obsChatId = chatId, obsText = sendMessageText request, obsMsgId = mid, obsMarkup = sendMessageReplyMarkup request})
+                        (\mid -> ObsTgMessage{obsChatId = chatId, obsText = sendMessageText request, obsMsgId = mid, obsThreadId = sendMessageMessageThreadId request, obsMarkup = sendMessageReplyMarkup request})
                 pure (stampMessageId assignedId resp)
             Real -> timedAndLog "Telegram" "SendMessage" $ TG.sendMessage request
     setBotCommands' cmd = do

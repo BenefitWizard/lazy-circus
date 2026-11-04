@@ -50,6 +50,7 @@ import LazyCircus.Testing.Bdd.Journal
     , PollDigest (..)
     , ScenarioState (..)
     , Sequenced (..)
+    , actingThreadId
     , actingUserId
     , appendObservation
     , awaitObservation
@@ -166,6 +167,7 @@ tgMsg txt mid =
         { obsChatId = Just (ChatId 1)
         , obsText = txt
         , obsMsgId = mid
+        , obsThreadId = Nothing
         , obsMarkup = Nothing
         }
 
@@ -250,8 +252,8 @@ spec = aroundAll withJournalApp $ do
 
             observed <- readObservations journal
             observed
-                `shouldBe` [ ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "first", obsMsgId = MessageId 0, obsMarkup = Nothing}
-                           , ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "second", obsMsgId = MessageId 1, obsMarkup = Nothing}
+                `shouldBe` [ ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "first", obsMsgId = MessageId 0, obsThreadId = Nothing, obsMarkup = Nothing}
+                           , ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "second", obsMsgId = MessageId 1, obsThreadId = Nothing, obsMarkup = Nothing}
                            ]
 
             -- journal message ids are consistent with the mailbox contents
@@ -281,7 +283,7 @@ spec = aroundAll withJournalApp $ do
 
             observed <- readObservations journal
             observed
-                `shouldBe` [ ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "draft", obsMsgId = MessageId 0, obsMarkup = Nothing}
+                `shouldBe` [ ObsTgMessage{obsChatId = Just (ChatId 1), obsText = "draft", obsMsgId = MessageId 0, obsThreadId = Nothing, obsMarkup = Nothing}
                            , ObsTgEdit{obsTargetMsgId = Just (MessageId 0), obsNewText = "final text"}
                            , ObsTgReaction{obsTargetMsgId = Just (MessageId 0), obsReaction = Nothing, obsIsBig = Nothing}
                            , ObsTgDelete{obsTargetMsgId = Just (MessageId 0)}
@@ -550,6 +552,26 @@ spec = aroundAll withJournalApp $ do
                     ssConsumed st2 `shouldBe` Set.singleton 0
                     ssNamedMessages st2 `shouldBe` Map.fromList [("message 1", MessageId 1)]
 
+    describe "actingThreadId (the forum topic the input steps address)" $ do
+        it "defaults a fresh scenario state to the main chat (no thread)" $ \_app -> do
+            st0 <- newScenarioState :: IO (ScenarioState ())
+            ssThreadId st0 `shouldBe` Nothing
+            actingThreadId st0 `shouldBe` Nothing
+
+        it "returns the topic once ssThreadId is set, and the field SURVIVES an await" $ \_app -> do
+            st0 <- newScenarioState :: IO (ScenarioState ())
+            let st1 = st0{ssThreadId = Just (MessageThreadId 42)}
+            actingThreadId st1 `shouldBe` Just (MessageThreadId 42)
+            -- the active thread is non-derived state: a wait consumes an
+            -- observation (record-update on the state) and must carry it over
+            atomically $ appendObservation (ssLog st1) (tgMsg "hi" (MessageId 0))
+            result <- awaitObservation defaultAwaitBudgetUs st1 (isTextReply "hi") "the reply"
+            case result of
+                Left err -> expectationFailure ("expected a match, timed out: " <> show err)
+                Right (_, st2) -> do
+                    ssConsumed st2 `shouldBe` Set.singleton 0
+                    actingThreadId st2 `shouldBe` Just (MessageThreadId 42)
+
     describe "Observation Eq and Show for the Stars constructors" $ do
         it "Eq matches equal ObsTgInvoice observations" $ \_app -> do
             starsInvoice
@@ -606,6 +628,25 @@ spec = aroundAll withJournalApp $ do
                     <> ", obsAllowsRevoting = Just False"
                     <> ", obsShuffleOptions = Just True"
                     <> ", obsCloseDate = Just 1796040000}"
+
+        it "Eq distinguishes ObsTgMessage by thread id" $ \_app -> do
+            let topicPost :: Observation ()
+                topicPost = (tgMsg "topic post" (MessageId 0)){obsThreadId = Just (MessageThreadId 7)}
+            tgMsg "topic post" (MessageId 0) `shouldNotBe` topicPost
+            topicPost
+                `shouldBe` ((tgMsg "topic post" (MessageId 0)){obsThreadId = Just (MessageThreadId 7)} :: Observation ())
+
+        it "Show renders ObsTgMessage field-wise including the thread id" $ \_app -> do
+            show (tgMsg "hello" (MessageId 2))
+                `shouldBe` "ObsTgMessage{obsChatId = Just (ChatId 1), obsText = \"hello\""
+                    <> ", obsMsgId = MessageId 2"
+                    <> ", obsThreadId = Nothing"
+                    <> ", obsMarkup = Nothing}"
+            show ((tgMsg "topic post" (MessageId 3)){obsThreadId = Just (MessageThreadId 7)} :: Observation ())
+                `shouldBe` "ObsTgMessage{obsChatId = Just (ChatId 1), obsText = \"topic post\""
+                    <> ", obsMsgId = MessageId 3"
+                    <> ", obsThreadId = Just (MessageThreadId 7)"
+                    <> ", obsMarkup = Nothing}"
 
         it "Eq matches equal ObsTgPreCheckoutAnswer observations" $ \_app -> do
             preCheckoutAnswer `shouldBe` ObsTgPreCheckoutAnswer{obsQueryId = "pcq-1", obsOk = True}

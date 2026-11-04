@@ -36,6 +36,8 @@ import LazyCircus.Testing.Bdd.Tg
     ( botDeletesMessage
     , botDeletesNamedMessage
     , botReplyContains
+    , botRepliesInMainThread
+    , botRepliesInThread
     , botRepliesWithKeyboard
     , botRepliesWithMessage
     , botReactsTo
@@ -57,6 +59,7 @@ import Telegram.Bot.API.Types
     ( InlineKeyboardButton (..)
     , InlineKeyboardMarkup (..)
     , MessageId (..)
+    , MessageThreadId (..)
     , ReactionType (..)
     )
 
@@ -108,6 +111,76 @@ spec = describe "Telegram Then-constructors (journal mocks)" $ do
                         reason `shouldSatisfy` ("does not contain" `T.isInfixOf`)
                     Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
                     Right _ -> expectationFailure "expected the fragment check to fail"
+
+    it "botRepliesInThread checks the last consumed message's thread without consuming (And-continuation)" $ do
+        st0 <- newScenarioState :: IO (ScenarioState ())
+        let journal = ssLog st0
+            topicPost = (tgMsg "into the topic" (MessageId 1)){obsThreadId = Just (MessageThreadId 42)}
+        -- before anything is consumed the continuation aborts instead of waiting
+        tooEarly <- runDialogScript (thenActionWithParams [("$thread", "42")] botRepliesInThread st0)
+        case tooEarly of
+            Left (TgTestGuardFailed reason) ->
+                reason `shouldSatisfy` ("nothing has been consumed" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+            Right _ -> expectationFailure "expected the continuation to refuse an empty dialog"
+        -- a preceding reply step consumes the message...
+        atomically (appendObservation journal topicPost)
+        st1 <- expectStepSuccess (runDialogScript (thenActionWithParams [("$text", "into the topic")] botRepliesWithMessage st0))
+        -- ...and the And-continuation re-inspects its location: NO wait, NO consumption
+        result <- runDialogScript (thenActionWithParams [("$thread", "42")] botRepliesInThread st1)
+        case result of
+            Left err -> expectationFailure ("continuation aborted: " <> show err)
+            Right (st2, _) -> do
+                ssConsumed st2 `shouldBe` Set.singleton 0
+                -- a failed location check leaves everything untouched as well
+                mismatch <- runDialogScript (thenActionWithParams [("$thread", "43")] botRepliesInThread st2)
+                case mismatch of
+                    Left (TgTestGuardFailed reason) ->
+                        reason `shouldSatisfy` ("the last reply was sent to thread 42, expected thread 43" `T.isInfixOf`)
+                    Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+                    Right _ -> expectationFailure "expected the location check to fail"
+
+    it "botRepliesInMainThread demands obsThreadId = Nothing on the last consumed message" $ do
+        st0 <- newScenarioState :: IO (ScenarioState ())
+        let journal = ssLog st0
+        -- journal order matters: the location checks inspect the HIGHEST
+        -- consumed entry, so the main-chat reply must sit above the others
+        atomically $ do
+            appendObservation journal (tgMsg "topic post" (MessageId 0)){obsThreadId = Just (MessageThreadId 42)}
+            appendObservation journal (tgDelete (MessageId 0))
+            appendObservation journal (tgMsg "main-chat reply" (MessageId 1))
+        -- consume the topic post...
+        st1 <- expectStepSuccess (runDialogScript (thenActionWithParams [("$text", "topic post")] botRepliesWithMessage st0))
+        -- ...so the main-chat check sees it and refuses
+        mismatch <- runDialogScript (thenAction botRepliesInMainThread st1)
+        case mismatch of
+            Left (TgTestGuardFailed reason) ->
+                reason `shouldSatisfy` ("the last reply was sent to thread 42, expected the main chat" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+            Right _ -> expectationFailure "expected the location check to fail"
+        -- a non-message last entry refuses too
+        st2 <- expectStepSuccess (runDialogScript (thenAction botDeletesMessage st1))
+        notAMessage <- runDialogScript (thenAction botRepliesInMainThread st2)
+        case notAMessage of
+            Left (TgTestGuardFailed reason) ->
+                reason `shouldSatisfy` ("not a bot message" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+            Right _ -> expectationFailure "expected the location check to fail"
+        -- consuming the topmost entry — the main-chat reply — passes
+        st3 <- expectStepSuccess (runDialogScript (thenActionWithParams [("$text", "main-chat reply")] botRepliesWithMessage st2))
+        pass <- runDialogScript (thenAction botRepliesInMainThread st3)
+        case pass of
+            Left err -> expectationFailure ("step aborted: " <> show err)
+            Right (st4, _) -> ssConsumed st4 `shouldBe` Set.fromList [0, 1, 2]
+
+    it "botRepliesInThread refuses a non-integer thread capture before touching the dialog" $ do
+        st0 <- newScenarioState :: IO (ScenarioState ())
+        result <- runDialogScript (thenActionWithParams [("$thread", "not-a-number")] botRepliesInThread st0)
+        case result of
+            Left (TgTestGuardFailed reason) ->
+                reason `shouldSatisfy` ("does not parse as an integer thread id" `T.isInfixOf`)
+            Left other -> expectationFailure ("expected a guard failure, got: " <> show other)
+            Right _ -> expectationFailure "expected the capture check to fail"
 
     it "botRepliesWithKeyboard sets dsLastKeyboard from the consumed message" $ do
         st0 <- newScenarioState :: IO (ScenarioState ())
@@ -377,6 +450,7 @@ tgMsg txt mid =
         { obsChatId = Just (ChatId 1)
         , obsText = txt
         , obsMsgId = mid
+        , obsThreadId = Nothing
         , obsMarkup = Nothing
         }
 
@@ -402,6 +476,7 @@ tgKeyboardMsg txt mid =
         { obsChatId = Just (ChatId 1)
         , obsText = txt
         , obsMsgId = mid
+        , obsThreadId = Nothing
         , obsMarkup = Just confirmKeyboard
         }
 

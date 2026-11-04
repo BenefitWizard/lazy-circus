@@ -66,11 +66,14 @@ module LazyCircus.Testing.TgTest (
     sendMessage,
     sendMessageByUser,
     sendMessageIn,
+    sendMessageByUserInThread,
     sendReply,
     sendReplyByUser,
+    sendReplyByUserInThread,
     sendFile,
     sendFileByUser,
     sendDocumentByUser,
+    sendDocumentByUserInThread,
     sendDocumentAs,
     sendKeypress,
     sendKeypressByUser,
@@ -107,7 +110,7 @@ import RIO.Text qualified as Text
 
 import Telegram.Bot.API (ChatId (..), Update, UserId (..), messageMessageId, updateMessage)
 import Telegram.Bot.API.GettingUpdates (UpdateId, updateUpdateId)
-import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..), PollId)
+import Telegram.Bot.API.Types (Document (..), FileId (..), MessageId (..), MessageThreadId (..), PollId)
 import Telegram.Bot.Extra.Headless (feedUpdates, runHeadlessBot)
 
 import LazyCircus.Testing.Bdd.Journal (reactionEmojiTexts)
@@ -130,13 +133,13 @@ import LazyCircus.Testing.Updates
     , defaultTestUserId
     , mkCallbackQueryUpdate
     , mkDocument
-    , mkDocumentUpdate
+    , mkDocumentUpdateByUserInThread
     , mkFileUpdate
     , mkPollAnswerUpdate
     , mkPreCheckoutQueryUpdateByUser
-    , mkReplyUpdateByUser
+    , mkReplyUpdateByUserInThread
     , mkSuccessfulPaymentUpdateByUser
-    , mkTextUpdateByUser
+    , mkTextUpdateByUserInThread
     , newUpdateFactory
     )
 
@@ -457,9 +460,19 @@ sendMessage = sendMessageByUser defaultTestUserId defaultTestChatId
 -- update's 'UpdateId' and the 'MessageId' of the sent user message (suitable for
 -- passing to 'waitForReaction').
 sendMessageByUser :: UserId -> ChatId -> Text -> TelegramTestScript (UpdateId, MessageId)
-sendMessageByUser userId chatId txt = do
+sendMessageByUser userId chatId txt =
+    sendMessageByUserInThread userId chatId Nothing txt
+
+-- | Send a text message from a specific user in a specific chat, optionally
+-- addressed to a forum topic: a 'Just' thread renders the update as a
+-- forum-topic post (@message_thread_id@, @is_topic_message@, forum-super-group
+-- chat — see 'LazyCircus.Testing.Updates.mkTextUpdateByUserInThread'); 'Nothing'
+-- is 'sendMessageByUser'. Returns the update's 'UpdateId' and the 'MessageId'
+-- of the sent user message (suitable for passing to 'waitForReaction').
+sendMessageByUserInThread :: UserId -> ChatId -> Maybe MessageThreadId -> Text -> TelegramTestScript (UpdateId, MessageId)
+sendMessageByUserInThread userId chatId thread txt = do
     rt <- ttsAsk
-    upd <- liftIO $ mkTextUpdateByUser (ttrFactory rt) userId chatId txt
+    upd <- liftIO $ mkTextUpdateByUserInThread (ttrFactory rt) userId chatId thread txt
     feedAndReturn rt upd
 
 -- | Send a text message in a specific chat from the default user; returns the
@@ -482,9 +495,16 @@ sendReply = sendReplyByUser defaultTestUserId defaultTestChatId
 -- 'waitForReaction'). The @reply_to_message@ stub the update carries holds the
 -- target's identity only; see 'LazyCircus.Testing.Updates.mkReplyUpdateByUser'.
 sendReplyByUser :: UserId -> ChatId -> MessageId -> Text -> TelegramTestScript (UpdateId, MessageId)
-sendReplyByUser userId chatId targetMsgId txt = do
+sendReplyByUser userId chatId targetMsgId txt =
+    sendReplyByUserInThread userId chatId Nothing targetMsgId txt
+
+-- | Thread-aware variant of 'sendReplyByUser': the reply message itself (NOT
+-- the identity-only @reply_to_message@ stub) is rendered as a forum-topic post
+-- when the thread is 'Just' — see 'LazyCircus.Testing.Updates.mkReplyUpdateByUserInThread'.
+sendReplyByUserInThread :: UserId -> ChatId -> Maybe MessageThreadId -> MessageId -> Text -> TelegramTestScript (UpdateId, MessageId)
+sendReplyByUserInThread userId chatId thread targetMsgId txt = do
     rt <- ttsAsk
-    upd <- liftIO $ mkReplyUpdateByUser (ttrFactory rt) userId chatId targetMsgId txt
+    upd <- liftIO $ mkReplyUpdateByUserInThread (ttrFactory rt) userId chatId thread targetMsgId txt
     feedAndReturn rt upd
 
 -- | Send a file upload from the default user in the default chat; returns the
@@ -512,9 +532,18 @@ sendFileByUser userId chatId fileId = do
 -- POST-CONTRACT: Returns the update's 'UpdateId' and the 'MessageId' of the sent
 -- user message.
 sendDocumentByUser :: UserId -> ChatId -> Document -> TelegramTestScript (UpdateId, MessageId)
-sendDocumentByUser userId chatId doc = do
+sendDocumentByUser userId chatId doc =
+    sendDocumentByUserInThread userId chatId Nothing doc
+
+-- | Thread-aware variant of 'sendDocumentByUser': the document message is
+-- rendered as a forum-topic post when the thread is 'Just' — see
+-- 'LazyCircus.Testing.Updates.mkDocumentUpdateByUserInThread'.
+-- POST-CONTRACT: Returns the update's 'UpdateId' and the 'MessageId' of the sent
+-- user message.
+sendDocumentByUserInThread :: UserId -> ChatId -> Maybe MessageThreadId -> Document -> TelegramTestScript (UpdateId, MessageId)
+sendDocumentByUserInThread userId chatId thread doc = do
     rt <- ttsAsk
-    upd <- liftIO $ mkDocumentUpdate (ttrFactory rt) userId chatId doc
+    upd <- liftIO $ mkDocumentUpdateByUserInThread (ttrFactory rt) userId chatId thread doc
     feedAndReturn rt upd
 
 -- | Send a document upload from the default user in the default chat, declared

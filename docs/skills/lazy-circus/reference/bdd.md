@@ -21,6 +21,8 @@ library dependency of this subpackage only; the core stays hspec-free.
 - Journal: Observations And Cursor Waits
 - The Runner (`gherkinSpec`)
 - Given Combinators
+- The Acting User
+- The Active Thread
 - Worked Example (Echo Bot)
 - Review Checklist
 
@@ -31,8 +33,8 @@ library dependency of this subpackage only; the core stays hspec-free.
 | `LazyCircus.Testing.Bdd.Gherkin` | pure `parseFeature :: Text -> Either GherkinParseError GherkinFeature`; AST carries line numbers; Outline rows expand at parse time |
 | `LazyCircus.Testing.Bdd.Pattern` | the `Pattern` ADT (`Template` / `Literal`, `IsString`), `matchStep :: Pattern -> Text -> Maybe [(ParamName, ParamValue)]`; quoted spans `"..."` and `«...»` capture strictly quoted values; `StepParams` (captures + the step's argument table), `lookupParam`, `patternSource`, `duplicateParamNames`, `matchAll` (every matching name, input order) |
 | `LazyCircus.Testing.Bdd.Step` | `StepDef m c s a` (actions receive the matched captures plus the step's table, as one `StepParams`), `StepRegistry` with deterministic `matchingDefs` selection (`Literal` first, then `Template` in registration order), `runScenarioSteps`, structural `StepError` values |
-| `LazyCircus.Testing.Bdd.Journal` | `Observation app`, append-only `ObservationLog`, `awaitObservation`, `peekLastConsumed`, `ScenarioState` with the `dsLastPoll` digest and the acting user (`ssActingUser` / `actingUserId`) |
-| `LazyCircus.Testing.Bdd.Tg` | ready-made Telegram `When`/`Then` dictionary over the journal (expected values read from captures and step tables via `lookupParam` / `stepParamsTable`; includes the poll and vote steps — the default-user pair and the per-member pair) and the canonical `tgTestBootstrap` |
+| `LazyCircus.Testing.Bdd.Journal` | `Observation app`, append-only `ObservationLog`, `awaitObservation`, `peekLastConsumed`, `ScenarioState` with the `dsLastPoll` digest, the acting user (`ssActingUser` / `actingUserId`) and the active thread (`ssThreadId` / `actingThreadId`) |
+| `LazyCircus.Testing.Bdd.Tg` | ready-made Telegram `When`/`Then` dictionary over the journal (expected values read from captures and step tables via `lookupParam` / `stepParamsTable`; includes the poll and vote steps — the default-user pair and the per-member pair; the thread switches `dialogMovesToThread` / `dialogReturnsToMainChat`; and the reply-location checks `botRepliesInThread` / `botRepliesInMainThread`) and the canonical `tgTestBootstrap` |
 | `LazyCircus.Testing.Bdd.Given` | `AppContext app` and Given-phase staging combinators |
 | `LazyCircus.Testing.Bdd.Runner` | `gherkinSpec`: hspec tree, coverage meta-test, ambiguity probe, `@blocked` |
 
@@ -133,7 +135,9 @@ registry = mkRegistry
 ```haskell
 data Observation app
     = ObsTgMessage  { obsChatId :: Maybe ChatId, obsText :: Text
-                    , obsMsgId :: MessageId, obsMarkup :: Maybe SomeReplyMarkup }
+                    , obsMsgId :: MessageId
+                    , obsThreadId :: Maybe MessageThreadId   -- send request's message_thread_id
+                    , obsMarkup :: Maybe SomeReplyMarkup }
     | ObsTgDocument { obsChatId :: Maybe ChatId, obsFileId :: Maybe FileId }
     | ObsTgPoll     { obsChatId :: Maybe ChatId, obsMsgId :: MessageId
                     , obsPollId :: PollId, obsQuestion :: Text, obsOptions :: [Text]
@@ -396,7 +400,7 @@ When the default user takes the stage       # back to defaultTestUserId (1001)
 
 - `memberTakesStage` / `defaultUserTakesStage` only change WHO "the user" is —
   input verbs stay single-form instead of sprouting `member<Verb>` variants. The
-  actor rides in `ssActingUser :: Maybe UserId`, the only non-derived field of
+  actor rides in `ssActingUser :: Maybe UserId`, a non-derived field of
   `ScenarioState`: it survives every `awaitObservation` (record update) and
   resets per scenario (`freshScenarioState` seeds `Nothing`).
 - The member-named vote steps (`memberVotesFor` / `memberVotesIn`) are explicit
@@ -407,6 +411,55 @@ When the default user takes the stage       # back to defaultTestUserId (1001)
   call the `*ByUser` DSL ops (`sendMessageByUser`, `sendDocumentByUser`,
   `sendKeypressByUser`, ...). The library `userSends` ("the user sends "$msg"")
   already does.
+
+## The Active Thread
+
+Every user-input text step addresses the state's CURRENT forum topic
+(`actingThreadId :: ScenarioState app -> Maybe MessageThreadId`): the main
+chat (the fed update carries NO `message_thread_id`) until a
+moves-to-the-thread step selects a topic. The switches (library `When` steps):
+
+```gherkin
+When the dialog moves to the thread "42"   # every "the user sends ..." targets topic 42
+And the user sends "в тему"                # a forum-topic post with message_thread_id = 42
+And the user sends "тоже в тему" as "rep"  # userSendsAs honors the thread too
+When the dialog returns to the main chat   # updates carry no message_thread_id again
+```
+
+- `dialogMovesToThread` / `dialogReturnsToMainChat` only change WHERE "the
+  user" writes; they COMPOSE with the acting user — switching actors does not
+  move the chat, moving the thread does not change who acts. The thread rides
+  in `ssThreadId :: Maybe MessageThreadId` of `ScenarioState`: a non-derived
+  field like `ssActingUser` — it survives every `awaitObservation` and resets
+  per scenario.
+- A `Just` thread renders the fed update the way Telegram reports a forum
+  post: `message_thread_id`, `is_topic_message = true`, and the chat becomes a
+  supergroup with `is_forum = true` (a `Nothing` thread leaves the payload
+  byte-identical to the plain private-chat one). Bot-side the thread is read
+  with `messageMessageThreadId` / `messageIsTopicMessage` — a handler echoing
+  the thread back sets `sendMessageMessageThreadId` on its send request.
+- Where the BOT replied is observable too: the mocked performer records
+  `obsThreadId :: Maybe MessageThreadId` on every journaled `ObsTgMessage`
+  (from `sendMessageMessageThreadId` of the send request; `Nothing` = the
+  main chat). The `Then` checks assert the LAST CONSUMED reply's location
+  without waiting or consuming:
+
+```gherkin
+Then the bot replies with "[topic] into the topic"
+And the bot replies in the thread "42"       # obsThreadId = Just (MessageThreadId 42)
+...
+And the bot replies in the main chat         # obsThreadId = Nothing
+```
+
+- Spec-local input steps should honor the thread too: read `actingThreadId st`
+  and call the `*InThread` DSL ops (`sendMessageByUserInThread`,
+  `sendReplyByUserInThread`, `sendDocumentByUserInThread` — each takes a
+  `Maybe MessageThreadId` before the payload, `Nothing` = the main chat). The
+  library `userSends` / `userSendsAs` already do.
+- A working end-to-end example (a thread-echo bot mirroring the incoming
+  `message_thread_id` back into its reply, round trip into a topic and back,
+  the thread surviving an actor switch) lives in
+  `testing/test/Bdd/ThreadSpec.hs` — mirror it for your own forum flows.
 
 ## The Runner (`gherkinSpec`)
 
@@ -496,6 +549,8 @@ DB and HTTP are the only always-real sub-languages and the echo never touches th
   within a class, registration order decides)?
 - Are `Given` steps before the first `When`/`Then`, and is the default context empty unless
   fixtures are explicitly staged?
+- Do spec-local input steps honor the acting user AND the active thread (`actingUserId st`,
+  `actingThreadId st` + the `*ByUser` / `*ByUserInThread` DSL ops)?
 - Is each `Then` consuming exactly one observation, with `And`-continuations reading via
   `peekLastConsumed` (never waiting, never consuming)?
 - Are app-specific facts journaled as `ObsApp` (hooks or direct append) instead of
