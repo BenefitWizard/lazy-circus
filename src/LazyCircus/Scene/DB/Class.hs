@@ -39,7 +39,7 @@ import LazyCircus.DB.Service
 import LazyCircus.DB.Types (PgDB)
 import LazyCircus.Scene.DB.Lang
 import LazyCircus.Scene.DB.RLS (RLSContext, setRLSContext)
-import LazyCircus.Scene.Log (handleLogLang, timedAndLog)
+import LazyCircus.Scene.Log (handleLogLang, timedAndLog, timedAndLogCtx)
 import LazyCircus.Scenario (DbMode (..))
 import RIO
 
@@ -62,8 +62,8 @@ class (Monad m) => DBScriptPerformer m where
     update' :: (HasUpdateService db table) => PgDB db -> DbMode -> table Maybe -> LId table -> m [table Identity]
     updateMany' :: (HasUpdateService db table) => PgDB db -> DbMode -> table Maybe -> [LId table] -> m [table Identity]
     delete' :: (HasDeleteService db table) => PgDB db -> DbMode -> LId table -> m ()
-    runQuery' :: PgDB db -> DbMode -> (PgDB db -> Pg b) -> m b
-    rawQuery' :: (Simple.FromRow b) => DbMode -> Simple.Query -> [ToField.Action] -> m [b]
+    runQuery' :: PgDB db -> DbMode -> Text -> (PgDB db -> Pg b) -> m b
+    rawQuery' :: (Simple.FromRow b) => DbMode -> Text -> Simple.Query -> [ToField.Action] -> m [b]
     withTransaction' :: PgDB db -> DbMode -> Maybe RLSContext -> DBScript db b -> m b
 
 instance
@@ -131,11 +131,11 @@ instance
         liftIO $ runBeamPostgres conn $ runDelete $
             Beam.delete (getTargetTable db) (\t -> generateFiltration db lid t)
 
-    runQuery' db _mode pg = timedAndLog "DB" "RunQuery" $ do
+    runQuery' db _mode name pg = timedAndLogCtx "DB" "RunQuery" [("query", name)] $ do
         conn <- view dbConnectionL
         liftIO $ runBeamPostgres conn (pg db)
 
-    rawQuery' _mode q params = timedAndLog "DB" "RawQuery" $ do
+    rawQuery' _mode name q params = timedAndLogCtx "DB" "RawQuery" [("query", name)] $ do
         conn <- view dbConnectionL
         liftIO $ Simple.query conn q params
 
@@ -201,11 +201,11 @@ runDB db mode = iterM go
         ensureReadWrite mode
         delete' db mode lid
         next
-    go (RunQuery pg next) = do
-        result <- runQuery' db mode pg
+    go (RunQuery name pg next) = do
+        result <- runQuery' db mode name pg
         next result
-    go (RawQuery q params next) = do
-        result <- rawQuery' mode q params
+    go (RawQuery name q params next) = do
+        result <- rawQuery' mode name q params
         next result
     go (WithTransaction mCtx script next) = do
         result <- withTransaction' db mode mCtx script

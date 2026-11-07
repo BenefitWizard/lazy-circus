@@ -118,7 +118,7 @@ withWorkerPool size app =
 
 -- | Reads the backend pid after holding the connection briefly.
 heldPidScript :: DBScript SimpleDb [Only Int]
-heldPidScript = rawQuery heldPidQuery []
+heldPidScript = rawQuery "held-pid" heldPidQuery []
 
 -- | Inside one transaction: acquires the fixed-key transactional advisory lock,
 -- then reads the backend pid while holding the connection briefly, so the
@@ -126,8 +126,8 @@ heldPidScript = rawQuery heldPidQuery []
 -- blocks on the same lock.
 advisoryPidScript :: DBScript SimpleDb [Only Int]
 advisoryPidScript = withTransaction $ do
-    _ :: [Only Int] <- rawQuery advisoryLockQuery [toField advisoryLockKey]
-    rawQuery heldPidQuery []
+    _ :: [Only Int] <- rawQuery "advisory-lock" advisoryLockQuery [toField advisoryLockKey]
+    rawQuery "held-pid" heldPidQuery []
 
 -- | Inserts one marker row via the 'simpleDb' create service.
 insertActScenario :: Text -> ScenarioProgram Script NoServiceLib ()

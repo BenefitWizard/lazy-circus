@@ -86,8 +86,8 @@ data DBLangF db a where
     CreateAsIs :: (HasCreateService db table) => [table Identity] -> ([table Identity] -> a) -> DBLangF db a
     Find :: (HasReadService db table) => LId table -> ([table Identity] -> a) -> DBLangF db a
     LockAndFind :: (HasReadService db table) => LockSpec -> LId table -> ([table Identity] -> a) -> DBLangF db a
-    RunQuery :: (PgDB db -> Pg b) -> (b -> a) -> DBLangF db a
-    RawQuery :: (Simple.FromRow b) => Simple.Query -> [ToField.Action] -> ([b] -> a) -> DBLangF db a
+    RunQuery :: Text -> (PgDB db -> Pg b) -> (b -> a) -> DBLangF db a
+    RawQuery :: (Simple.FromRow b) => Text -> Simple.Query -> [ToField.Action] -> ([b] -> a) -> DBLangF db a
     WithTransaction :: Maybe RLSContext -> DBScript db b -> (b -> a) -> DBLangF db a
     DBLog :: LogLangF (DBScript db) b -> (b -> a) -> DBLangF db a
 
@@ -99,8 +99,8 @@ instance Functor (DBLangF db) where
     fmap f (Update table lid next) = Update table lid (f . next)
     fmap f (Find lid next) = Find lid (f . next)
     fmap f (LockAndFind spec lid next) = LockAndFind spec lid (f . next)
-    fmap f (RunQuery pg next) = RunQuery pg (f . next)
-    fmap f (RawQuery q params next) = RawQuery q params (f . next)
+    fmap f (RunQuery name pg next) = RunQuery name pg (f . next)
+    fmap f (RawQuery name q params next) = RawQuery name q params (f . next)
     fmap f (WithTransaction ctx db next) = WithTransaction ctx db (f . next)
     fmap f (UpdateMany table lids next) = UpdateMany table lids (f . next)
     fmap f (DBLog logOp next) = DBLog logOp (f . next)
@@ -208,19 +208,23 @@ NOTE: With 'WaitSkipLocked', 'Nothing' is ambiguous: it means either "no such ro
 findLocked :: (HasReadService db table) => LockSpec -> LId table -> F (DBLangF db) (Maybe (table Identity))
 findLocked spec lid = liftFC $ LockAndFind spec lid listToMaybe
 
-{- | Lifts a raw Beam query into the database script language.
-PRE-CONTRACT: The query must be valid for the selected database schema.
+{- | Lifts a raw Beam query into the database script language under a caller-supplied query name.
+The name is mandatory and identifies the query in timing logs (context key @query@), so every
+ad-hoc query is traceable to its call site by a stable, human-readable label.
+PRE-CONTRACT: The query must be valid for the selected database schema; the name must be non-empty.
 POST-CONTRACT: Produces a script that returns the query result supplied by the interpreter.
 -}
-runQuery :: (PgDB db -> Pg b) -> F (DBLangF db) b
-runQuery pg = liftFC $ RunQuery pg id
+runQuery :: Text -> (PgDB db -> Pg b) -> F (DBLangF db) b
+runQuery name pg = liftFC $ RunQuery name pg id
 
-{- | Lifts a raw SQL SELECT query into the database script language.
-PRE-CONTRACT: The SQL must be a parameterized SELECT statement whose result rows can be decoded with the supplied 'Simple.FromRow' instance.
+{- | Lifts a raw SQL SELECT query into the database script language under a caller-supplied query name.
+The name is mandatory and identifies the query in timing logs (context key @query@), so every
+ad-hoc query is traceable to its call site by a stable, human-readable label.
+PRE-CONTRACT: The SQL must be a parameterized SELECT statement whose result rows can be decoded with the supplied 'Simple.FromRow' instance; the name must be non-empty.
 POST-CONTRACT: Produces a script that returns all rows decoded by the interpreter.
 -}
-rawQuery :: (Simple.FromRow b) => Simple.Query -> [ToField.Action] -> F (DBLangF db) [b]
-rawQuery q params = liftFC $ RawQuery q params id
+rawQuery :: (Simple.FromRow b) => Text -> Simple.Query -> [ToField.Action] -> F (DBLangF db) [b]
+rawQuery name q params = liftFC $ RawQuery name q params id
 
 {- | Lifts a database subprogram so an interpreter can run it transactionally.
 PRE-CONTRACT: The nested script must be valid for the same database language.

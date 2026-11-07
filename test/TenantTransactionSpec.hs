@@ -98,17 +98,17 @@ doomedActMaybe =
 -- | Failing probe: a raw query naming a nonexistent column, so the SQL error
 -- surfaces from PostgreSQL itself.
 badQuery :: DBScript SimpleDb [Only Int]
-badQuery = rawQuery (Query "SELECT definitely_missing_column FROM circus_acts") []
+badQuery = rawQuery "select-missing-column" (Query "SELECT definitely_missing_column FROM circus_acts") []
 
 -- | Counts the rows left in the demo table.
 countActs :: DBScript SimpleDb [Only Int64]
-countActs = rawQuery (Query "SELECT count(*) FROM circus_acts") []
+countActs = rawQuery "count-acts" (Query "SELECT count(*) FROM circus_acts") []
 
 -- | Reads the tenant setting (required form) and the backend pid of the session.
 settingAndPid :: DBScript SimpleDb [(Text, Int32)]
-settingAndPid = rawQuery (Query "SELECT current_setting('rls.circus_id'), pg_backend_pid()") []
+settingAndPid = rawQuery "tenant-setting-and-pid" (Query "SELECT current_setting('rls.circus_id'), pg_backend_pid()") []
 
 -- | Reads the tenant setting in missing-ok form together with the backend pid,
 -- so the same session can be identified across two consecutive scripts.
 settingAndPidMissingOk :: DBScript SimpleDb [(Maybe Text, Int32)]
-settingAndPidMissingOk = rawQuery (Query "SELECT current_setting('rls.circus_id', true), pg_backend_pid()") []
+settingAndPidMissingOk = rawQuery "tenant-setting-and-pid-missing-ok" (Query "SELECT current_setting('rls.circus_id', true), pg_backend_pid()") []

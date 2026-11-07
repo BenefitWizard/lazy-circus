@@ -259,7 +259,7 @@ listActs :: ScenarioProgram Script serviceLib [CircusAct]
 listActs = do
     evalScript
         $ dbScript simpleDb ReadOnly
-        $ rawQuery "SELECT id, name, circus_id, description, audience_reaction FROM circus_acts ORDER BY id" []
+        $ rawQuery "list-circus-acts" "SELECT id, name, circus_id, description, audience_reaction FROM circus_acts ORDER BY id" []
 
 {- | Look up a single circus act by its id.
 PRE-CONTRACT: None.

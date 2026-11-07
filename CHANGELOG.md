@@ -63,6 +63,14 @@ and this project adheres to the
   (`echoes twice with different words`).
 
 ### Changed
+- **(Breaking)** `runQuery` and `rawQuery` in `LazyCircus.Scene.DB.Lang` take a mandatory
+  query name as their first argument (`Text`, kebab-case label of the query's purpose).
+  The interpreter logs the timing line with the name in the log-context key `query`
+  (`op` stays `"RunQuery"`/`"RawQuery"`), making every ad-hoc query identifiable in logs.
+  The `DBLangF` constructors `RunQuery`/`RawQuery` and the `DBScriptPerformer` methods
+  `runQuery'`/`rawQuery'` carry the name too (breaking for external pattern matches and
+  instances). `timedAndLog` in `LazyCircus.Scene.Log` is now the `[]` special case of the
+  newly exported `timedAndLogCtx`, which merges extra context entries into the timing log.
 - **(Breaking)** `ObsTgPoll` in `LazyCircus.Testing.Bdd.Journal` gained `obsMsgId`,
   `obsPollId` and `obsOptions` fields (the mocked performer journals the full shape —
   option texts projected from the request). Update constructors in tests accordingly.

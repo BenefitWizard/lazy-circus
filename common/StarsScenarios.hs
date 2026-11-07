@@ -178,7 +178,7 @@ insertStarsPaymentRow ::
     Text ->
     DBScript SimpleDb [StarsPayment]
 insertStarsPaymentRow now chargeId userId stars fiatAmount payload =
-    runQuery $ \db ->
+    runQuery "insert-stars-payment" $ \db ->
         runInsertReturningList $
             insertOnConflict
                 (_starsPayments db)

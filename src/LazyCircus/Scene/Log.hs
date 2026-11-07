@@ -19,6 +19,7 @@ module LazyCircus.Scene.Log (
     slogNotice,
     swithLogCtx,
     timedAndLog,
+    timedAndLogCtx,
     handleLogLang,
 )
 where
@@ -126,7 +127,29 @@ timedAndLog ::
     Text ->
     m a ->
     m a
-timedAndLog langTag opName action = do
+timedAndLog langTag opName = timedAndLogCtx langTag opName []
+
+{- | Run an action, measure elapsed time, emit a structured scene log with extra context entries.
+-- Log context receives 'lang', 'op', and 'elapsed_ms' keys merged with the supplied extras
+-- (extras win on key collisions with the ambient context).
+-- The timing log is emitted even when the action throws, then the exception is re-thrown.
+-- PRE-CONTRACT: The environment must provide 'HasLogQueue' and 'HasLoggingContext'.
+-- POST-CONTRACT: The action result is returned unchanged; a timing log is emitted to the queue.
+-}
+timedAndLogCtx ::
+    ( HasCallStack
+    , HasLogQueue env
+    , HasLoggingContext env
+    , MonadReader env m
+    , MonadIO m
+    , MonadUnliftIO m
+    ) =>
+    Text ->
+    Text ->
+    [(Text, Text)] ->
+    m a ->
+    m a
+timedAndLogCtx langTag opName extraCtx action = do
     start <- liftIO getCurrentTime
     eres <- tryAny action
     end <- liftIO getCurrentTime
@@ -134,8 +157,8 @@ timedAndLog langTag opName action = do
         callSite = extractCallSite callStack
     q <- view logQueueL
     logCtx <- view logContextL
-    let enrichedCtx = putInLoggingContext logCtx
-            [("lang", langTag), ("op", opName), ("elapsed_ms", msFormat elapsed)]
+    let enrichedCtx = putInLoggingContext logCtx $
+            [("lang", langTag), ("op", opName), ("elapsed_ms", msFormat elapsed)] <> extraCtx
         msg = AppLogMsgWithContext (AppLogMsg $ langTag <> "." <> opName) enrichedCtx callSite
     atomically $ writeTQueue q msg
     case eres of

@@ -172,7 +172,7 @@ dbAdvancedScenario = do
     -- WithTransaction
     result <- evalScript $ dbScript simpleDb ReadWrite $ withTransaction $ do
         slogInfo "Inside transaction"
-        rows <- rawQuery "SELECT name FROM circus_acts WHERE circus_id = ?" [toField (2 :: Int32)]
+        rows <- rawQuery "demo-acts-by-circus" "SELECT name FROM circus_acts WHERE circus_id = ?" [toField (2 :: Int32)]
         pure (rows :: [Only Text])
     logInfo $ "Transaction found " <> tshow (length result) <> " rows"
     -- WithTransactionRLS

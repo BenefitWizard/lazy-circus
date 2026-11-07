@@ -36,8 +36,8 @@ Main operations:
 | `update` / `updateMany` | updated rows (sparse patch — see below) |
 | `upsert` / `upsertMany` | inserted-or-updated rows (sparse patch — see below) |
 | `delete` | `()` |
-| `runQuery` | Beam query result |
-| `rawQuery` | decoded SQL rows |
+| `runQuery` | Beam query result (mandatory query name, logged as context key `query`) |
+| `rawQuery` | decoded SQL rows (mandatory query name, logged as context key `query`) |
 | `withTransaction` | transactional nested script |
 | `withTransactionRLS` | transaction with row-level security context |
 
@@ -56,8 +56,8 @@ updateMany         :: HasUpdateService db table => table Maybe -> [LId table] ->
 upsert             :: HasUpsertService db table => table Maybe -> DBScript db (Maybe (table Identity))
 upsertMany         :: HasUpsertService db table => [table Maybe] -> DBScript db [table Identity]
 delete             :: HasDeleteService db table => LId table -> DBScript db ()
-runQuery           :: (PgDB db -> Pg b) -> DBScript db b
-rawQuery           :: FromRow b => Query -> [Action] -> DBScript db [b]
+runQuery           :: Text -> (PgDB db -> Pg b) -> DBScript db b
+rawQuery           :: FromRow b => Text -> Query -> [Action] -> DBScript db [b]
 withTransaction    :: DBScript db b -> DBScript db b
 withTransactionRLS :: RLSContext -> DBScript db b -> DBScript db b
 ```
@@ -95,6 +95,7 @@ Important DB semantics:
 - `upsert` / `upsertMany` run `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. The conflict key is fixed per table by its `HasUpsertService` instance — the primary key or a unique key (e.g. an idempotency key). On the conflict branch the patch is sparse exactly like `update` (`Nothing` keeps the stored value); on the insert branch `Nothing` takes the column default, like `create`. RETURNING yields every affected row, inserted or updated. A write operation: blocked in `ReadOnly` mode.
 - POSTGRES TRAP (upsert): the would-be INSERT row is fully validated BEFORE conflict resolution — NOT NULL constraints and RLS `WITH CHECK` apply to it even when the row conflicts and takes the DO UPDATE branch. A patch that leaves a NOT NULL column without a database default as `Nothing` fails with `23502` (or `42501` under RLS) even though the row already exists. Carry `Just` values for every such column.
 - `upsertMany` executes one `INSERT ... ON CONFLICT` statement per row on the script's connection (a single statement cannot carry per-row patches); wrap in `withTransaction` when a batch must be atomic.
+- `runQuery` / `rawQuery` take a mandatory query name as their first argument; the interpreter logs the timing line with `op = "RunQuery"`/`"RawQuery"` and the name in the log-context key `query`, so every ad-hoc query is identifiable in logs by a stable human-readable label. Pick kebab-case names describing the query's purpose (`"insert-stars-payment"`, `"list-circus-acts"`), not the SQL text.
 - `withTransactionRLS` applies `SET LOCAL rls.<key> = ?` inside the transaction; the context is built directly, e.g. `RLSContext [("circus_id", "42")]`, and contexts combine with `<>` / `mempty`
 
 Narrowing a result list to its only expected element is done by the pure helper
@@ -112,7 +113,7 @@ it works inside `runQuery` (in the `Pg` monad, where the `fail` surfaces as a
 `SomeException` at the scenario layer) as well as in DB-free pure tests:
 
 ```haskell
-runQuery $ \db -> do
+runQuery "all-circus-acts" $ \db -> do
     acts <- select (all_ (dbCircusActs db))
     exactlyOne "circus act" acts
 ```

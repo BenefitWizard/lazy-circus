@@ -184,6 +184,7 @@ spec = aroundAll withFreshTestDb $ do
                     simpleDb
                     ReadWrite
                     ( rawQuery
+                        "select-stars-payments"
                         (Query "SELECT id, telegram_payment_charge_id, user_id, stars, currency_amount, invoice_payload, created_at FROM stars_payments")
                         []
                     )
@@ -206,7 +207,7 @@ spec = aroundAll withFreshTestDb $ do
                 runDbScript
                     simpleDb
                     ReadWrite
-                    (rawQuery rawSelect [ToField.toField (7 :: Int32)])
+                    (rawQuery "select-act-names-by-circus" rawSelect [ToField.toField (7 :: Int32)])
                     env
 
             rows `shouldSatisfy` (Only ("Acrobats" :: String) `elem`)
@@ -260,7 +261,7 @@ spec = aroundAll withFreshTestDb $ do
 
         it "withTransactionRLS exposes local RLS settings inside the transaction" $ \env -> do
             let checkRlsScript = withTransactionRLS (rlsCircusId 42) $ do
-                    vals <- rawQuery (Query "SELECT current_setting('rls.circus_id')") []
+                    vals <- rawQuery "read-rls-setting" (Query "SELECT current_setting('rls.circus_id')") []
                     pure vals
 
             vals <- runDbScript simpleDb ReadWrite checkRlsScript env
@@ -273,7 +274,7 @@ spec = aroundAll withFreshTestDb $ do
             _ <- runDbScript simpleDb ReadWrite (createMany [circusActMaybe, secondCircusActMaybe]) env
 
             let rlsSelectScript = withTransactionRLS (rlsCircusId 7) $ do
-                    rawQuery (Query "SELECT id, name, circus_id, description, audience_reaction FROM circus_acts ORDER BY id") []
+                    rawQuery "select-acts-under-rls" (Query "SELECT id, name, circus_id, description, audience_reaction FROM circus_acts ORDER BY id") []
 
             rows <- runDbScript simpleDb ReadWrite rlsSelectScript env
             rows `shouldSatisfy` (not . null)
@@ -408,7 +409,7 @@ sharedReactionPatch =
         }
 
 badQuery :: DBScript SimpleDb [Only Int]
-badQuery = rawQuery (Query "SELECT definitely_missing_column FROM circus_acts") []
+badQuery = rawQuery "select-missing-column" (Query "SELECT definitely_missing_column FROM circus_acts") []
 
 findCircusAct :: Int32 -> DBScript SimpleDb (Maybe CircusAct)
 findCircusAct actId = find (CircusActId actId :: CircusActId)
